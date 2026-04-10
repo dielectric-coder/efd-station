@@ -2,6 +2,15 @@
 
 All notable changes to efd-station are documented in this file.
 
+## [0.4.1] - 2026-04-10
+
+### Fixed
+- CAT serial: validate response prefix matches command sent, discard stale
+  responses from previous commands (was reading SM/RI as IF responses)
+- CAT poll checks cancel between serial commands for faster shutdown
+- update-pi.sh: stop old server before installing new one (USB Resource busy)
+- Waterfall: pixel buffer rendering with safe surface creation (no more unsafe)
+
 ## [0.4.0] - 2026-04-10
 
 ### Security

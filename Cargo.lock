@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "efd-client"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bincode",
  "efd-proto",
@@ -361,7 +361,7 @@ dependencies = [
 
 [[package]]
 name = "efd-server"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "axum",
  "bincode",
