@@ -1,6 +1,6 @@
 use efd_proto::{ClientMsg, Ptt, RadioState};
 use gtk4::prelude::*;
-use gtk4::{Box as GtkBox, Label, LevelBar, Orientation, ToggleButton};
+use gtk4::{Align, Box as GtkBox, Label, LevelBar, Orientation, ToggleButton};
 use tokio::sync::mpsc;
 
 #[derive(Clone)]
@@ -17,11 +17,12 @@ pub struct Controls {
 
 impl Controls {
     pub fn new(ws_tx: mpsc::UnboundedSender<ClientMsg>) -> Self {
-        let container = GtkBox::new(Orientation::Horizontal, 8);
+        let container = GtkBox::new(Orientation::Horizontal, 12);
         container.set_margin_start(8);
         container.set_margin_end(8);
         container.set_margin_top(4);
         container.set_margin_bottom(4);
+        container.set_halign(Align::Center);
 
         let vfo_label = Label::new(Some("VFO A"));
         vfo_label.add_css_class("monospace");
@@ -42,14 +43,17 @@ impl Controls {
 
         // S-meter
         let smeter_box = GtkBox::new(Orientation::Horizontal, 4);
+        smeter_box.set_valign(Align::Center);
         let smeter_title = Label::new(Some("S:"));
         smeter_box.append(&smeter_title);
 
         let smeter = LevelBar::new();
         smeter.set_min_value(0.0);
-        smeter.set_max_value(30.0); // 0=S0, 15=S9, 30=S9+60
+        smeter.set_max_value(30.0);
         smeter.set_value(0.0);
-        smeter.set_width_request(120);
+        smeter.set_width_request(100);
+        smeter.set_height_request(8);
+        smeter.set_valign(Align::Center);
         smeter_box.append(&smeter);
 
         let smeter_label = Label::new(Some("S0"));
@@ -62,13 +66,9 @@ impl Controls {
         tx_label.add_css_class("monospace");
         container.append(&tx_label);
 
-        // Spacer
-        let spacer = GtkBox::new(Orientation::Horizontal, 0);
-        spacer.set_hexpand(true);
-        container.append(&spacer);
-
         // PTT button
         let ptt_btn = ToggleButton::with_label("PTT");
+        ptt_btn.set_valign(Align::Center);
         let tx = ws_tx;
         ptt_btn.connect_toggled(move |btn| {
             let on = btn.is_active();
@@ -93,7 +93,6 @@ impl Controls {
     }
 
     pub fn update(&self, state: &RadioState) {
-        // Format frequency with thousands separators
         let freq = format_freq(state.freq_hz);
         self.freq_label
             .set_markup(&format!("<span font='18' weight='bold'>{freq}</span>"));
@@ -103,7 +102,6 @@ impl Controls {
         self.bw_label
             .set_text(&format!("BW: {}", state.filter_bw));
 
-        // S-meter: convert dBm to Kenwood scale (0-30)
         let s_reading = db_to_s_reading(state.s_meter_db);
         self.smeter.set_value(s_reading as f64);
         self.smeter_label.set_text(&s_reading_to_string(s_reading));
@@ -132,7 +130,6 @@ fn format_freq(hz: u64) -> String {
 }
 
 fn db_to_s_reading(db: f32) -> f32 {
-    // S0=-127, S9=-73, S9+60=-13
     if db <= -127.0 {
         0.0
     } else if db <= -73.0 {
