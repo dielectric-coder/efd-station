@@ -40,6 +40,14 @@ pub struct CatConfig {
     pub rigctld_host: String,
     pub rigctld_port: u16,
     pub poll_interval_ms: u64,
+    /// Serial device for rigctld. "auto" scans /dev/serial/by-id/ for the
+    /// FDM-DUO. "none" skips rigctld management (assume it's already running).
+    /// Otherwise, a specific path like "/dev/ttyUSB0".
+    pub serial_device: String,
+    /// Hamlib model number for rigctld -m flag (3077 = Elad FDM-DUO).
+    pub rigctld_model: u32,
+    /// Baud rate for rigctld -s flag.
+    pub baud_rate: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +105,9 @@ impl Default for CatConfig {
             rigctld_host: "127.0.0.1".into(),
             rigctld_port: 4532,
             poll_interval_ms: 200,
+            serial_device: "auto".into(),
+            rigctld_model: 3077,
+            baud_rate: 38400,
         }
     }
 }

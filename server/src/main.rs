@@ -24,7 +24,7 @@ async fn main() {
     info!(bind = %cfg.server.bind, port = cfg.server.port, "starting efd-backend");
 
     let cancel = CancellationToken::new();
-    let pipeline = pipeline::Pipeline::start(&cfg);
+    let pipeline = pipeline::Pipeline::start(&cfg).await;
 
     let state = Arc::new(AppState {
         pipeline,
