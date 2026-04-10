@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -31,22 +31,34 @@ impl Default for IqConfig {
 /// Spawn a blocking task that opens the FDM-DUO, streams IQ data, and
 /// publishes `Arc<IqBlock>` on the broadcast channel.
 ///
+/// Also publishes the FPGA center frequency (LO) via `center_freq_tx`.
 /// The task runs until `cancel` is triggered or a fatal USB error occurs.
 pub fn spawn_iq_capture(
     config: IqConfig,
     tx: broadcast::Sender<Arc<IqBlock>>,
+    center_freq_tx: watch::Sender<u64>,
     cancel: CancellationToken,
 ) -> JoinHandle<Result<(), IqError>> {
-    tokio::task::spawn_blocking(move || run_capture(config, tx, cancel))
+    tokio::task::spawn_blocking(move || run_capture(config, tx, center_freq_tx, cancel))
 }
 
 fn run_capture(
     config: IqConfig,
     tx: broadcast::Sender<Arc<IqBlock>>,
+    center_freq_tx: watch::Sender<u64>,
     cancel: CancellationToken,
 ) -> Result<(), IqError> {
     let dev = FdmDuo::open_with_ids(config.vendor_id, config.product_id)?;
     dev.start_streaming()?;
+
+    // Read initial FPGA center frequency
+    match dev.read_frequency() {
+        Ok(freq) => {
+            info!("IQ center frequency: {freq} Hz");
+            let _ = center_freq_tx.send(freq);
+        }
+        Err(e) => warn!("could not read FPGA frequency: {e}"),
+    }
 
     info!("IQ capture started (clock={})", dev.effective_clock());
 
@@ -76,6 +88,12 @@ fn run_capture(
                 block_count += 1;
                 if block_count % 1000 == 0 {
                     debug!(block_count, "IQ blocks captured");
+                }
+                // Periodically re-read FPGA center frequency (LO may change)
+                if block_count % 500 == 0 {
+                    if let Ok(freq) = dev.read_frequency() {
+                        let _ = center_freq_tx.send(freq);
+                    }
                 }
             }
             Ok(_) => {

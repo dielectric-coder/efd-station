@@ -29,6 +29,7 @@ fn load_css() {
         "
         * {
             font-family: 'Hack Nerd Font Mono', monospace;
+            font-size: 11pt;
         }
         .tx-rx-rx {
             background-color: #2e7d32;

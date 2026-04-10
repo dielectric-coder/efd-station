@@ -45,6 +45,7 @@ impl Pipeline {
         let mut tasks: Vec<(&'static str, JoinHandle<()>)> = Vec::new();
 
         // --- IQ capture task ---
+        let (iq_center_tx, iq_center_rx) = tokio::sync::watch::channel(0u64);
         {
             let iq_cfg = efd_iq::IqConfig {
                 vendor_id: config.usb.vendor_id,
@@ -52,7 +53,7 @@ impl Pipeline {
             };
             let tx = iq_tx.clone();
             let c = cancel.clone();
-            let handle = efd_iq::spawn_iq_capture(iq_cfg, tx, c);
+            let handle = efd_iq::spawn_iq_capture(iq_cfg, tx, iq_center_tx, c);
             let handle = tokio::spawn(async move {
                 match handle.await {
                     Ok(Ok(())) => info!("IQ capture exited cleanly"),
@@ -87,7 +88,8 @@ impl Pipeline {
         }
 
         // --- Demod task ---
-        let (demod_mode_tx, demod_mode_rx) = tokio::sync::watch::channel(efd_proto::Mode::USB);
+        let (demod_tuning_tx, demod_tuning_rx) =
+            tokio::sync::watch::channel(efd_dsp::DemodTuning::default());
         {
             let iq_rx = iq_tx.subscribe();
             let demod_cfg = efd_dsp::DemodConfig {
@@ -97,7 +99,7 @@ impl Pipeline {
             };
             let dtx = demod_audio_tx;
             let c = cancel.clone();
-            let handle = efd_dsp::spawn_demod_task(iq_rx, dtx, demod_cfg, demod_mode_rx, c);
+            let handle = efd_dsp::spawn_demod_task(iq_rx, dtx, demod_cfg, demod_tuning_rx, c);
             let handle = tokio::spawn(async move {
                 match handle.await {
                     Ok(Ok(())) => info!("demod task exited cleanly"),
@@ -192,10 +194,11 @@ impl Pipeline {
             tasks.push(("cat_cmd", cmd_w));
         }
 
-        // --- Mode forwarder: RadioState → demod mode watch ---
+        // --- Tuning forwarder: RadioState + IQ center → demod tuning ---
         {
             let mut state_rx = state_tx.subscribe();
-            let mode_tx = demod_mode_tx;
+            let tuning_tx = demod_tuning_tx;
+            let iq_center = iq_center_rx;
             let c = cancel.clone();
             let handle = tokio::spawn(async move {
                 loop {
@@ -203,7 +206,20 @@ impl Pipeline {
                         _ = c.cancelled() => break,
                         result = state_rx.recv() => {
                             match result {
-                                Ok(state) => { let _ = mode_tx.send(state.mode); }
+                                Ok(state) => {
+                                    let iq_center_hz = *iq_center.borrow();
+                                    let vfo_offset = if iq_center_hz > 0 {
+                                        state.freq_hz as f64 - iq_center_hz as f64
+                                    } else {
+                                        0.0 // IQ center unknown, assume VFO at center
+                                    };
+                                    let filter_bw = parse_filter_bw(&state.filter_bw);
+                                    let _ = tuning_tx.send(efd_dsp::DemodTuning {
+                                        mode: state.mode,
+                                        vfo_offset_hz: vfo_offset,
+                                        filter_bw_hz: filter_bw,
+                                    });
+                                }
                                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                                 Err(broadcast::error::RecvError::Closed) => break,
                             }
@@ -211,7 +227,7 @@ impl Pipeline {
                     }
                 }
             });
-            tasks.push(("mode_fwd", handle));
+            tasks.push(("tuning_fwd", handle));
         }
 
         info!(tasks = tasks.len(), "pipeline started");
@@ -278,6 +294,25 @@ async fn encode_audio_to_opus(
                         frame_buf.clear();
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Parse FDM-DUO filter bandwidth string to Hz.
+fn parse_filter_bw(bw: &str) -> f64 {
+    let s = bw.trim();
+    match s {
+        "Narrow" => 6_000.0,
+        "Wide" => 15_000.0,
+        "Data" => 9_000.0,
+        _ => {
+            let s = s.strip_prefix('D').unwrap_or(s);
+            let s = s.split('&').next().unwrap_or(s);
+            if let Some(num) = s.strip_suffix('k') {
+                num.parse::<f64>().unwrap_or(3000.0) * 1000.0
+            } else {
+                s.parse::<f64>().unwrap_or(3000.0)
             }
         }
     }

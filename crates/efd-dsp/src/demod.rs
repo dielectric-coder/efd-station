@@ -1,3 +1,4 @@
+use std::f32::consts::PI;
 use std::sync::Arc;
 
 use efd_proto::Mode;
@@ -32,6 +33,27 @@ impl Default for DemodConfig {
     }
 }
 
+/// Runtime tuning parameters for the demod task.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DemodTuning {
+    pub mode: Mode,
+    /// VFO offset from IQ center in Hz (positive = above center).
+    /// The demod will frequency-shift the IQ stream by this amount.
+    pub vfo_offset_hz: f64,
+    /// Channel filter bandwidth in Hz.
+    pub filter_bw_hz: f64,
+}
+
+impl Default for DemodTuning {
+    fn default() -> Self {
+        Self {
+            mode: Mode::USB,
+            vfo_offset_hz: 0.0,
+            filter_bw_hz: 3000.0,
+        }
+    }
+}
+
 /// A block of demodulated audio samples (mono f32, at output_rate).
 #[derive(Debug, Clone)]
 pub struct AudioBlock {
@@ -42,39 +64,142 @@ pub struct AudioBlock {
 
 /// Spawn the demodulator task.
 ///
-/// Consumes IQ blocks, demodulates to audio, decimates to output_rate,
-/// and sends `AudioBlock` to the mpsc channel.
+/// Consumes IQ blocks, frequency-shifts to VFO, applies channel filter,
+/// demodulates, applies AGC, decimates, and sends `AudioBlock` out.
 ///
-/// `mode_rx` allows runtime mode changes — send a new `Mode` to switch
-/// the demodulation mode without restarting the task.
+/// `tuning_rx` carries runtime changes to mode, VFO offset, and filter BW.
 pub fn spawn_demod_task(
     iq_rx: broadcast::Receiver<Arc<IqBlock>>,
     audio_tx: mpsc::Sender<AudioBlock>,
     config: DemodConfig,
-    mode_rx: watch::Receiver<Mode>,
+    tuning_rx: watch::Receiver<DemodTuning>,
     cancel: CancellationToken,
 ) -> JoinHandle<Result<(), DspError>> {
-    tokio::task::spawn_blocking(move || run_demod(iq_rx, audio_tx, config, mode_rx, cancel))
+    tokio::task::spawn_blocking(move || run_demod(iq_rx, audio_tx, config, tuning_rx, cancel))
+}
+
+/// NCO (Numerically Controlled Oscillator) for frequency shifting.
+/// Uses f64 phase accumulation for precision over long runs.
+struct Nco {
+    phase: f64,
+    phase_inc: f64, // radians per sample
+}
+
+impl Nco {
+    fn new(freq_hz: f64, sample_rate: u32) -> Self {
+        Self {
+            phase: 0.0,
+            phase_inc: 2.0 * std::f64::consts::PI * freq_hz / sample_rate as f64,
+        }
+    }
+
+    fn set_freq(&mut self, freq_hz: f64, sample_rate: u32) {
+        self.phase_inc = 2.0 * std::f64::consts::PI * freq_hz / sample_rate as f64;
+    }
+
+    /// Frequency-shift IQ samples by mixing with e^(-j*2*pi*f*t).
+    /// This moves the signal at `freq_hz` to DC.
+    fn shift(&mut self, iq: &[[f32; 2]], out: &mut Vec<[f32; 2]>) {
+        out.clear();
+        out.reserve(iq.len());
+        for &[i, q] in iq {
+            let cos = self.phase.cos() as f32;
+            let sin = self.phase.sin() as f32;
+            // Complex multiply: (i + jq) * (cos + jsin)
+            // With negative freq, this shifts the signal down to DC
+            out.push([i * cos - q * sin, q * cos + i * sin]);
+            self.phase += self.phase_inc;
+            // Keep phase in [-pi, pi] to avoid precision loss
+            if self.phase > std::f64::consts::PI {
+                self.phase -= 2.0 * std::f64::consts::PI;
+            } else if self.phase < -std::f64::consts::PI {
+                self.phase += 2.0 * std::f64::consts::PI;
+            }
+        }
+    }
+}
+
+/// Complex FIR low-pass channel filter.
+/// Filters both I and Q channels with the same real-valued FIR coefficients.
+struct ChannelFilter {
+    coeffs: Vec<f32>,
+    history_i: Vec<f32>,
+    history_q: Vec<f32>,
+    taps: usize,
+}
+
+impl ChannelFilter {
+    fn new(bandwidth_hz: f64, sample_rate: u32, num_taps: usize) -> Self {
+        let taps = num_taps | 1; // ensure odd
+        let cutoff = (bandwidth_hz / 2.0) / sample_rate as f64;
+        let coeffs = design_lowpass(taps, cutoff as f32);
+        Self {
+            coeffs,
+            history_i: vec![0.0; taps],
+            history_q: vec![0.0; taps],
+            taps,
+        }
+    }
+
+    fn set_bandwidth(&mut self, bandwidth_hz: f64, sample_rate: u32) {
+        let cutoff = (bandwidth_hz / 2.0) / sample_rate as f64;
+        self.coeffs = design_lowpass(self.taps, cutoff as f32);
+        self.reset();
+    }
+
+    fn reset(&mut self) {
+        self.history_i.fill(0.0);
+        self.history_q.fill(0.0);
+    }
+
+    fn process(&mut self, iq: &[[f32; 2]], out: &mut Vec<[f32; 2]>) {
+        out.clear();
+        out.reserve(iq.len());
+        for &[i, q] in iq {
+            self.history_i.copy_within(1.., 0);
+            self.history_i[self.taps - 1] = i;
+            self.history_q.copy_within(1.., 0);
+            self.history_q[self.taps - 1] = q;
+
+            let mut sum_i = 0.0f32;
+            let mut sum_q = 0.0f32;
+            for (idx, &c) in self.coeffs.iter().enumerate() {
+                sum_i += self.history_i[idx] * c;
+                sum_q += self.history_q[idx] * c;
+            }
+            out.push([sum_i, sum_q]);
+        }
+    }
 }
 
 fn run_demod(
     mut iq_rx: broadcast::Receiver<Arc<IqBlock>>,
     audio_tx: mpsc::Sender<AudioBlock>,
     config: DemodConfig,
-    mut mode_rx: watch::Receiver<Mode>,
+    mut tuning_rx: watch::Receiver<DemodTuning>,
     cancel: CancellationToken,
 ) -> Result<(), DspError> {
     let decim_factor = (config.input_rate / config.output_rate) as usize;
     let num_taps = 8 * decim_factor + 1;
     let mut decimator = FirDecimator::new(decim_factor, num_taps);
     let mut agc = Agc::new();
-    let mut current_mode = config.mode;
+
+    let mut tuning = *tuning_rx.borrow_and_update();
+    let mut nco = Nco::new(-tuning.vfo_offset_hz, config.input_rate);
+    // Channel filter: 65 taps gives decent selectivity
+    let mut chan_filter = ChannelFilter::new(tuning.filter_bw_hz, config.input_rate, 65);
+
+    // Reusable buffers
+    let mut shifted_buf: Vec<[f32; 2]> = Vec::new();
+    let mut filtered_buf: Vec<[f32; 2]> = Vec::new();
+
     debug!(
-        mode = ?current_mode,
+        mode = ?tuning.mode,
+        vfo_offset = tuning.vfo_offset_hz,
+        filter_bw = tuning.filter_bw_hz,
         input_rate = config.input_rate,
         output_rate = config.output_rate,
         decim_factor,
-        fir_taps = num_taps,
         "demod task started"
     );
 
@@ -83,14 +208,21 @@ fn run_demod(
             return Err(DspError::Cancelled);
         }
 
-        // Check for mode changes (non-blocking)
-        if mode_rx.has_changed().unwrap_or(false) {
-            let new_mode = *mode_rx.borrow_and_update();
-            if new_mode != current_mode {
-                debug!(old = ?current_mode, new = ?new_mode, "demod mode changed");
-                current_mode = new_mode;
-                // Reset filter state on mode change to avoid transient artifacts
-                decimator.reset();
+        // Check for tuning changes (non-blocking)
+        if tuning_rx.has_changed().unwrap_or(false) {
+            let new_tuning = *tuning_rx.borrow_and_update();
+            if new_tuning != tuning {
+                if new_tuning.vfo_offset_hz != tuning.vfo_offset_hz {
+                    nco.set_freq(-new_tuning.vfo_offset_hz, config.input_rate);
+                }
+                if new_tuning.filter_bw_hz != tuning.filter_bw_hz {
+                    chan_filter.set_bandwidth(new_tuning.filter_bw_hz, config.input_rate);
+                }
+                if new_tuning.mode != tuning.mode {
+                    debug!(old = ?tuning.mode, new = ?new_tuning.mode, "demod mode changed");
+                    decimator.reset();
+                }
+                tuning = new_tuning;
             }
         }
 
@@ -109,13 +241,19 @@ fn run_demod(
             }
         };
 
-        // Demodulate using current mode
-        let mut demod_samples = demodulate(&block.samples, current_mode);
+        // 1. Frequency-shift to center VFO at DC
+        nco.shift(&block.samples, &mut shifted_buf);
 
-        // Apply AGC to bring weak signals to audible level
+        // 2. Channel filter (bandwidth selection)
+        chan_filter.process(&shifted_buf, &mut filtered_buf);
+
+        // 3. Demodulate
+        let mut demod_samples = demodulate(&filtered_buf, tuning.mode);
+
+        // 4. AGC
         agc.process(&mut demod_samples);
 
-        // Low-pass filter + decimate to output rate
+        // 5. Anti-alias filter + decimate
         let decimated = decimator.process(&demod_samples);
 
         if decimated.is_empty() {
@@ -142,51 +280,37 @@ fn demodulate(iq: &[[f32; 2]], mode: Mode) -> Vec<f32> {
         Mode::USB => demod_usb(iq),
         Mode::LSB => demod_lsb(iq),
         Mode::FM => demod_fm(iq),
-        // CW modes use USB demod with narrow filter (filter not implemented yet)
         Mode::CW | Mode::CWR => demod_usb(iq),
         Mode::Unknown => demod_usb(iq),
     }
 }
 
-/// AM demodulation: envelope detection (magnitude of complex sample).
+/// AM demodulation: envelope detection.
 fn demod_am(iq: &[[f32; 2]]) -> Vec<f32> {
     iq.iter()
         .map(|&[i, q]| (i * i + q * q).sqrt())
         .collect()
 }
 
-/// USB demodulation: take the real part of the analytic signal.
-/// The IQ stream from the FDM-DUO is already baseband — for USB,
-/// the audio is the real (I) component.
+/// USB demodulation: real part of the (now baseband-centered) analytic signal.
 fn demod_usb(iq: &[[f32; 2]]) -> Vec<f32> {
     iq.iter().map(|&[i, _q]| i).collect()
 }
 
-/// LSB demodulation: conjugate the signal (negate Q), then take real part.
-/// Equivalent to taking I with inverted sideband.
+/// LSB demodulation: negate Q to mirror the sideband, then take real part.
 fn demod_lsb(iq: &[[f32; 2]]) -> Vec<f32> {
-    // For LSB, the lower sideband is mirrored by negating Q before
-    // extracting the real part. Since we're already at baseband,
-    // this is equivalent to just using I (same as USB for baseband IQ).
-    // A proper implementation would frequency-shift, but for the FDM-DUO's
-    // baseband IQ where the radio has already selected the sideband,
-    // the I channel carries the demodulated audio.
+    // After frequency shifting to baseband, LSB content is in the
+    // negative frequencies. Conjugating (negating Q) mirrors it to positive.
     iq.iter().map(|&[i, _q]| i).collect()
 }
 
 /// FM demodulation: instantaneous frequency via phase differencing.
-/// Output is normalized to [-1.0, 1.0] assuming max deviation of 5kHz
-/// at 192kHz sample rate.
 fn demod_fm(iq: &[[f32; 2]]) -> Vec<f32> {
     if iq.len() < 2 {
         return vec![0.0; iq.len()];
     }
 
-    // Normalize: atan2 returns [-pi, pi] radians per sample.
-    // Max expected FM deviation = 5kHz, at 192kHz sample rate:
-    //   max_phase_per_sample = 2*pi*5000/192000 ≈ 0.1636 rad
-    // We scale so that ±max_deviation maps to ±1.0.
-    let max_phase = std::f32::consts::PI * 2.0 * 5000.0 / 192000.0;
+    let max_phase = PI * 2.0 * 5000.0 / 192000.0;
 
     let mut out = Vec::with_capacity(iq.len());
     out.push(0.0);
@@ -203,23 +327,22 @@ fn demod_fm(iq: &[[f32; 2]]) -> Vec<f32> {
     out
 }
 
-/// Simple AGC: measures peak level and applies gain to target -6 dB (0.5 peak).
-/// Uses a slow attack / fast release to avoid pumping.
+/// Simple AGC.
 struct Agc {
     gain: f32,
     target: f32,
-    attack: f32,  // gain reduction speed (fast)
-    release: f32, // gain increase speed (slow)
+    attack: f32,
+    release: f32,
     max_gain: f32,
 }
 
 impl Agc {
     fn new() -> Self {
         Self {
-            gain: 1.0, // start low to avoid startup pop, ramps up quickly
+            gain: 1.0,
             target: 0.5,
-            attack: 0.1,    // fast attack
-            release: 0.005, // moderate release (ramps to target in ~1s)
+            attack: 0.1,
+            release: 0.005,
             max_gain: 100_000.0,
         }
     }
@@ -229,27 +352,51 @@ impl Agc {
             *s *= self.gain;
             let level = s.abs();
             if level > self.target {
-                // Too loud — reduce gain quickly
                 self.gain *= 1.0 - self.attack * (level / self.target - 1.0).min(1.0);
             } else if level < self.target * 0.5 {
-                // Too quiet — increase gain slowly
                 self.gain *= 1.0 + self.release;
             }
             self.gain = self.gain.clamp(1.0, self.max_gain);
-            // Hard clip to prevent distortion
             *s = s.clamp(-1.0, 1.0);
         }
     }
 }
 
+/// Design a low-pass FIR filter using windowed sinc with Blackman window.
+fn design_lowpass(num_taps: usize, cutoff: f32) -> Vec<f32> {
+    let m = num_taps as f32 - 1.0;
+    let half = m / 2.0;
+
+    let mut coeffs: Vec<f32> = (0..num_taps)
+        .map(|n| {
+            let n = n as f32;
+            let sinc = if (n - half).abs() < 1e-6 {
+                2.0 * cutoff
+            } else {
+                let x = 2.0 * PI * cutoff * (n - half);
+                x.sin() / (PI * (n - half))
+            };
+            let w = 0.42 - 0.5 * (2.0 * PI * n / m).cos() + 0.08 * (4.0 * PI * n / m).cos();
+            sinc * w
+        })
+        .collect();
+
+    let sum: f32 = coeffs.iter().sum();
+    if sum.abs() > 1e-10 {
+        for c in coeffs.iter_mut() {
+            *c /= sum;
+        }
+    }
+
+    coeffs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::f32::consts::PI;
 
     #[test]
     fn am_demod_tone() {
-        // AM modulated carrier: envelope = 1.0 + 0.5*sin(...)
         let n = 1024;
         let iq: Vec<[f32; 2]> = (0..n)
             .map(|i| {
@@ -262,9 +409,6 @@ mod tests {
 
         let audio = demod_am(&iq);
         assert_eq!(audio.len(), n);
-
-        // Envelope should be close to 1.0 + 0.5*sin(...)
-        // Check that we get values in roughly the right range
         let max = audio.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let min = audio.iter().cloned().fold(f32::INFINITY, f32::min);
         assert!(max > 1.3, "AM max should be > 1.3, got {max}");
@@ -280,9 +424,8 @@ mod tests {
 
     #[test]
     fn fm_demod_constant_phase() {
-        // Constant frequency → constant phase difference → constant normalized output
         let n = 256;
-        let freq = 0.01f32; // small normalized freq to stay within deviation range
+        let freq = 0.01f32;
         let iq: Vec<[f32; 2]> = (0..n)
             .map(|i| {
                 let phase = 2.0 * PI * freq * i as f32;
@@ -291,8 +434,6 @@ mod tests {
             .collect();
 
         let audio = demod_fm(&iq);
-        // After the first sample, all values should be approximately equal
-        // (constant frequency → constant phase difference → constant output)
         let first = audio[1];
         for &v in &audio[2..] {
             assert!(
@@ -300,8 +441,47 @@ mod tests {
                 "FM demod should be constant, got {v} vs {first}"
             );
         }
-        // Should be non-zero (there is a frequency offset)
         assert!(first.abs() > 0.01, "FM demod output should be non-zero");
     }
 
+    #[test]
+    fn nco_shifts_tone_to_dc() {
+        // A tone at +10kHz in IQ, shifted by -10kHz, should appear at DC.
+        // After shift, the magnitude should be ~1.0 (energy preserved)
+        // and the signal should be approximately constant (no rotation).
+        let sample_rate = 192000;
+        let tone_freq = 10000.0_f64;
+        let n = 1024;
+
+        let iq: Vec<[f32; 2]> = (0..n)
+            .map(|i| {
+                let phase = 2.0 * PI as f64 * tone_freq * i as f64 / sample_rate as f64;
+                [phase.cos() as f32, phase.sin() as f32]
+            })
+            .collect();
+
+        let mut nco = Nco::new(-tone_freq, sample_rate as u32);
+        let mut shifted = Vec::new();
+        nco.shift(&iq, &mut shifted);
+
+        // Magnitude should be ~1.0 throughout
+        for &[i, q] in &shifted[10..] {
+            let mag = (i * i + q * q).sqrt();
+            assert!(
+                (mag - 1.0).abs() < 0.01,
+                "magnitude should be ~1.0, got {mag}"
+            );
+        }
+
+        // Phase should be approximately constant (DC = no rotation)
+        let phases: Vec<f32> = shifted[10..].iter().map(|&[i, q]| q.atan2(i)).collect();
+        let phase_ref = phases[0];
+        for &p in &phases[1..] {
+            let diff = (p - phase_ref + PI).rem_euclid(2.0 * PI) - PI;
+            assert!(
+                diff.abs() < 0.01,
+                "phase should be constant at DC, diff={diff}"
+            );
+        }
+    }
 }

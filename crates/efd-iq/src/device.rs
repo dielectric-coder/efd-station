@@ -167,6 +167,27 @@ impl FdmDuo {
         self.handle.read_bulk(ELAD_RF_ENDPOINT, buf, USB_TIMEOUT)
     }
 
+    /// Read the FPGA tuning frequency (LO center of IQ stream) in Hz.
+    /// This is the actual center frequency of the IQ data, set by the radio's FPGA.
+    pub fn read_frequency(&self) -> Result<u64, IqError> {
+        let mut buf = [0u8; 16];
+        let res = self.handle.read_control(0xC0, 0xE1, 0x0000, 0xF5 << 8, &mut buf[..11], CTRL_TIMEOUT);
+        match res {
+            Ok(11) => {
+                // Frequency in bytes 1-4, big-endian
+                let freq = ((buf[1] as u64) << 24)
+                    | ((buf[2] as u64) << 16)
+                    | ((buf[3] as u64) << 8)
+                    | (buf[4] as u64);
+                Ok(freq)
+            }
+            Ok(n) => Err(IqError::FifoControl(format!(
+                "read_frequency: expected 11 bytes, got {n}"
+            ))),
+            Err(e) => Err(IqError::Usb(e)),
+        }
+    }
+
     /// Effective sample rate accounting for per-device correction.
     pub fn effective_clock(&self) -> i64 {
         S_RATE + self.info.sample_rate_correction as i64

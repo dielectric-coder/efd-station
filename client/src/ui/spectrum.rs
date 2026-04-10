@@ -91,6 +91,7 @@ pub struct Spectrum {
     container: GtkBox,
     gl_area: GLArea,
     axis: DrawingArea,
+    db_scale: DrawingArea,
 }
 
 impl Spectrum {
@@ -390,17 +391,17 @@ impl Spectrum {
         let overlay = Overlay::new();
         overlay.set_child(Some(&gl_area));
 
-        // Controls box — top-right corner, semi-transparent
-        let ctrl_box = GtkBox::new(Orientation::Horizontal, 8);
-        ctrl_box.add_css_class("spectrum-controls");
-        ctrl_box.set_halign(Align::End);
-        ctrl_box.set_valign(Align::Start);
-        ctrl_box.set_margin_top(4);
-        ctrl_box.set_margin_end(4);
+        // Ref/Range controls — top-left, past dB scale
+        let ref_range_box = GtkBox::new(Orientation::Horizontal, 8);
+        ref_range_box.add_css_class("spectrum-controls");
+        ref_range_box.set_halign(Align::Start);
+        ref_range_box.set_valign(Align::Start);
+        ref_range_box.set_margin_top(4);
+        ref_range_box.set_margin_start(50); // clear the dB scale
 
         let ref_label = Label::new(Some("Ref:"));
         ref_label.add_css_class("monospace");
-        ctrl_box.append(&ref_label);
+        ref_range_box.append(&ref_label);
         let ref_adj = Adjustment::new(-40.0, -60.0, 0.0, 5.0, 10.0, 0.0);
         let ref_spin = SpinButton::new(Some(&ref_adj), 5.0, 0);
         ref_spin.set_width_chars(4);
@@ -408,14 +409,14 @@ impl Spectrum {
         ref_spin.connect_value_changed(move |spin| {
             dr.set_ref_level(spin.value() as i32);
         });
-        ctrl_box.append(&ref_spin);
+        ref_range_box.append(&ref_spin);
         let ref_unit = Label::new(Some("dBm"));
         ref_unit.add_css_class("monospace");
-        ctrl_box.append(&ref_unit);
+        ref_range_box.append(&ref_unit);
 
         let range_label = Label::new(Some("Range:"));
         range_label.add_css_class("monospace");
-        ctrl_box.append(&range_label);
+        ref_range_box.append(&range_label);
         let range_adj = Adjustment::new(120.0, 40.0, 160.0, 10.0, 20.0, 0.0);
         let range_spin = SpinButton::new(Some(&range_adj), 10.0, 0);
         range_spin.set_width_chars(4);
@@ -423,21 +424,30 @@ impl Spectrum {
         range_spin.connect_value_changed(move |spin| {
             dr.set_range(spin.value() as i32);
         });
-        ctrl_box.append(&range_spin);
+        ref_range_box.append(&range_spin);
         let range_unit = Label::new(Some("dB"));
         range_unit.add_css_class("monospace");
-        ctrl_box.append(&range_unit);
+        ref_range_box.append(&range_unit);
 
-        // Zoom controls
+        overlay.add_overlay(&ref_range_box);
+
+        // Zoom/Pan controls — top-right
+        let zoom_box = GtkBox::new(Orientation::Horizontal, 8);
+        zoom_box.add_css_class("spectrum-controls");
+        zoom_box.set_halign(Align::End);
+        zoom_box.set_valign(Align::Start);
+        zoom_box.set_margin_top(4);
+        zoom_box.set_margin_end(4);
+
         let zoom_label_widget = Label::new(Some("Zoom:"));
         zoom_label_widget.add_css_class("monospace");
-        ctrl_box.append(&zoom_label_widget);
+        zoom_box.append(&zoom_label_widget);
 
         let zoom_value = Label::new(Some("1x"));
         zoom_value.add_css_class("monospace");
         zoom_value.set_width_chars(3);
 
-        let zoom_out_btn = Button::with_label("\u{2212}"); // minus sign
+        let zoom_out_btn = Button::with_label("\u{2212}");
         zoom_out_btn.set_valign(Align::Center);
         let dr = display_range.clone();
         let zv = zoom_value.clone();
@@ -445,9 +455,9 @@ impl Spectrum {
             let z = dr.zoom_out();
             zv.set_text(&format!("{z}x"));
         });
-        ctrl_box.append(&zoom_out_btn);
+        zoom_box.append(&zoom_out_btn);
 
-        ctrl_box.append(&zoom_value);
+        zoom_box.append(&zoom_value);
 
         let zoom_in_btn = Button::with_label("+");
         zoom_in_btn.set_valign(Align::Center);
@@ -457,28 +467,38 @@ impl Spectrum {
             let z = dr.zoom_in();
             zv.set_text(&format!("{z}x"));
         });
-        ctrl_box.append(&zoom_in_btn);
+        zoom_box.append(&zoom_in_btn);
 
-        // Pan: left/right buttons
-        let pan_left_btn = Button::with_label("\u{25C0}"); // left arrow
+        let pan_left_btn = Button::with_label("\u{25C0}");
         pan_left_btn.set_valign(Align::Center);
         let dr = display_range.clone();
         pan_left_btn.connect_clicked(move |_| {
             let z = dr.zoom() as f64;
             dr.pan_by(-0.1 / z);
         });
-        ctrl_box.append(&pan_left_btn);
+        zoom_box.append(&pan_left_btn);
 
-        let pan_right_btn = Button::with_label("\u{25B6}"); // right arrow
+        let pan_right_btn = Button::with_label("\u{25B6}");
         pan_right_btn.set_valign(Align::Center);
         let dr = display_range.clone();
         pan_right_btn.connect_clicked(move |_| {
             let z = dr.zoom() as f64;
             dr.pan_by(0.1 / z);
         });
-        ctrl_box.append(&pan_right_btn);
+        zoom_box.append(&pan_right_btn);
 
-        overlay.add_overlay(&ctrl_box);
+        overlay.add_overlay(&zoom_box);
+
+        // dB scale overlay (Cairo, left side of spectrum)
+        let db_overlay = DrawingArea::new();
+        db_overlay.set_halign(Align::Start);
+        db_overlay.set_valign(Align::Fill);
+        db_overlay.set_width_request(45);
+        let dr3 = display_range.clone();
+        db_overlay.set_draw_func(move |_area, cr, _width, height| {
+            draw_db_scale(cr, height, &dr3);
+        });
+        overlay.add_overlay(&db_overlay);
 
         // Frequency axis strip (Cairo — text-heavy, low perf impact)
         let axis = DrawingArea::new();
@@ -501,6 +521,7 @@ impl Spectrum {
                 container,
                 gl_area,
                 axis,
+                db_scale: db_overlay,
             },
             display_range,
         )
@@ -513,6 +534,7 @@ impl Spectrum {
     pub fn queue_draw(&self) {
         self.gl_area.queue_render();
         self.axis.queue_draw();
+        self.db_scale.queue_draw();
     }
 }
 
@@ -573,7 +595,7 @@ fn draw_freq_axis(
         gtk4::cairo::FontSlant::Normal,
         gtk4::cairo::FontWeight::Normal,
     );
-    cr.set_font_size(10.0);
+    cr.set_font_size(13.0); // ~10pt
     let step = nice_freq_step(visible_span_hz);
     let vis_left_hz = center_hz + (vis_lo - 0.5) * span_hz;
     let vis_right_hz = center_hz + (vis_hi - 0.5) * span_hz;
@@ -595,17 +617,52 @@ fn draw_freq_axis(
         cr.line_to(x, 4.0);
         let _ = cr.stroke();
 
-        // Relative offset from center
+        // Relative offset from center — centered on tick
         cr.set_source_rgb(0.7, 0.7, 0.7);
         let rel = freq_label(fhz - center_hz);
-        cr.move_to(x - 20.0, 14.0);
+        let ext = cr.text_extents(&rel).unwrap();
+        cr.move_to(x - ext.width() / 2.0, 14.0);
         let _ = cr.show_text(&rel);
 
-        // Absolute frequency
+        // Absolute frequency — centered on tick
         cr.set_source_rgba(0.8, 0.8, 0.5, 0.8);
         let abs_f = freq_label(vfo_hz + fhz - center_hz);
-        cr.move_to(x - 20.0, 26.0);
+        let ext = cr.text_extents(&abs_f).unwrap();
+        cr.move_to(x - ext.width() / 2.0, 26.0);
         let _ = cr.show_text(&abs_f);
+    }
+}
+
+/// Draw dB scale labels on the left side of the spectrum.
+fn draw_db_scale(
+    cr: &gtk4::cairo::Context,
+    height: i32,
+    display_range: &DisplayRange,
+) {
+    let h = height as f64;
+
+    let db_top = display_range.db_top();
+    let db_bottom = display_range.db_bottom();
+    let db_range = db_top - db_bottom;
+
+    cr.select_font_face(
+        "Hack Nerd Font Mono",
+        gtk4::cairo::FontSlant::Normal,
+        gtk4::cairo::FontWeight::Normal,
+    );
+    cr.set_font_size(11.0);
+
+    let db_start = (db_bottom / 10.0).ceil() as i32 * 10;
+    let db_end = (db_top / 10.0).floor() as i32 * 10;
+    for db in (db_start..=db_end).step_by(10) {
+        let normalized = ((db as f64 - db_bottom) / db_range).clamp(0.0, 1.0);
+        let y = h * (1.0 - normalized);
+        let label = format!("{db}");
+        let ext = cr.text_extents(&label).unwrap();
+        // Right-align within the 45px strip, vertically center on grid line
+        cr.set_source_rgba(0.8, 0.8, 0.8, 0.85);
+        cr.move_to(40.0 - ext.width(), y + ext.height() / 2.0);
+        let _ = cr.show_text(&label);
     }
 }
 
