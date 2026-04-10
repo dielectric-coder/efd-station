@@ -16,7 +16,7 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,efd_iq=debug,efd_dsp=debug,efd_cat=debug".into()),
+                .unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -46,12 +46,20 @@ async fn main() {
         .await
         .unwrap();
 
-    // Cancel triggers pipeline tasks to exit; give them a moment to drain.
-    // Pipeline shutdown happens via CancellationToken — tasks self-terminate.
+    // Cancel triggers pipeline tasks to check their cancellation tokens.
     cancel.cancel();
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    info!("shutting down...");
+
+    // Give blocking tasks a moment to notice cancellation.
+    // spawn_blocking tasks (IQ, FFT, demod) may be stuck in USB reads or
+    // blocking_recv — they'll exit on the next iteration or timeout.
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
     info!("efd-backend stopped");
+
+    // Force exit — spawn_blocking tasks may still be stuck in USB reads
+    // with up to 2s timeout. Don't hang the process waiting for them.
+    std::process::exit(0);
 }
 
 async fn shutdown_signal(cancel: CancellationToken) {

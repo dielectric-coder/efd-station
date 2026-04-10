@@ -70,10 +70,8 @@ fn run_capture(
                     timestamp_us,
                 });
 
-                // If no receivers, just drop the block
-                if tx.send(block).is_err() {
-                    debug!("no IQ receivers, dropping block");
-                }
+                // If no receivers, silently drop the block
+                let _ = tx.send(block);
 
                 block_count += 1;
                 if block_count % 1000 == 0 {
