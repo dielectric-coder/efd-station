@@ -1,0 +1,30 @@
+# efd-station backend configuration
+# Place at ~/.config/efd-backend/config.toml
+
+[server]
+bind = "0.0.0.0"
+port = 8080
+
+[usb]
+# vendor_id = 0x1721
+# product_id = 0x061a
+
+[dsp]
+fft_size = 4096
+fft_averaging = 3
+sample_rate = 192000
+
+[cat]
+# "auto" scans /dev/serial/by-id/ for the FDM-DUO
+# "none" to skip (if rigctld is managed externally)
+# or an explicit path like "/dev/ttyUSB0"
+serial_device = "auto"
+rigctld_model = 3077
+baud_rate = 38400
+rigctld_host = "127.0.0.1"
+rigctld_port = 4532
+poll_interval_ms = 200
+
+[audio]
+alsa_device = "default"
+sample_rate = 48000

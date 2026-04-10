@@ -1,0 +1,32 @@
+# Maintainer: dielectric-coder
+pkgname=efd-server
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="SDR backend for the Elad FDM-DUO transceiver"
+arch=('x86_64')
+url="https://github.com/dielectric-coder/efd-station"
+license=('MIT')
+depends=('libusb' 'alsa-lib' 'opus' 'hamlib')
+makedepends=('rust' 'cargo' 'pkg-config')
+source=("git+https://github.com/dielectric-coder/efd-station.git")
+sha256sums=('SKIP')
+backup=('etc/efd-backend/config.toml.example')
+install=efd-server.install
+
+build() {
+    cd efd-station
+    cargo build --release --package efd-server
+}
+
+package() {
+    cd efd-station
+
+    # Binary
+    install -Dm755 "target/release/efd-server" "$pkgdir/usr/bin/efd-server"
+
+    # Systemd service
+    install -Dm644 "dist/systemd/efd-server.service" "$pkgdir/usr/lib/systemd/system/efd-server.service"
+
+    # Example config
+    install -Dm644 "dist/config/config.toml" "$pkgdir/etc/efd-backend/config.toml.example"
+}

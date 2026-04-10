@@ -2,6 +2,9 @@
 name = "efd-server"
 version = "0.1.0"
 edition = "2021"
+description = "SDR backend for the Elad FDM-DUO transceiver"
+license = "MIT"
+repository = "https://github.com/dielectric-coder/efd-station"
 
 [dependencies]
 efd-proto = { workspace = true }
@@ -21,3 +24,21 @@ bytes = "1"
 futures-util = "0.3"
 toml = "0.8"
 directories = "6"
+
+[package.metadata.deb]
+maintainer = "dielectric-coder"
+section = "hamradio"
+priority = "optional"
+depends = "libusb-1.0-0, libasound2, libopus0, hamlib-utils"
+assets = [
+    ["target/release/efd-server", "usr/bin/", "755"],
+    ["../dist/systemd/efd-server.service", "lib/systemd/system/", "644"],
+    ["../dist/config/config.toml", "etc/efd-backend/config.toml.example", "644"],
+]
+conf-files = ["/etc/efd-backend/config.toml.example"]
+maintainer-scripts = "debian/"
+
+[package.metadata.deb.systemd-units]
+unit-name = "efd-server"
+enable = false
+start = false

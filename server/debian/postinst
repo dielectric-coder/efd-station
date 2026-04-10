@@ -1,0 +1,22 @@
+#!/bin/sh
+set -e
+
+# Create efd system user if it doesn't exist
+if ! getent passwd efd > /dev/null 2>&1; then
+    useradd --system --home-dir /home/efd --create-home \
+        --groups dialout,audio,plugdev --shell /usr/sbin/nologin efd
+fi
+
+# Ensure config directory exists
+mkdir -p /home/efd/.config/efd-backend
+if [ ! -f /home/efd/.config/efd-backend/config.toml ]; then
+    cp /etc/efd-backend/config.toml.example /home/efd/.config/efd-backend/config.toml
+fi
+chown -R efd:efd /home/efd/.config/efd-backend
+
+echo ""
+echo "efd-server installed. To start:"
+echo "  sudo systemctl enable --now efd-server"
+echo ""
+echo "Config: /home/efd/.config/efd-backend/config.toml"
+echo ""
