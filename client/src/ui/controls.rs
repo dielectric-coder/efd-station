@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use efd_proto::{ClientMsg, Ptt, RadioState};
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, Label, LevelBar, Orientation, ToggleButton};
@@ -13,6 +15,18 @@ pub struct Controls {
     smeter: LevelBar,
     smeter_label: Label,
     tx_label: Label,
+    /// Cache previous state to avoid redundant GTK updates.
+    prev: RefCell<Option<CachedState>>,
+}
+
+#[derive(Clone, PartialEq)]
+struct CachedState {
+    freq_hz: u64,
+    mode: String,
+    vfo: String,
+    filter_bw: String,
+    s_reading: u16, // quantized to avoid float comparison
+    tx: bool,
 }
 
 impl Controls {
@@ -41,7 +55,6 @@ impl Controls {
         bw_label.add_css_class("monospace");
         container.append(&bw_label);
 
-        // S-meter
         let smeter_box = GtkBox::new(Orientation::Horizontal, 4);
         smeter_box.set_valign(Align::Center);
         let smeter_title = Label::new(Some("S:"));
@@ -61,12 +74,10 @@ impl Controls {
         smeter_box.append(&smeter_label);
         container.append(&smeter_box);
 
-        // TX indicator
         let tx_label = Label::new(Some("RX"));
         tx_label.add_css_class("monospace");
         container.append(&tx_label);
 
-        // PTT button
         let ptt_btn = ToggleButton::with_label("PTT");
         ptt_btn.set_valign(Align::Center);
         let tx = ws_tx;
@@ -85,6 +96,7 @@ impl Controls {
             smeter,
             smeter_label,
             tx_label,
+            prev: RefCell::new(None),
         }
     }
 
@@ -93,21 +105,39 @@ impl Controls {
     }
 
     pub fn update(&self, state: &RadioState) {
+        let s_reading = db_to_s_reading(state.s_meter_db);
+        let mode_str = format!("{:?}", state.mode);
+        let vfo_str = format!("VFO {:?}", state.vfo);
+
+        let new_state = CachedState {
+            freq_hz: state.freq_hz,
+            mode: mode_str.clone(),
+            vfo: vfo_str.clone(),
+            filter_bw: state.filter_bw.clone(),
+            s_reading: (s_reading * 10.0) as u16,
+            tx: state.tx,
+        };
+
+        // Skip update if nothing changed
+        let mut prev = self.prev.borrow_mut();
+        if prev.as_ref() == Some(&new_state) {
+            return;
+        }
+        *prev = Some(new_state);
+
         let freq = format_freq(state.freq_hz);
         self.freq_label
             .set_markup(&format!("<span font='18' weight='bold'>{freq}</span>"));
-
-        self.mode_label.set_text(&format!("{:?}", state.mode));
-        self.vfo_label.set_text(&format!("VFO {:?}", state.vfo));
+        self.mode_label.set_text(&mode_str);
+        self.vfo_label.set_text(&vfo_str);
         self.bw_label
             .set_text(&format!("BW: {}", state.filter_bw));
-
-        let s_reading = db_to_s_reading(state.s_meter_db);
         self.smeter.set_value(s_reading as f64);
         self.smeter_label.set_text(&s_reading_to_string(s_reading));
 
         if state.tx {
-            self.tx_label.set_markup("<span foreground='red' weight='bold'>TX</span>");
+            self.tx_label
+                .set_markup("<span foreground='red' weight='bold'>TX</span>");
         } else {
             self.tx_label.set_text("RX");
         }

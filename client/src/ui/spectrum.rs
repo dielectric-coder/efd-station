@@ -14,7 +14,7 @@ impl Spectrum {
         let area = DrawingArea::new();
         area.set_content_height(200);
 
-        let data = fft_data.clone();
+        let data = fft_data;
         area.set_draw_func(move |_area, cr, width, height| {
             draw_spectrum(cr, width, height, &data);
         });
@@ -45,35 +45,33 @@ fn draw_spectrum(
     cr.rectangle(0.0, 0.0, w, h);
     let _ = cr.fill();
 
-    // Grid lines
+    // Grid lines — single path for all horizontal, single for all vertical
     cr.set_source_rgba(0.2, 0.2, 0.3, 0.5);
     cr.set_line_width(0.5);
     for i in 1..10 {
         let y = h * i as f64 / 10.0;
         cr.move_to(0.0, y);
         cr.line_to(w, y);
-        let _ = cr.stroke();
     }
     for i in 1..10 {
         let x = w * i as f64 / 10.0;
         cr.move_to(x, 0.0);
         cr.line_to(x, h);
-        let _ = cr.stroke();
     }
+    let _ = cr.stroke(); // single stroke for all grid lines
 
-    let bins = fft_data.lock().unwrap();
+    let bins = fft_data.lock().unwrap_or_else(|e| e.into_inner());
     let Some(ref fft) = *bins else { return };
 
     if fft.bins.is_empty() {
         return;
     }
 
-    // dB range for display
     let db_top: f64 = -20.0;
     let db_bottom: f64 = -120.0;
     let db_range = db_top - db_bottom;
 
-    // Draw spectrum line
+    // Draw spectrum line — single path
     cr.set_source_rgb(0.2, 1.0, 0.3);
     cr.set_line_width(1.0);
 

@@ -4,11 +4,9 @@ use gtk4::prelude::*;
 use gtk4::DrawingArea;
 
 const WF_HEIGHT: usize = 512;
+const MAX_PENDING: usize = 64;
 
-/// Waterfall pixel buffer — each new FFT line is rendered into a raw pixel
-/// array. No per-pixel Cairo calls. The buffer scrolls by shifting rows.
 struct WfBuffer {
-    /// RGBA pixel data, width × WF_HEIGHT × 4 bytes.
     pixels: Vec<u8>,
     width: usize,
 }
@@ -21,24 +19,20 @@ impl WfBuffer {
         }
     }
 
-    /// Scroll all rows down by 1 and render new FFT bins into row 0.
     fn push_line(&mut self, bins: &[f32]) {
         if self.width == 0 {
             return;
         }
 
-        // Shift all rows down by 1 (memmove)
         let row_bytes = self.width * 4;
         self.pixels.copy_within(0..(WF_HEIGHT - 1) * row_bytes, row_bytes);
 
-        // Render new line into row 0
         let n = bins.len().max(1);
         for x in 0..self.width {
             let bin_idx = x * n / self.width;
             let db = bins.get(bin_idx).copied().unwrap_or(-120.0);
             let (r, g, b) = db_to_color_u8(db);
             let off = x * 4;
-            // Cairo ImageSurface ARGB32 is stored as B, G, R, A (little-endian)
             self.pixels[off] = b;
             self.pixels[off + 1] = g;
             self.pixels[off + 2] = r;
@@ -86,7 +80,12 @@ impl Waterfall {
     }
 
     pub fn push_line(&self, bins: &[f32]) {
-        self.pending.lock().unwrap().push(bins.to_vec());
+        let mut p = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let len = p.len();
+        if len >= MAX_PENDING {
+            p.drain(0..len / 2); // drop oldest half
+        }
+        p.push(bins.to_vec());
     }
 
     pub fn queue_draw(&self) {
@@ -101,40 +100,44 @@ fn draw(
     buffer: &Arc<Mutex<WfBuffer>>,
     pending: &Arc<Mutex<Vec<Vec<f32>>>>,
 ) {
-    let new_lines: Vec<Vec<f32>> = pending.lock().unwrap().drain(..).collect();
-    let mut buf = buffer.lock().unwrap();
+    // Drain pending first, release lock immediately
+    let new_lines: Vec<Vec<f32>> = {
+        pending.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect()
+    };
 
+    let mut buf = buffer.lock().unwrap_or_else(|e| e.into_inner());
     buf.resize(width as usize);
 
     for bins in &new_lines {
         buf.push_line(bins);
     }
 
-    // Create an ImageSurface from the pixel buffer
+    // Create a safe copy of pixel data for the surface
+    let pixel_copy = buf.pixels.clone();
+    let buf_width = buf.width;
+    drop(buf); // release lock before Cairo operations
+
     let stride = gtk4::cairo::Format::ARgb32
-        .stride_for_width(buf.width as u32)
+        .stride_for_width(buf_width as u32)
         .unwrap();
 
-    let surface = unsafe {
-        gtk4::cairo::ImageSurface::create_for_data_unsafe(
-            buf.pixels.as_mut_ptr(),
-            gtk4::cairo::Format::ARgb32,
-            buf.width as i32,
-            WF_HEIGHT as i32,
-            stride,
-        )
-        .unwrap()
-    };
+    let surface = gtk4::cairo::ImageSurface::create_for_data(
+        pixel_copy,
+        gtk4::cairo::Format::ARgb32,
+        buf_width as i32,
+        WF_HEIGHT as i32,
+        stride,
+    );
 
-    // Scale and blit to screen in one operation
+    let Ok(surface) = surface else { return };
+
     cr.save().unwrap();
     cr.scale(1.0, height as f64 / WF_HEIGHT as f64);
-    cr.set_source_surface(&surface, 0.0, 0.0).unwrap();
-    cr.paint().unwrap();
+    let _ = cr.set_source_surface(&surface, 0.0, 0.0);
+    let _ = cr.paint();
     cr.restore().unwrap();
 }
 
-/// Map dB to RGB color (u8).
 fn db_to_color_u8(db: f32) -> (u8, u8, u8) {
     let t = ((db + 120.0) / 100.0).clamp(0.0, 1.0);
 

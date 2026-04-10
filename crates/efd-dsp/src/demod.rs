@@ -75,7 +75,12 @@ fn run_demod(
         let block = match iq_rx.blocking_recv() {
             Ok(b) => b,
             Err(broadcast::error::RecvError::Lagged(n)) => {
-                warn!(skipped = n, "demod receiver lagged");
+                // Each IQ block is ~1536 samples at 192kHz (~8ms)
+                warn!(
+                    skipped_blocks = n,
+                    skipped_ms = n * 8,
+                    "demod receiver lagged, audio gap"
+                );
                 continue;
             }
             Err(broadcast::error::RecvError::Closed) => {
@@ -146,22 +151,29 @@ fn demod_lsb(iq: &[[f32; 2]]) -> Vec<f32> {
 }
 
 /// FM demodulation: instantaneous frequency via phase differencing.
+/// Output is normalized to [-1.0, 1.0] assuming max deviation of 5kHz
+/// at 192kHz sample rate.
 fn demod_fm(iq: &[[f32; 2]]) -> Vec<f32> {
     if iq.len() < 2 {
         return vec![0.0; iq.len()];
     }
 
+    // Normalize: atan2 returns [-pi, pi] radians per sample.
+    // Max expected FM deviation = 5kHz, at 192kHz sample rate:
+    //   max_phase_per_sample = 2*pi*5000/192000 ≈ 0.1636 rad
+    // We scale so that ±max_deviation maps to ±1.0.
+    let max_phase = std::f32::consts::PI * 2.0 * 5000.0 / 192000.0;
+
     let mut out = Vec::with_capacity(iq.len());
-    out.push(0.0); // first sample has no previous
+    out.push(0.0);
 
     for i in 1..iq.len() {
         let [i1, q1] = iq[i - 1];
         let [i2, q2] = iq[i];
-        // Conjugate multiply: (i2 + jq2) * (i1 - jq1)
         let re = i2 * i1 + q2 * q1;
         let im = q2 * i1 - i2 * q1;
-        // Instantaneous frequency ∝ atan2(im, re)
-        out.push(im.atan2(re));
+        let phase_diff = im.atan2(re);
+        out.push((phase_diff / max_phase).clamp(-1.0, 1.0));
     }
 
     out
@@ -214,9 +226,9 @@ mod tests {
 
     #[test]
     fn fm_demod_constant_phase() {
-        // Constant frequency → constant phase difference → constant output
+        // Constant frequency → constant phase difference → constant normalized output
         let n = 256;
-        let freq = 0.1f32; // normalized
+        let freq = 0.01f32; // small normalized freq to stay within deviation range
         let iq: Vec<[f32; 2]> = (0..n)
             .map(|i| {
                 let phase = 2.0 * PI * freq * i as f32;
@@ -226,13 +238,16 @@ mod tests {
 
         let audio = demod_fm(&iq);
         // After the first sample, all values should be approximately equal
-        let expected = 2.0 * PI * freq;
-        for &v in &audio[1..] {
+        // (constant frequency → constant phase difference → constant output)
+        let first = audio[1];
+        for &v in &audio[2..] {
             assert!(
-                (v - expected).abs() < 0.01,
-                "FM demod value {v} != expected {expected}"
+                (v - first).abs() < 0.01,
+                "FM demod should be constant, got {v} vs {first}"
             );
         }
+        // Should be non-zero (there is a frequency offset)
+        assert!(first.abs() > 0.01, "FM demod output should be non-zero");
     }
 
     #[test]

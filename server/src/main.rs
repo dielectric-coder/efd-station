@@ -35,7 +35,7 @@ async fn main() {
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/ws", get(ws_upgrade))
-        .with_state(state.clone());
+        .with_state(state);
 
     let addr = format!("{}:{}", cfg.server.bind, cfg.server.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
@@ -47,35 +47,16 @@ async fn main() {
         .await
         .unwrap();
 
+    // Cancel all pipeline tasks and WS handlers
     info!("shutting down...");
     cancel.cancel();
 
-    // Try to unwrap the Arc; if WS clients still hold refs, just wait a bit
-    let state = match Arc::try_unwrap(state) {
-        Ok(s) => s,
-        Err(arc) => {
-            // WS clients still connected — give them a moment
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            match Arc::try_unwrap(arc) {
-                Ok(s) => s,
-                Err(_) => {
-                    info!("force exit — WS clients still hold references");
-                    std::process::exit(0);
-                }
-            }
-        }
-    };
+    // Give tasks time to notice cancellation and exit.
+    // spawn_blocking tasks (IQ, FFT, demod, ALSA, serial) check cancel
+    // on each loop iteration; USB reads have a 2s timeout max.
+    tokio::time::sleep(Duration::from_secs(3)).await;
 
-    // Graceful pipeline shutdown with timeout
-    tokio::select! {
-        _ = state.pipeline.shutdown() => {
-            info!("efd-backend stopped");
-        }
-        _ = tokio::time::sleep(Duration::from_secs(3)) => {
-            info!("shutdown timed out, exiting");
-            std::process::exit(0);
-        }
-    }
+    info!("efd-backend stopped");
 }
 
 async fn shutdown_signal(cancel: CancellationToken) {

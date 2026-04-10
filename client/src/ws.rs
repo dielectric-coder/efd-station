@@ -5,6 +5,12 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
+/// Maximum queued messages before dropping oldest.
+const MAX_QUEUE: usize = 256;
+
+/// Maximum reconnect delay (exponential backoff caps here).
+const MAX_BACKOFF_SECS: u64 = 30;
+
 /// Start the WS connection on a background tokio thread.
 /// Incoming ServerMsgs are pushed to the shared queue (polled by GTK main loop).
 /// Returns an mpsc sender for outgoing ClientMsg.
@@ -35,15 +41,20 @@ async fn run_ws(
     mut client_rx: mpsc::UnboundedReceiver<ClientMsg>,
 ) {
     let cfg = bincode::config::standard();
+    let mut backoff_secs: u64 = 2;
 
     loop {
         tracing::info!(url = %url, "WS connecting...");
 
         let ws = match tokio_tungstenite::connect_async(url).await {
-            Ok((ws, _)) => ws,
+            Ok((ws, _)) => {
+                backoff_secs = 2; // reset on success
+                ws
+            }
             Err(e) => {
-                tracing::warn!("WS connect failed: {e}, retrying in 2s");
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                tracing::warn!("WS connect failed: {e}, retrying in {backoff_secs}s");
+                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
                 continue;
             }
         };
@@ -71,7 +82,13 @@ async fn run_ws(
                         Err(_) => continue,
                     };
 
-                    msg_queue.lock().unwrap().push(msg);
+                    // Bounded queue: drop oldest if full
+                    let mut q = msg_queue.lock().unwrap_or_else(|p| p.into_inner());
+                    let len = q.len();
+                    if len >= MAX_QUEUE {
+                        q.drain(0..len / 2); // drop oldest half
+                    }
+                    q.push(msg);
                 }
                 msg = client_rx.recv() => {
                     let Some(msg) = msg else { return };
@@ -86,7 +103,8 @@ async fn run_ws(
             }
         }
 
-        tracing::warn!("WS disconnected, reconnecting in 2s");
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        tracing::warn!("WS disconnected, reconnecting in {backoff_secs}s");
+        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+        backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
     }
 }

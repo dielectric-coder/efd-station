@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use bytes::Bytes;
@@ -7,6 +8,10 @@ use futures_util::SinkExt;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
+
+/// Timeout for sending a single WS message. If a client can't receive
+/// within this time, disconnect it to avoid blocking broadcasts.
+const SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Downstream task: subscribe to broadcasts, serialize to bincode, send over WS.
 pub async fn run(
@@ -62,9 +67,17 @@ pub async fn run(
 
         match bincode::encode_to_vec(&msg, cfg) {
             Ok(bytes) => {
-                if sink.send(Message::Binary(Bytes::from(bytes))).await.is_err() {
-                    debug!("WS client disconnected (send failed)");
-                    break;
+                let send_fut = sink.send(Message::Binary(Bytes::from(bytes)));
+                match tokio::time::timeout(SEND_TIMEOUT, send_fut).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => {
+                        debug!("WS client disconnected (send failed)");
+                        break;
+                    }
+                    Err(_) => {
+                        debug!("WS client too slow (send timeout), disconnecting");
+                        break;
+                    }
                 }
             }
             Err(e) => {

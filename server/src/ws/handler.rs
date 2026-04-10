@@ -37,18 +37,24 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
     info!("WS client connected");
 
     let cancel2 = cancel.clone();
-    let down = tokio::spawn(async move {
+    let mut down = tokio::spawn(async move {
         super::downstream::run(sink, fft_rx, state_rx, audio_rx, cancel2).await;
     });
 
-    let up = tokio::spawn(async move {
+    let mut up = tokio::spawn(async move {
         super::upstream::run(stream, cat_tx, tx_audio_tx, cancel).await;
     });
 
     // Wait for either task to finish, then abort the other
     tokio::select! {
-        _ = down => { debug!("downstream ended"); }
-        _ = up => { debug!("upstream ended"); }
+        result = &mut down => {
+            debug!("downstream ended: {:?}", result);
+            up.abort();
+        }
+        result = &mut up => {
+            debug!("upstream ended: {:?}", result);
+            down.abort();
+        }
     }
 
     info!("WS client disconnected");
