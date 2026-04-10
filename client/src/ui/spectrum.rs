@@ -15,6 +15,7 @@ use super::DisplayRange;
 
 const AXIS_HEIGHT: i32 = 30;
 const MAX_BINS: usize = 8192;
+const MAX_GRID_VERTS: usize = 2048; // max vertices for grid lines
 
 // --- GLSL shaders (ES 3.0) ---
 
@@ -159,12 +160,12 @@ impl Spectrum {
                     (2 * std::mem::size_of::<f32>()) as *const _,
                 );
 
-                // Grid: generous allocation for lines
+                // Grid: allocation for grid + center lines
                 gl::BindVertexArray(vao_grid);
                 gl::BindBuffer(gl::ARRAY_BUFFER, vbo_grid);
                 gl::BufferData(
                     gl::ARRAY_BUFFER,
-                    (512 * 2 * std::mem::size_of::<f32>()) as GLsizeiptr,
+                    (MAX_GRID_VERTS * 2 * std::mem::size_of::<f32>()) as GLsizeiptr,
                     std::ptr::null(),
                     gl::DYNAMIC_DRAW,
                 );
@@ -300,6 +301,10 @@ impl Spectrum {
             // Center line (at the VFO center frequency)
             let center_screen = to_screen(0.5);
             let mut center_verts = vec![center_screen, 0.0, center_screen, 1.0];
+
+            // Cap grid vertices to VBO capacity
+            let max_grid_floats = (MAX_GRID_VERTS - 2) * 2; // reserve 2 verts for center line
+            grid_verts.truncate(max_grid_floats);
 
             drop(bins);
 

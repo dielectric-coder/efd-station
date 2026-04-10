@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use efd_proto::Mode;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
@@ -9,6 +9,7 @@ use tracing::{debug, trace, warn};
 use efd_iq::IqBlock;
 
 use crate::error::DspError;
+use crate::filter::FirDecimator;
 
 /// Configuration for the demodulator task.
 #[derive(Debug, Clone)]
@@ -43,28 +44,37 @@ pub struct AudioBlock {
 ///
 /// Consumes IQ blocks, demodulates to audio, decimates to output_rate,
 /// and sends `AudioBlock` to the mpsc channel.
+///
+/// `mode_rx` allows runtime mode changes — send a new `Mode` to switch
+/// the demodulation mode without restarting the task.
 pub fn spawn_demod_task(
     iq_rx: broadcast::Receiver<Arc<IqBlock>>,
     audio_tx: mpsc::Sender<AudioBlock>,
     config: DemodConfig,
+    mode_rx: watch::Receiver<Mode>,
     cancel: CancellationToken,
 ) -> JoinHandle<Result<(), DspError>> {
-    tokio::task::spawn_blocking(move || run_demod(iq_rx, audio_tx, config, cancel))
+    tokio::task::spawn_blocking(move || run_demod(iq_rx, audio_tx, config, mode_rx, cancel))
 }
 
 fn run_demod(
     mut iq_rx: broadcast::Receiver<Arc<IqBlock>>,
     audio_tx: mpsc::Sender<AudioBlock>,
     config: DemodConfig,
+    mut mode_rx: watch::Receiver<Mode>,
     cancel: CancellationToken,
 ) -> Result<(), DspError> {
     let decim_factor = (config.input_rate / config.output_rate) as usize;
+    let num_taps = 8 * decim_factor + 1;
+    let mut decimator = FirDecimator::new(decim_factor, num_taps);
     let mut agc = Agc::new();
+    let mut current_mode = config.mode;
     debug!(
-        mode = ?config.mode,
+        mode = ?current_mode,
         input_rate = config.input_rate,
         output_rate = config.output_rate,
         decim_factor,
+        fir_taps = num_taps,
         "demod task started"
     );
 
@@ -73,10 +83,20 @@ fn run_demod(
             return Err(DspError::Cancelled);
         }
 
+        // Check for mode changes (non-blocking)
+        if mode_rx.has_changed().unwrap_or(false) {
+            let new_mode = *mode_rx.borrow_and_update();
+            if new_mode != current_mode {
+                debug!(old = ?current_mode, new = ?new_mode, "demod mode changed");
+                current_mode = new_mode;
+                // Reset filter state on mode change to avoid transient artifacts
+                decimator.reset();
+            }
+        }
+
         let block = match iq_rx.blocking_recv() {
             Ok(b) => b,
             Err(broadcast::error::RecvError::Lagged(n)) => {
-                // Each IQ block is ~1536 samples at 192kHz (~8ms)
                 warn!(
                     skipped_blocks = n,
                     skipped_ms = n * 8,
@@ -89,14 +109,14 @@ fn run_demod(
             }
         };
 
-        // Demodulate
-        let mut demod_samples = demodulate(&block.samples, config.mode);
+        // Demodulate using current mode
+        let mut demod_samples = demodulate(&block.samples, current_mode);
 
         // Apply AGC to bring weak signals to audible level
         agc.process(&mut demod_samples);
 
-        // Decimate to output rate
-        let decimated = decimate(&demod_samples, decim_factor);
+        // Low-pass filter + decimate to output rate
+        let decimated = decimator.process(&demod_samples);
 
         if decimated.is_empty() {
             continue;
@@ -196,10 +216,10 @@ struct Agc {
 impl Agc {
     fn new() -> Self {
         Self {
-            gain: 1000.0, // start with high gain for weak signals
+            gain: 1.0, // start low to avoid startup pop, ramps up quickly
             target: 0.5,
-            attack: 0.1,   // fast attack
-            release: 0.001, // slow release
+            attack: 0.1,    // fast attack
+            release: 0.005, // moderate release (ramps to target in ~1s)
             max_gain: 100_000.0,
         }
     }
@@ -220,15 +240,6 @@ impl Agc {
             *s = s.clamp(-1.0, 1.0);
         }
     }
-}
-
-/// Simple decimation by integer factor (no anti-alias filter — good enough
-/// for initial implementation since the radio's DSP already bandlimits).
-fn decimate(samples: &[f32], factor: usize) -> Vec<f32> {
-    if factor <= 1 {
-        return samples.to_vec();
-    }
-    samples.iter().step_by(factor).copied().collect()
 }
 
 #[cfg(test)]
@@ -293,17 +304,4 @@ mod tests {
         assert!(first.abs() > 0.01, "FM demod output should be non-zero");
     }
 
-    #[test]
-    fn decimate_factor_4() {
-        let input: Vec<f32> = (0..16).map(|i| i as f32).collect();
-        let out = decimate(&input, 4);
-        assert_eq!(out, vec![0.0, 4.0, 8.0, 12.0]);
-    }
-
-    #[test]
-    fn decimate_factor_1_passthrough() {
-        let input = vec![1.0, 2.0, 3.0];
-        let out = decimate(&input, 1);
-        assert_eq!(out, input);
-    }
 }

@@ -263,7 +263,7 @@ impl Waterfall {
                 for bins in &new_lines {
                     let n = bins.len().max(1);
                     for x in 0..gl.tex_width {
-                        let bin_idx = x * n / gl.tex_width;
+                        let bin_idx = (x * n / gl.tex_width).min(n - 1);
                         let db = bins.get(bin_idx).copied().unwrap_or(db_bottom as f32);
                         let (r, g, b) = db_to_color_u8(db, db_bottom, db_range);
                         let off = x * 4;

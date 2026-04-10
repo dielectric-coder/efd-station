@@ -130,7 +130,7 @@ fn build_ui(app: &Application, url: &str) {
 
     glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
         let msgs: Vec<ServerMsg> = {
-            let mut q = queue.lock().unwrap();
+            let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
             q.drain(..).collect()
         };
 

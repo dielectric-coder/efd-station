@@ -17,7 +17,7 @@ const RING_CAPACITY: usize = 48000 / 5;
 pub struct AudioPlayer {
     ring: Arc<Mutex<VecDeque<f32>>>,
     _stream: Stream,
-    decoder: Mutex<Decoder>,
+    decoder: Mutex<(Decoder, Vec<f32>)>, // decoder + reusable PCM buffer
     chunks_received: AtomicU64,
 }
 
@@ -68,10 +68,11 @@ impl AudioPlayer {
             config,
         );
 
+        let pcm_buf = vec![0.0f32; OPUS_FRAME_SIZE];
         Ok(Self {
             ring,
             _stream: stream,
-            decoder: Mutex::new(decoder),
+            decoder: Mutex::new((decoder, pcm_buf)),
             chunks_received: AtomicU64::new(0),
         })
     }
@@ -86,9 +87,10 @@ impl AudioPlayer {
             eprintln!("audio: {} chunks received, ring buffer: {} samples", count, rb.len());
         }
 
-        let mut dec = self.decoder.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.decoder.lock().unwrap_or_else(|e| e.into_inner());
+        let (ref mut dec, ref mut pcm) = *guard;
 
-        let mut pcm = vec![0.0f32; OPUS_FRAME_SIZE];
+        pcm.iter_mut().for_each(|s| *s = 0.0);
         let packet: audiopus::packet::Packet<'_> = match opus_data.try_into() {
             Ok(p) => p,
             Err(_) => return,
@@ -138,9 +140,16 @@ fn find_config(device: &cpal::Device) -> Result<StreamConfig, String> {
         }
     }
 
-    // Fallback: default config
-    device
+    // Fallback: default config — but only if it's 48kHz
+    let default = device
         .default_output_config()
-        .map(|c| c.into())
-        .map_err(|e| format!("default config: {e}"))
+        .map_err(|e| format!("default config: {e}"))?;
+    if default.sample_rate() == cpal::SampleRate(48000) {
+        Ok(default.into())
+    } else {
+        Err(format!(
+            "no 48kHz output config found (default is {}Hz)",
+            default.sample_rate().0
+        ))
+    }
 }

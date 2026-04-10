@@ -87,6 +87,7 @@ impl Pipeline {
         }
 
         // --- Demod task ---
+        let (demod_mode_tx, demod_mode_rx) = tokio::sync::watch::channel(efd_proto::Mode::USB);
         {
             let iq_rx = iq_tx.subscribe();
             let demod_cfg = efd_dsp::DemodConfig {
@@ -96,7 +97,7 @@ impl Pipeline {
             };
             let dtx = demod_audio_tx;
             let c = cancel.clone();
-            let handle = efd_dsp::spawn_demod_task(iq_rx, dtx, demod_cfg, c);
+            let handle = efd_dsp::spawn_demod_task(iq_rx, dtx, demod_cfg, demod_mode_rx, c);
             let handle = tokio::spawn(async move {
                 match handle.await {
                     Ok(Ok(())) => info!("demod task exited cleanly"),
@@ -189,6 +190,28 @@ impl Pipeline {
                 }
             });
             tasks.push(("cat_cmd", cmd_w));
+        }
+
+        // --- Mode forwarder: RadioState → demod mode watch ---
+        {
+            let mut state_rx = state_tx.subscribe();
+            let mode_tx = demod_mode_tx;
+            let c = cancel.clone();
+            let handle = tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = c.cancelled() => break,
+                        result = state_rx.recv() => {
+                            match result {
+                                Ok(state) => { let _ = mode_tx.send(state.mode); }
+                                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                                Err(broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                    }
+                }
+            });
+            tasks.push(("mode_fwd", handle));
         }
 
         info!(tasks = tasks.len(), "pipeline started");
