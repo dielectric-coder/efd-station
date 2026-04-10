@@ -22,4 +22,5 @@ poll_interval_ms = 200
 
 [audio]
 alsa_device = "default"
+tx_device = "default"
 sample_rate = 48000

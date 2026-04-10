@@ -1,4 +1,3 @@
-use std::io::{Read, Write};
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
 use std::time::Duration;
@@ -6,9 +5,13 @@ use std::time::Duration;
 use nix::fcntl::{self, OFlag};
 use nix::sys::stat::Mode;
 use nix::sys::termios::{self, BaudRate, SetArg, SpecialCharacterIndices};
+use nix::unistd;
 use tracing::{debug, info};
 
 use crate::error::CatError;
+
+/// Maximum length of a CAT command we'll accept from clients.
+pub const MAX_CAT_CMD_LEN: usize = 64;
 
 /// Direct serial connection to the FDM-DUO CAT port.
 /// Ported from EladSpectrum cat_control.c — 38400 8N1, raw mode.
@@ -107,67 +110,72 @@ impl SerialPort {
     }
 
     /// Send a CAT command and read the `;`-terminated response.
+    /// Uses nix::unistd::read/write directly — no unsafe File wrappers.
     pub fn command(&self, cmd: &str) -> Result<String, CatError> {
         // Flush input
         termios::tcflush(&self.fd, termios::FlushArg::TCIFLUSH)
             .map_err(|e| CatError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
-        // Write command
-        let mut file = unsafe { std::fs::File::from_raw_fd(self.fd.as_raw_fd()) };
-        let write_result = file.write_all(cmd.as_bytes());
-        // Prevent File from closing our fd
-        std::mem::forget(file);
-        write_result?;
+        // Write command using nix::unistd::write
+        let mut written = 0;
+        let cmd_bytes = cmd.as_bytes();
+        while written < cmd_bytes.len() {
+            match unistd::write(&self.fd, &cmd_bytes[written..]) {
+                Ok(n) => written += n,
+                Err(nix::errno::Errno::EINTR) => continue,
+                Err(e) => {
+                    return Err(CatError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        e,
+                    )))
+                }
+            }
+        }
 
         // Small delay for radio to process (50ms, same as EladSpectrum)
         std::thread::sleep(Duration::from_millis(50));
 
-        // Read response until ';'
+        // Read response until ';' using nix::unistd::read
         let mut response = Vec::with_capacity(64);
         let mut buf = [0u8; 64];
         let mut retries = 10;
 
-        let mut file = unsafe { std::fs::File::from_raw_fd(self.fd.as_raw_fd()) };
         loop {
-            let n = match file.read(&mut buf) {
-                Ok(n) => n,
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            match unistd::read(self.fd.as_raw_fd(), &mut buf) {
+                Ok(0) => {
                     retries -= 1;
                     if retries == 0 {
                         break;
                     }
                     std::thread::sleep(Duration::from_millis(10));
-                    continue;
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Ok(n) => {
+                    response.extend_from_slice(&buf[..n]);
+                    if let Some(pos) = response.iter().position(|&b| b == b';') {
+                        response.truncate(pos + 1);
+                        break;
+                    }
+                }
+                Err(nix::errno::Errno::EAGAIN) => {
+                    retries -= 1;
+                    if retries == 0 {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(nix::errno::Errno::EINTR) => continue,
                 Err(e) => {
-                    std::mem::forget(file);
-                    return Err(CatError::Io(e));
+                    return Err(CatError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        e,
+                    )))
                 }
-            };
-
-            if n == 0 {
-                retries -= 1;
-                if retries == 0 {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-                continue;
-            }
-
-            response.extend_from_slice(&buf[..n]);
-
-            // Check for ';' terminator
-            if let Some(pos) = response.iter().position(|&b| b == b';') {
-                response.truncate(pos + 1);
-                break;
             }
         }
-        std::mem::forget(file);
 
-        let resp = String::from_utf8_lossy(&response).to_string();
+        let resp = String::from_utf8_lossy(&response);
         debug!(cmd = %cmd.trim_end_matches(';'), resp = %resp, "CAT");
-        Ok(resp)
+        Ok(resp.into_owned())
     }
 
     pub fn device(&self) -> &str {

@@ -46,7 +46,10 @@ pub struct CatConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioConfig {
+    /// ALSA device for RX audio playback (HAT sound card).
     pub alsa_device: String,
+    /// ALSA device for TX audio output to FDM-DUO USB audio.
+    pub tx_device: String,
     pub sample_rate: u32,
 }
 
@@ -105,6 +108,7 @@ impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             alsa_device: "default".into(),
+            tx_device: "default".into(),
             sample_rate: 48_000,
         }
     }

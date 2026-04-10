@@ -5,6 +5,15 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
+/// Maximum WS frame size we'll decode (4 KB — plenty for any valid message).
+const MAX_WS_FRAME: usize = 4096;
+
+/// Maximum CAT command length from a client.
+const MAX_CAT_CMD_LEN: usize = 64;
+
+/// Maximum Opus frame size from a client (typical Opus frame < 500 bytes).
+const MAX_TX_AUDIO_LEN: usize = 2048;
+
 /// Upstream task: read WS binary frames, deserialize ClientMsg, route to mpsc channels.
 pub async fn run(
     mut stream: futures_util::stream::SplitStream<WebSocket>,
@@ -12,7 +21,7 @@ pub async fn run(
     tx_audio_tx: mpsc::Sender<TxAudio>,
     cancel: CancellationToken,
 ) {
-    let cfg = bincode::config::standard();
+    let cfg = bincode::config::standard().with_limit::<MAX_WS_FRAME>();
 
     loop {
         let frame = tokio::select! {
@@ -26,7 +35,13 @@ pub async fn run(
         };
 
         let data = match frame {
-            Ok(Message::Binary(data)) => data,
+            Ok(Message::Binary(data)) => {
+                if data.len() > MAX_WS_FRAME {
+                    warn!(len = data.len(), "WS frame too large, dropping");
+                    continue;
+                }
+                data
+            }
             Ok(Message::Close(_)) => {
                 debug!("WS client sent close");
                 break;
@@ -52,6 +67,10 @@ pub async fn run(
 
         match msg {
             ClientMsg::CatCommand(cmd) => {
+                if !validate_cat_command(&cmd.raw) {
+                    warn!(cmd = %cmd.raw, "invalid CAT command rejected");
+                    continue;
+                }
                 trace!(cmd = %cmd.raw, "upstream: CAT command");
                 if cat_tx.send(cmd).await.is_err() {
                     warn!("CAT channel closed");
@@ -59,6 +78,10 @@ pub async fn run(
                 }
             }
             ClientMsg::TxAudio(audio) => {
+                if audio.opus_data.len() > MAX_TX_AUDIO_LEN {
+                    warn!(len = audio.opus_data.len(), "TX audio frame too large");
+                    continue;
+                }
                 trace!(seq = audio.seq, "upstream: TX audio");
                 if tx_audio_tx.send(audio).await.is_err() {
                     warn!("TX audio channel closed");
@@ -66,7 +89,6 @@ pub async fn run(
                 }
             }
             ClientMsg::Ptt(ptt) => {
-                // PTT is forwarded as a CAT command for now
                 let cmd = if ptt.on { "TX;" } else { "RX;" };
                 trace!(ptt = ptt.on, "upstream: PTT");
                 if cat_tx
@@ -82,4 +104,17 @@ pub async fn run(
             }
         }
     }
+}
+
+/// Validate a CAT command from a WS client.
+/// Only allows printable ASCII, must end with ';', length limited.
+fn validate_cat_command(cmd: &str) -> bool {
+    if cmd.is_empty() || cmd.len() > MAX_CAT_CMD_LEN {
+        return false;
+    }
+    if !cmd.ends_with(';') {
+        return false;
+    }
+    // Only printable ASCII (0x20..=0x7E)
+    cmd.bytes().all(|b| (0x20..=0x7E).contains(&b))
 }

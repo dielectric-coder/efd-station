@@ -22,7 +22,6 @@ pub struct Pipeline {
     pub tx_audio_tx: mpsc::Sender<TxAudio>,
 
     pub(crate) cancel: CancellationToken,
-    #[allow(dead_code)]
     tasks: Vec<(&'static str, JoinHandle<()>)>,
 }
 
@@ -32,6 +31,7 @@ impl Pipeline {
         let cancel = CancellationToken::new();
 
         // -- broadcast channels (fan-out) --
+        // efd-dsp now uses efd_iq::IqBlock directly — no forwarder needed
         let (iq_tx, _) = broadcast::channel::<Arc<efd_iq::IqBlock>>(16);
         let (fft_tx, _) = broadcast::channel::<Arc<FftBins>>(8);
         let (state_tx, _) = broadcast::channel::<RadioState>(16);
@@ -40,9 +40,7 @@ impl Pipeline {
         // -- mpsc channels (single consumer) --
         let (cat_tx, cat_rx) = mpsc::channel::<CatCommand>(64);
         let (tx_audio_tx, tx_audio_rx) = mpsc::channel::<TxAudio>(64);
-        // Internal mpsc for demod → Opus encoder → broadcast<AudioChunk>
-        let (demod_audio_tx, demod_audio_rx) =
-            mpsc::channel::<efd_dsp::AudioBlock>(64);
+        let (demod_audio_tx, demod_audio_rx) = mpsc::channel::<efd_dsp::AudioBlock>(64);
 
         let mut tasks: Vec<(&'static str, JoinHandle<()>)> = Vec::new();
 
@@ -55,7 +53,6 @@ impl Pipeline {
             let tx = iq_tx.clone();
             let c = cancel.clone();
             let handle = efd_iq::spawn_iq_capture(iq_cfg, tx, c);
-            // Wrap the typed JoinHandle into a unit one for uniform storage
             let handle = tokio::spawn(async move {
                 match handle.await {
                     Ok(Ok(())) => info!("IQ capture exited cleanly"),
@@ -66,32 +63,19 @@ impl Pipeline {
             tasks.push(("iq_capture", handle));
         }
 
-        // --- IQ forwarder: efd_iq::IqBlock → efd_dsp::IqBlock ---
-        // Hoisted out so both FFT and demod can subscribe to dsp_iq_tx.
-        let (dsp_iq_tx, _) = broadcast::channel::<Arc<efd_dsp::IqBlock>>(16);
-        {
-            let iq_rx = iq_tx.subscribe();
-            let dsp_iq_tx2 = dsp_iq_tx.clone();
-            let c = cancel.clone();
-            let forward = tokio::spawn(async move {
-                forward_iq_blocks(iq_rx, dsp_iq_tx2, c).await;
-            });
-            tasks.push(("iq_forward", forward));
-        }
-
         // --- FFT task ---
         {
             let fft_cfg = efd_dsp::FftConfig {
                 fft_size: config.dsp.fft_size,
                 averaging: config.dsp.fft_averaging,
-                center_freq_hz: 7_100_000, // updated by CAT state later
+                center_freq_hz: 0, // updated from RadioState by client
                 span_hz: config.dsp.sample_rate,
                 ref_level_db: -20.0,
             };
-            let dsp_iq_rx = dsp_iq_tx.subscribe();
+            let iq_rx = iq_tx.subscribe();
             let fft_tx2 = fft_tx.clone();
             let c = cancel.clone();
-            let handle = efd_dsp::spawn_fft_task(dsp_iq_rx, fft_tx2, fft_cfg, c);
+            let handle = efd_dsp::spawn_fft_task(iq_rx, fft_tx2, fft_cfg, c);
             let handle = tokio::spawn(async move {
                 match handle.await {
                     Ok(Ok(())) => info!("FFT task exited cleanly"),
@@ -104,15 +88,15 @@ impl Pipeline {
 
         // --- Demod task ---
         {
-            let dsp_iq_rx2 = dsp_iq_tx.subscribe();
+            let iq_rx = iq_tx.subscribe();
             let demod_cfg = efd_dsp::DemodConfig {
                 input_rate: config.dsp.sample_rate,
                 output_rate: config.audio.sample_rate,
-                mode: efd_proto::Mode::USB, // initial mode, updated by CAT state later
+                mode: efd_proto::Mode::USB,
             };
             let dtx = demod_audio_tx;
             let c = cancel.clone();
-            let handle = efd_dsp::spawn_demod_task(dsp_iq_rx2, dtx, demod_cfg, c);
+            let handle = efd_dsp::spawn_demod_task(iq_rx, dtx, demod_cfg, c);
             let handle = tokio::spawn(async move {
                 match handle.await {
                     Ok(Ok(())) => info!("demod task exited cleanly"),
@@ -140,14 +124,11 @@ impl Pipeline {
                 sample_rate: config.audio.sample_rate,
                 latency_ms: 50,
             };
-            // ALSA gets raw PCM, not Opus. We need a separate mpsc for it.
             let (alsa_tx, alsa_rx) = mpsc::channel::<efd_audio::PcmBlock>(64);
-            let atx = alsa_tx;
             let audio_rx_for_alsa = audio_tx.subscribe();
             let c = cancel.clone();
-            // Bridge: decode Opus AudioChunk back to PCM for local playback
             let alsa_bridge = tokio::spawn(async move {
-                decode_audio_for_alsa(audio_rx_for_alsa, atx, c).await;
+                decode_audio_for_alsa(audio_rx_for_alsa, alsa_tx, c).await;
             });
             tasks.push(("alsa_bridge", alsa_bridge));
 
@@ -166,7 +147,7 @@ impl Pipeline {
         // --- USB TX audio task ---
         {
             let usb_tx_cfg = efd_audio::UsbTxConfig {
-                device: config.audio.alsa_device.clone(), // TODO: separate TX device config
+                device: config.audio.tx_device.clone(),
                 sample_rate: config.audio.sample_rate,
             };
             let c = cancel.clone();
@@ -223,8 +204,7 @@ impl Pipeline {
         }
     }
 
-    /// Graceful shutdown — cancel all tasks and wait for them to finish.
-    #[allow(dead_code)]
+    /// Graceful shutdown — cancel all tasks and await them.
     pub async fn shutdown(self) {
         info!("pipeline shutting down");
         self.cancel.cancel();
@@ -314,34 +294,6 @@ async fn decode_audio_for_alsa(
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!(skipped = n, "ALSA audio bridge lagged");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        }
-    }
-}
-
-/// Bridge efd_iq::IqBlock → efd_dsp::IqBlock (separate types to avoid crate coupling).
-async fn forward_iq_blocks(
-    mut rx: broadcast::Receiver<Arc<efd_iq::IqBlock>>,
-    tx: broadcast::Sender<Arc<efd_dsp::IqBlock>>,
-    cancel: CancellationToken,
-) {
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => break,
-            result = async { rx.recv().await } => {
-                match result {
-                    Ok(block) => {
-                        let dsp_block = Arc::new(efd_dsp::IqBlock {
-                            samples: block.samples.clone(),
-                            timestamp_us: block.timestamp_us,
-                        });
-                        let _ = tx.send(dsp_block);
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "IQ forwarder lagged");
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }

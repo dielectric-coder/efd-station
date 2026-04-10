@@ -6,8 +6,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
+use efd_iq::IqBlock;
+
 use crate::error::DspError;
-use crate::fft::IqBlock;
 
 /// Configuration for the demodulator task.
 #[derive(Debug, Clone)]

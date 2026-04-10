@@ -3,6 +3,7 @@ mod pipeline;
 mod ws;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::routing::get;
 use axum::Router;
@@ -46,20 +47,35 @@ async fn main() {
         .await
         .unwrap();
 
-    // Cancel triggers pipeline tasks to check their cancellation tokens.
-    cancel.cancel();
     info!("shutting down...");
+    cancel.cancel();
 
-    // Give blocking tasks a moment to notice cancellation.
-    // spawn_blocking tasks (IQ, FFT, demod) may be stuck in USB reads or
-    // blocking_recv — they'll exit on the next iteration or timeout.
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    // Try to unwrap the Arc; if WS clients still hold refs, just wait a bit
+    let state = match Arc::try_unwrap(state) {
+        Ok(s) => s,
+        Err(arc) => {
+            // WS clients still connected — give them a moment
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            match Arc::try_unwrap(arc) {
+                Ok(s) => s,
+                Err(_) => {
+                    info!("force exit — WS clients still hold references");
+                    std::process::exit(0);
+                }
+            }
+        }
+    };
 
-    info!("efd-backend stopped");
-
-    // Force exit — spawn_blocking tasks may still be stuck in USB reads
-    // with up to 2s timeout. Don't hang the process waiting for them.
-    std::process::exit(0);
+    // Graceful pipeline shutdown with timeout
+    tokio::select! {
+        _ = state.pipeline.shutdown() => {
+            info!("efd-backend stopped");
+        }
+        _ = tokio::time::sleep(Duration::from_secs(3)) => {
+            info!("shutdown timed out, exiting");
+            std::process::exit(0);
+        }
+    }
 }
 
 async fn shutdown_signal(cancel: CancellationToken) {

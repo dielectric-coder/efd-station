@@ -8,22 +8,10 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
+use efd_iq::IqBlock;
+
 use crate::error::DspError;
 use crate::window::blackman_harris;
-
-// Re-export IqBlock from efd-iq would create a dependency.
-// Instead, accept any type that provides [f32; 2] samples + timestamp.
-// We define a minimal trait-free approach: the pipeline passes us an
-// `IqBlock`-shaped struct. To avoid coupling efd-dsp to efd-iq,
-// we accept a generic struct here.
-
-/// A block of IQ samples consumed by the FFT task.
-/// This mirrors `efd_iq::IqBlock` without creating a crate dependency.
-#[derive(Debug, Clone)]
-pub struct IqBlock {
-    pub samples: Vec<[f32; 2]>,
-    pub timestamp_us: u64,
-}
 
 /// Configuration for the FFT task.
 #[derive(Debug, Clone)]

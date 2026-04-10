@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 efd-proto = { workspace = true }
+efd-iq = { workspace = true }
 rustfft = "6"
 tokio = { workspace = true }
 tokio-util = { workspace = true }

@@ -10,7 +10,7 @@ use tracing::{debug, error, warn};
 use crate::discover;
 use crate::error::CatError;
 use crate::parse;
-use crate::serial::SerialPort;
+use crate::serial::{SerialPort, MAX_CAT_CMD_LEN};
 
 /// Configuration for the CAT tasks.
 #[derive(Debug, Clone)]
@@ -107,6 +107,14 @@ pub fn spawn_cat_tasks(
     (poll_handle, cmd_handle)
 }
 
+/// Acquire the serial port mutex, recovering from poison.
+fn lock_port(port: &Mutex<SerialPort>) -> std::sync::MutexGuard<'_, SerialPort> {
+    port.lock().unwrap_or_else(|poisoned| {
+        warn!("CAT serial port mutex was poisoned, recovering");
+        poisoned.into_inner()
+    })
+}
+
 /// Poll radio state periodically.
 fn run_poll(
     port: Arc<Mutex<SerialPort>>,
@@ -124,7 +132,7 @@ fn run_poll(
         std::thread::sleep(interval);
 
         let state = {
-            let p = port.lock().unwrap();
+            let p = lock_port(&port);
             poll_radio_state(&p)
         };
 
@@ -139,35 +147,41 @@ fn run_poll(
     }
 }
 
-/// Read radio state via IF; and RF; commands.
+/// Read radio state via IF;, RF;, and SM; commands.
 fn poll_radio_state(port: &SerialPort) -> Result<RadioState, CatError> {
     let if_resp = port.command("IF;")?;
-    let (freq, mode, vfo) = parse::parse_if_response(&if_resp).ok_or_else(|| {
+    let parsed = parse::parse_if_response(&if_resp).ok_or_else(|| {
         CatError::BadResponse(format!("cannot parse IF response: {if_resp}"))
     })?;
 
-    let filter_bw = if let Some(mode_ch) = parse::mode_char(mode) {
+    let filter_bw = if let Some(mode_ch) = parse::mode_char(parsed.mode) {
         let cmd = format!("RF{mode_ch};");
         match port.command(&cmd) {
-            Ok(rf_resp) => parse::parse_rf_response(&rf_resp, mode).unwrap_or_default(),
+            Ok(rf_resp) => parse::parse_rf_response(&rf_resp, parsed.mode).unwrap_or_default(),
             Err(_) => String::new(),
         }
     } else {
         String::new()
     };
 
+    // S-meter reading
+    let s_meter_db = match port.command("SM0;") {
+        Ok(sm_resp) => parse::parse_sm_response(&sm_resp).unwrap_or(-127.0),
+        Err(_) => -127.0,
+    };
+
     Ok(RadioState {
-        vfo,
-        freq_hz: freq,
-        mode,
+        vfo: parsed.vfo,
+        freq_hz: parsed.freq_hz,
+        mode: parsed.mode,
         filter_bw,
-        att: false,
-        lp: false,
-        agc: AgcMode::Slow,
-        nr: false,
-        nb: false,
-        s_meter_db: -127.0,
-        tx: false,
+        att: false,   // TODO: query AT; command when available
+        lp: false,    // TODO: query LP; command when available
+        agc: AgcMode::Slow, // TODO: query GT; command when available
+        nr: false,    // TODO: query NR; command when available
+        nb: false,    // TODO: query NB; command when available
+        s_meter_db,
+        tx: parsed.tx,
     })
 }
 
@@ -184,13 +198,18 @@ fn run_commands(
             return Err(CatError::Cancelled);
         }
 
-        // blocking_recv with a timeout check
         let cmd = match cmd_rx.blocking_recv() {
             Some(c) => c,
             None => return Ok(()),
         };
 
-        let p = port.lock().unwrap();
+        // Validate command (defense in depth — upstream.rs also validates)
+        if cmd.raw.len() > MAX_CAT_CMD_LEN || !cmd.raw.ends_with(';') {
+            warn!(cmd = %cmd.raw, "invalid CAT command, dropping");
+            continue;
+        }
+
+        let p = lock_port(&port);
         match p.command(&cmd.raw) {
             Ok(resp) => {
                 debug!(cmd = %cmd.raw, response = %resp, "CAT command");
@@ -200,9 +219,4 @@ fn run_commands(
             }
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    // Serial port tests require hardware — integration tests only
 }
