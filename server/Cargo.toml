@@ -29,7 +29,7 @@ directories = "6"
 maintainer = "dielectric-coder"
 section = "hamradio"
 priority = "optional"
-depends = "libusb-1.0-0, libasound2, libopus0, hamlib-utils"
+depends = "libusb-1.0-0, libasound2, libopus0, libhamlib-utils"
 assets = [
     ["target/release/efd-server", "usr/bin/", "755"],
     ["../dist/config/config.toml", "etc/efd-backend/config.toml.example", "644"],
