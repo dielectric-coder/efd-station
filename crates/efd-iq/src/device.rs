@@ -1,0 +1,260 @@
+use std::time::Duration;
+
+use rusb::{DeviceHandle, GlobalContext};
+use tracing::{debug, info, warn};
+
+use crate::error::IqError;
+
+pub const ELAD_VENDOR_ID: u16 = 0x1721;
+pub const ELAD_PRODUCT_ID: u16 = 0x061a;
+pub const ELAD_RF_ENDPOINT: u8 = 0x86;
+pub const USB_BUFFER_SIZE: usize = 512 * 24; // 12288 bytes
+pub const DEFAULT_SAMPLE_RATE: u32 = 192_000;
+const S_RATE: i64 = 122_880_000;
+const USB_TIMEOUT: Duration = Duration::from_millis(2000);
+const CTRL_TIMEOUT: Duration = Duration::from_millis(1000);
+
+/// Device info read during initialization.
+#[derive(Debug, Clone)]
+pub struct DeviceInfo {
+    pub serial: String,
+    pub hw_version_major: u8,
+    pub hw_version_minor: u8,
+    pub sample_rate_correction: i32,
+}
+
+/// Low-level handle wrapping the opened FDM-DUO USB device.
+pub struct FdmDuo {
+    handle: DeviceHandle<GlobalContext>,
+    pub info: DeviceInfo,
+}
+
+impl FdmDuo {
+    /// Open and initialize the FDM-DUO. Detaches kernel driver, claims
+    /// interface, reads device info, initializes FIFO.
+    pub fn open() -> Result<Self, IqError> {
+        Self::open_with_ids(ELAD_VENDOR_ID, ELAD_PRODUCT_ID)
+    }
+
+    pub fn open_with_ids(vid: u16, pid: u16) -> Result<Self, IqError> {
+        let handle = rusb::open_device_with_vid_pid(vid, pid)
+            .ok_or(IqError::DeviceNotFound { vid, pid })?;
+        info!("FDM-DUO device opened");
+
+        // Detach kernel driver if active
+        if handle.kernel_driver_active(0).unwrap_or(false) {
+            debug!("detaching kernel driver");
+            let _ = handle.detach_kernel_driver(0);
+        }
+
+        // Claim interface
+        handle.claim_interface(0)?;
+        debug!("interface claimed");
+
+        let mut dev = Self {
+            handle,
+            info: DeviceInfo {
+                serial: String::new(),
+                hw_version_major: 0,
+                hw_version_minor: 0,
+                sample_rate_correction: 0,
+            },
+        };
+
+        dev.read_device_info();
+        dev.init_fifo()?;
+        dev.read_sample_rate_correction();
+
+        info!(serial = %dev.info.serial,
+              hw = format_args!("{}.{}", dev.info.hw_version_major, dev.info.hw_version_minor),
+              correction = dev.info.sample_rate_correction,
+              "FDM-DUO initialized");
+        Ok(dev)
+    }
+
+    fn read_device_info(&mut self) {
+        // USB driver version
+        let mut buf = [0u8; 64];
+        if let Ok(2) = self.handle.read_control(0xC0, 0xFF, 0x0000, 0x0000, &mut buf[..2], CTRL_TIMEOUT) {
+            debug!(version = format_args!("{}.{}", buf[0], buf[1]), "USB driver version");
+        }
+
+        // HW version
+        if let Ok(2) = self.handle.read_control(0xC0, 0xA2, 0x404C, 0x0151, &mut buf[..2], CTRL_TIMEOUT) {
+            self.info.hw_version_major = buf[0];
+            self.info.hw_version_minor = buf[1];
+        }
+
+        // Serial number
+        if let Ok(32) = self.handle.read_control(0xC0, 0xA2, 0x4000, 0x0151, &mut buf[..32], CTRL_TIMEOUT) {
+            self.info.serial = String::from_utf8_lossy(&buf[..32])
+                .trim_end_matches('\0')
+                .to_string();
+        }
+    }
+
+    fn read_sample_rate_correction(&mut self) {
+        let mut buf = [0u8; 4];
+        if let Ok(4) = self.handle.read_control(0xC0, 0xA2, 0x4024, 0x0151, &mut buf, CTRL_TIMEOUT) {
+            let correction = i32::from_le_bytes(buf);
+            if (-1_000_000..=1_000_000).contains(&correction) {
+                self.info.sample_rate_correction = correction;
+            } else {
+                warn!(correction, "sample rate correction out of range, ignoring");
+            }
+        }
+    }
+
+    /// Initialize FIFO: stop, init (set EP6 to slave mode).
+    fn init_fifo(&self) -> Result<(), IqError> {
+        let mut buf = [0u8; 1];
+
+        // Stop FIFO
+        let res = self.handle.read_control(0xC0, 0xE1, 0x0000, 0xE9 << 8, &mut buf, CTRL_TIMEOUT);
+        if res != Ok(1) {
+            warn!("stop FIFO returned {:?}", res);
+        }
+
+        // Init FIFO (set EP6 FIFO to slave mode)
+        let res = self.handle.read_control(0xC0, 0xE1, 0x0000, 0xE8 << 8, &mut buf, CTRL_TIMEOUT);
+        if res != Ok(1) {
+            warn!("init FIFO returned {:?}", res);
+        }
+
+        debug!("FIFO initialized");
+        Ok(())
+    }
+
+    /// Start FIFO streaming: clear halt, start FIFO.
+    pub fn start_streaming(&self) -> Result<(), IqError> {
+        let mut buf = [0u8; 1];
+
+        // Re-init FIFO
+        self.init_fifo()?;
+
+        // Clear halt on bulk endpoint
+        match self.handle.clear_halt(ELAD_RF_ENDPOINT) {
+            Ok(()) => debug!("endpoint cleared"),
+            Err(rusb::Error::NotFound) => {}
+            Err(e) => warn!("clear halt: {e}"),
+        }
+
+        // Start FIFO
+        let res = self.handle.read_control(0xC0, 0xE1, 0x0001, 0xE9 << 8, &mut buf, CTRL_TIMEOUT);
+        match res {
+            Ok(1) if buf[0] == 0xE9 => {
+                debug!("streaming enabled");
+                Ok(())
+            }
+            Ok(n) => Err(IqError::FifoControl(format!(
+                "start FIFO: got {n} bytes, buf[0]=0x{:02X}",
+                buf[0]
+            ))),
+            Err(e) => Err(IqError::Usb(e)),
+        }
+    }
+
+    /// Stop FIFO streaming.
+    pub fn stop_streaming(&self) {
+        let mut buf = [0u8; 1];
+        let _ = self.handle.read_control(0xC0, 0xE1, 0x0000, 0xE9 << 8, &mut buf, CTRL_TIMEOUT);
+        debug!("streaming stopped");
+    }
+
+    /// Perform a synchronous bulk read from the RF endpoint.
+    /// Returns the number of bytes actually read.
+    pub fn bulk_read(&self, buf: &mut [u8]) -> Result<usize, rusb::Error> {
+        self.handle.read_bulk(ELAD_RF_ENDPOINT, buf, USB_TIMEOUT)
+    }
+
+    /// Effective sample rate accounting for per-device correction.
+    pub fn effective_clock(&self) -> i64 {
+        S_RATE + self.info.sample_rate_correction as i64
+    }
+}
+
+impl Drop for FdmDuo {
+    fn drop(&mut self) {
+        self.stop_streaming();
+        let _ = self.handle.release_interface(0);
+    }
+}
+
+/// Convert a buffer of raw USB data (32-bit signed LE IQ pairs) into
+/// normalized f32 samples in [-1.0, 1.0].
+///
+/// Each IQ sample is 8 bytes: 4 bytes I (little-endian i32) + 4 bytes Q.
+/// Returns a Vec of [I, Q] pairs.
+pub fn convert_samples(usb_data: &[u8]) -> Vec<[f32; 2]> {
+    const BYTES_PER_SAMPLE: usize = 8;
+    let count = usb_data.len() / BYTES_PER_SAMPLE;
+    let mut out = Vec::with_capacity(count);
+
+    for i in 0..count {
+        let off = i * BYTES_PER_SAMPLE;
+        let i_val = i32::from_le_bytes([
+            usb_data[off],
+            usb_data[off + 1],
+            usb_data[off + 2],
+            usb_data[off + 3],
+        ]);
+        let q_val = i32::from_le_bytes([
+            usb_data[off + 4],
+            usb_data[off + 5],
+            usb_data[off + 6],
+            usb_data[off + 7],
+        ]);
+        out.push([
+            i_val as f32 / 2_147_483_648.0,
+            q_val as f32 / 2_147_483_648.0,
+        ]);
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn convert_samples_basic() {
+        // i32 max → ~1.0, i32 min → -1.0, zero → 0.0
+        let mut buf = [0u8; 24]; // 3 samples
+
+        // Sample 0: I=0, Q=0
+        // (already zero)
+
+        // Sample 1: I = i32::MAX, Q = i32::MIN
+        let i_max = i32::MAX.to_le_bytes();
+        let q_min = i32::MIN.to_le_bytes();
+        buf[8..12].copy_from_slice(&i_max);
+        buf[12..16].copy_from_slice(&q_min);
+
+        // Sample 2: I = 1073741824 (0.5), Q = -1073741824 (-0.5)
+        let half_pos = 1_073_741_824i32.to_le_bytes();
+        let half_neg = (-1_073_741_824i32).to_le_bytes();
+        buf[16..20].copy_from_slice(&half_pos);
+        buf[20..24].copy_from_slice(&half_neg);
+
+        let samples = convert_samples(&buf);
+        assert_eq!(samples.len(), 3);
+
+        assert!((samples[0][0]).abs() < 1e-7);
+        assert!((samples[0][1]).abs() < 1e-7);
+
+        assert!((samples[1][0] - 1.0).abs() < 1e-6);
+        assert!((samples[1][1] + 1.0).abs() < 1e-6);
+
+        assert!((samples[2][0] - 0.5).abs() < 1e-6);
+        assert!((samples[2][1] + 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn convert_samples_partial_ignored() {
+        // 10 bytes → 1 complete sample, 2 leftover bytes ignored
+        let buf = [0u8; 10];
+        let samples = convert_samples(&buf);
+        assert_eq!(samples.len(), 1);
+    }
+}

@@ -1,0 +1,13 @@
+[package]
+name = "efd-audio"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+efd-proto = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+alsa = "0.9"
+audiopus = "0.3.0-rc.0"

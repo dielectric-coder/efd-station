@@ -1,0 +1,11 @@
+[package]
+name = "efd-iq"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rusb = "0.9"
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

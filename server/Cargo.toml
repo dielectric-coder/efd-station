@@ -1,0 +1,23 @@
+[package]
+name = "efd-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+efd-proto = { workspace = true }
+efd-iq = { workspace = true }
+efd-dsp = { workspace = true }
+efd-audio = { workspace = true }
+efd-cat = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+axum = { version = "0.8", features = ["ws"] }
+bytes = "1"
+futures-util = "0.3"
+toml = "0.8"
+directories = "6"

@@ -1,0 +1,26 @@
+[workspace]
+members = [
+    "server",
+    "crates/efd-proto",
+    "crates/efd-iq",
+    "crates/efd-dsp",
+    "crates/efd-audio",
+    "crates/efd-cat",
+]
+resolver = "2"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+serde = { version = "1", features = ["derive"] }
+bincode = "2.0.0-rc.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+
+# internal crates
+efd-proto = { path = "crates/efd-proto" }
+efd-iq = { path = "crates/efd-iq" }
+efd-dsp = { path = "crates/efd-dsp" }
+efd-audio = { path = "crates/efd-audio" }
+efd-cat = { path = "crates/efd-cat" }
