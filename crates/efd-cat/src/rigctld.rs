@@ -8,9 +8,11 @@ use tracing::{debug, error, info, warn};
 use crate::error::CatError;
 
 /// Pattern to match in `/dev/serial/by-id/` for the Elad FDM-DUO CAT port.
-/// The FDM-DUO exposes two USB serial interfaces; the CAT port typically
-/// contains "ELAD" or "FDM-DUO" in its symlink name.
 const ELAD_SERIAL_PATTERNS: &[&str] = &["ELAD", "FDM-DUO", "FDM_DUO"];
+
+/// Elad USB vendor/product IDs for sysfs matching.
+const ELAD_VID: &str = "1721";
+const ELAD_PID: &str = "061a";
 
 /// Configuration for rigctld process management.
 #[derive(Debug, Clone)]
@@ -149,9 +151,29 @@ impl RigctldProcess {
     }
 }
 
-/// Scan `/dev/serial/by-id/` for a symlink matching the Elad FDM-DUO.
-/// Returns the resolved (canonical) device path if found.
+/// Auto-discover the FDM-DUO CAT serial port.
+///
+/// Strategy:
+/// 1. Scan `/dev/serial/by-id/` for symlinks matching ELAD/FDM-DUO
+/// 2. Fallback: scan `/sys/class/tty/ttyUSB*/device/../` for Elad VID:PID
+/// 3. Fallback: scan `/sys/class/tty/ttyACM*/device/../` for Elad VID:PID
 pub fn discover_serial_device() -> Result<Option<String>, CatError> {
+    // Strategy 1: /dev/serial/by-id/
+    if let Some(dev) = discover_by_id()? {
+        return Ok(Some(dev));
+    }
+
+    // Strategy 2: match USB VID:PID via sysfs
+    if let Some(dev) = discover_by_vid_pid()? {
+        return Ok(Some(dev));
+    }
+
+    debug!("no FDM-DUO serial device found");
+    Ok(None)
+}
+
+/// Scan `/dev/serial/by-id/` for a symlink matching the Elad FDM-DUO.
+fn discover_by_id() -> Result<Option<String>, CatError> {
     let by_id = Path::new("/dev/serial/by-id");
     if !by_id.exists() {
         debug!("/dev/serial/by-id/ does not exist");
@@ -169,14 +191,62 @@ pub fn discover_serial_device() -> Result<Option<String>, CatError> {
             if name_str.contains(pattern) {
                 let resolved = entry.path().canonicalize().map_err(CatError::Io)?;
                 let device = resolved.to_string_lossy().to_string();
-                info!(symlink = %name_str, device = %device, "found FDM-DUO serial device");
+                info!(symlink = %name_str, device = %device, "found FDM-DUO serial device (by-id)");
                 return Ok(Some(device));
             }
         }
     }
 
-    debug!("no FDM-DUO serial device found in /dev/serial/by-id/");
     Ok(None)
+}
+
+/// Scan sysfs for ttyUSB* / ttyACM* devices whose parent USB device
+/// matches the Elad VID:PID (1721:061a).
+fn discover_by_vid_pid() -> Result<Option<String>, CatError> {
+    for prefix in &["ttyUSB", "ttyACM"] {
+        let class_dir = Path::new("/sys/class/tty");
+        if !class_dir.exists() {
+            continue;
+        }
+
+        let entries = match std::fs::read_dir(class_dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if !name_str.starts_with(prefix) {
+                continue;
+            }
+
+            // Read the USB device's idVendor and idProduct from sysfs
+            // Path: /sys/class/tty/ttyUSBx/device/../idVendor
+            let device_dir = entry.path().join("device").join("..");
+            let vid = read_sysfs_attr(&device_dir.join("idVendor"));
+            let pid = read_sysfs_attr(&device_dir.join("idProduct"));
+
+            if let (Some(vid), Some(pid)) = (vid, pid) {
+                if vid == ELAD_VID && pid == ELAD_PID {
+                    let dev_path = format!("/dev/{}", name_str);
+                    if Path::new(&dev_path).exists() {
+                        info!(device = %dev_path, "found FDM-DUO serial device (sysfs VID:PID)");
+                        return Ok(Some(dev_path));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Read a sysfs attribute file, returning trimmed contents.
+fn read_sysfs_attr(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
 }
 
 #[cfg(test)]
