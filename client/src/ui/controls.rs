@@ -3,7 +3,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use efd_proto::{ClientMsg, Ptt, RadioState};
+use efd_proto::{ClientMsg, Mode, Ptt, RadioState};
 use gtk4::prelude::*;
 use gtk4::{
     Adjustment, Align, Box as GtkBox, Button, DropDown, Entry, Label, LevelBar, Orientation,
@@ -173,6 +173,15 @@ impl DisplayBar {
 // Control bar (bottom) — interactive: PTT, Mute, Volume
 // ---------------------------------------------------------------------------
 
+const MODES: &[(&str, Mode)] = &[
+    ("LSB", Mode::LSB),
+    ("USB", Mode::USB),
+    ("CW", Mode::CW),
+    ("CWR", Mode::CWR),
+    ("AM", Mode::AM),
+    ("FM", Mode::FM),
+];
+
 const STEPS: &[(&str, u64)] = &[
     ("100 Hz", 100),
     ("1 kHz", 1_000),
@@ -239,6 +248,20 @@ impl ControlBar {
             }
         });
         sdr_box.append(&freq_entry);
+
+        // Mode dropdown — controls software demod, not the radio
+        let mode_list = StringList::new(&MODES.iter().map(|(s, _)| *s).collect::<Vec<_>>());
+        let mode_dropdown = DropDown::new(Some(mode_list), gtk4::Expression::NONE);
+        mode_dropdown.set_selected(1); // default USB
+        mode_dropdown.set_valign(Align::Center);
+        let tx = ws_tx.clone();
+        mode_dropdown.connect_selected_notify(move |dd| {
+            let idx = dd.selected() as usize;
+            if let Some(&(_, mode)) = MODES.get(idx) {
+                let _ = tx.send(ClientMsg::SetDemodMode(mode));
+            }
+        });
+        sdr_box.append(&mode_dropdown);
 
         // Step size dropdown
         let step_list = StringList::new(&STEPS.iter().map(|(s, _)| *s).collect::<Vec<_>>());

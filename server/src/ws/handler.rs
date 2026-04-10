@@ -32,6 +32,7 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
     let audio_rx = state.pipeline.audio_tx.subscribe();
     let cat_tx = state.pipeline.cat_tx.clone();
     let tx_audio_tx = state.pipeline.tx_audio_tx.clone();
+    let demod_mode_tx = state.pipeline.demod_mode_tx.clone();
     let cancel = state.cancel.clone();
 
     info!("WS client connected");
@@ -42,7 +43,7 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
     });
 
     let mut up = tokio::spawn(async move {
-        super::upstream::run(stream, cat_tx, tx_audio_tx, cancel).await;
+        super::upstream::run(stream, cat_tx, tx_audio_tx, demod_mode_tx, cancel).await;
     });
 
     // Wait for either task to finish, then abort the other

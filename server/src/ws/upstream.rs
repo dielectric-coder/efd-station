@@ -1,7 +1,7 @@
 use axum::extract::ws::{Message, WebSocket};
-use efd_proto::{CatCommand, ClientMsg, TxAudio};
+use efd_proto::{CatCommand, ClientMsg, Mode, TxAudio};
 use futures_util::StreamExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
@@ -19,6 +19,7 @@ pub async fn run(
     mut stream: futures_util::stream::SplitStream<WebSocket>,
     cat_tx: mpsc::Sender<CatCommand>,
     tx_audio_tx: mpsc::Sender<TxAudio>,
+    demod_mode_tx: watch::Sender<Option<Mode>>,
     cancel: CancellationToken,
 ) {
     let cfg = bincode::config::standard().with_limit::<MAX_WS_FRAME>();
@@ -104,7 +105,10 @@ pub async fn run(
             }
             ClientMsg::SetAudioSource(src) => {
                 debug!(?src, "upstream: audio source selection (not yet implemented)");
-                // Phase 2: route to per-client audio source watch channel
+            }
+            ClientMsg::SetDemodMode(mode) => {
+                debug!(?mode, "upstream: demod mode override");
+                let _ = demod_mode_tx.send(Some(mode));
             }
         }
     }

@@ -21,6 +21,9 @@ pub struct Pipeline {
     pub cat_tx: mpsc::Sender<CatCommand>,
     pub tx_audio_tx: mpsc::Sender<TxAudio>,
 
+    /// Client demod mode override — None = use radio's mode, Some = SDR override.
+    pub demod_mode_tx: tokio::sync::watch::Sender<Option<efd_proto::Mode>>,
+
     pub(crate) cancel: CancellationToken,
     tasks: Vec<(&'static str, JoinHandle<()>)>,
 }
@@ -86,6 +89,10 @@ impl Pipeline {
             });
             tasks.push(("fft", handle));
         }
+
+        // --- Demod mode override from client (SDR mode) ---
+        let (demod_mode_tx, demod_mode_rx) =
+            tokio::sync::watch::channel::<Option<efd_proto::Mode>>(None);
 
         // --- Demod task ---
         let (demod_tuning_tx, demod_tuning_rx) =
@@ -194,11 +201,12 @@ impl Pipeline {
             tasks.push(("cat_cmd", cmd_w));
         }
 
-        // --- Tuning forwarder: RadioState + IQ center → demod tuning ---
+        // --- Tuning forwarder: RadioState + IQ center + mode override → demod tuning ---
         {
             let mut state_rx = state_tx.subscribe();
             let tuning_tx = demod_tuning_tx;
             let iq_center = iq_center_rx;
+            let mode_override = demod_mode_rx;
             let c = cancel.clone();
             let handle = tokio::spawn(async move {
                 loop {
@@ -214,17 +222,18 @@ impl Pipeline {
                                         0.0
                                     };
                                     let filter_bw = parse_filter_bw(&state.filter_bw);
-                                    // For SSB/CW, offset NCO by ±BW/2 so the
-                                    // desired sideband centers at DC where the
-                                    // symmetric channel filter works correctly.
+                                    // Use client override if set (SDR mode),
+                                    // otherwise use radio's reported mode (Monitor mode).
                                     use efd_proto::Mode;
-                                    let ssb_offset = match state.mode {
+                                    let mode = mode_override.borrow()
+                                        .unwrap_or(state.mode);
+                                    let ssb_offset = match mode {
                                         Mode::USB | Mode::CW => filter_bw / 2.0,
                                         Mode::LSB | Mode::CWR => -filter_bw / 2.0,
-                                        _ => 0.0, // AM/FM: carrier at DC
+                                        _ => 0.0,
                                     };
                                     let _ = tuning_tx.send(efd_dsp::DemodTuning {
-                                        mode: state.mode,
+                                        mode,
                                         vfo_offset_hz: vfo_offset + ssb_offset,
                                         filter_bw_hz: filter_bw,
                                     });
@@ -247,6 +256,7 @@ impl Pipeline {
             audio_tx,
             cat_tx,
             tx_audio_tx,
+            demod_mode_tx,
             cancel,
             tasks,
         }
