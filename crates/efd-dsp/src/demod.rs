@@ -255,13 +255,13 @@ fn design_channel_filter(
 
     match mode {
         Mode::USB | Mode::CW => {
-            // Shift lowpass up by bw/2 to create bandpass [0, +bw]
-            let shift = bandwidth_hz / 2.0 / sample_rate as f64;
+            // Shift lowpass down by bw/2 to create bandpass [0, +bw]
+            let shift = -bandwidth_hz / 2.0 / sample_rate as f64;
             shift_filter(&h, shift)
         }
         Mode::LSB | Mode::CWR => {
-            // Shift lowpass down by bw/2 to create bandpass [-bw, 0]
-            let shift = -bandwidth_hz / 2.0 / sample_rate as f64;
+            // Shift lowpass up by bw/2 to create bandpass [-bw, 0]
+            let shift = bandwidth_hz / 2.0 / sample_rate as f64;
             shift_filter(&h, shift)
         }
         _ => {
