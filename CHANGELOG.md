@@ -2,6 +2,32 @@
 
 All notable changes to efd-station are documented in this file.
 
+## [0.3.1] - 2026-04-10
+
+### Added
+- GTK4 client application with spectrum, waterfall, and controls
+  - Cairo spectrum display (magnitude vs frequency, dB grid)
+  - Scrolling waterfall spectrogram (blue→cyan→green→yellow→red palette)
+  - Controls bar: frequency, mode, VFO, BW, S-meter bar, TX indicator
+  - PTT toggle button
+  - WS auto-reconnect on disconnect
+- Headless WS test client (`cargo run --example ws_test`)
+  - Connects, decodes all message types, prints rate stats for 10s
+  - Validates full server pipeline end-to-end
+- RI (RSSI) command support — reads signal strength in dBm directly
+- S-meter parsing corrected to match FDM-DUO manual scale
+  (0000=S0, 0011=S9, 0022=S9+60)
+
+### Fixed
+- S-meter now shows live dBm values (was stuck at -127)
+- Poll tries RI; first (dBm), falls back to SM0; (S-units)
+
+### Verified on hardware
+- CM5 + FDM-DUO: FFT 15.6/s, RadioState 2.5/s, Audio 50.0/s
+- S-meter reading within ~5dB of front panel display
+- Ctrl-C clean shutdown working
+- CAT serial auto-discovery working (sysfs hub-sibling)
+
 ## [0.3.0] - 2026-04-10
 
 ### Security

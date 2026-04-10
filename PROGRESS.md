@@ -73,26 +73,56 @@
 - Systemd service, udev rules, example config
 - Dedicated `efd` system user with dialout/audio/plugdev groups
 
+### S-meter fix (v0.3.1)
+- Fixed SM response parsing to match FDM-DUO manual scale (0011=S9, 0022=S9+60)
+- Added RI (RSSI) command — reads signal strength in dBm directly
+- Poll tries RI; first, falls back to SM0;
+- Verified on hardware: reading within ~5dB of front panel display
+
+### Client application (v0.3.1)
+- GTK4 + Cairo client with spectrum, waterfall, and controls
+- Headless WS test client for pipeline validation
+- Verified end-to-end: FFT 15.6/s, RadioState 2.5/s, Audio 50.0/s
+
+### Hardware verification milestone (v0.3.1)
+Full pipeline verified on CM5 + FDM-DUO hardware:
+- IQ capture: 192kHz, 4096 bins, 15.6 FFT frames/sec
+- CAT serial: auto-discovery via sysfs, direct 38400 8N1
+- S-meter: live dBm via RI command
+- Audio: 50 Opus chunks/sec (48kHz wideband)
+- Ctrl-C shutdown: clean exit within 3s
+
 ---
 
 ## Suggested next steps
 
 ### Client UI (GTK4)
-- [ ] GTK4 + GtkGLArea client application
-- [ ] Spectrum display (OpenGL, receives FftBins)
-- [ ] Waterfall display (scrolling spectrogram)
-- [ ] VFO controls (frequency, mode, BW, step)
-- [ ] S-meter / power meter display
-- [ ] PTT button (spacebar shortcut)
-- [ ] RIT/XIT controls
-- [ ] Memory store/recall
+- [x] GTK4 + Cairo spectrum display
+- [x] Waterfall display (scrolling spectrogram)
+- [x] S-meter display (LevelBar)
+- [x] PTT button
+- [ ] Upgrade to GtkGLArea / OpenGL for spectrum/waterfall performance
+- [ ] VFO frequency entry / tuning controls
+- [ ] Mode selector (FA/MD commands)
+- [ ] BW / filter selector
+- [ ] RIT/XIT controls (RV, RT, RU, RD commands)
+- [ ] Memory store/recall (MC, MR, MW commands)
 - [ ] Audio playback (Opus decode → PipeWire)
+- [ ] PTT spacebar shortcut
+- [ ] Frequency display click-to-tune
 
 ### CAT completeness
-- [ ] Poll ATT, LP, AGC, NR, NB state (pending identification of correct CAT commands for FDM-DUO)
-- [ ] Parse AGC mode from radio response
-- [ ] Frequency set command from client (FA command)
-- [ ] Mode change from client (MD command)
+- [x] IF; — frequency, mode, VFO, TX state
+- [x] RF; — filter bandwidth
+- [x] RI; — RSSI in dBm
+- [x] SM; — S-meter (S-units)
+- [ ] AT; — attenuator status (P1: 0=off, 1=on)
+- [ ] LP; — low-pass filter status (P1: 0=off, 1=on)
+- [ ] GC; / GS; — AGC mode (0=auto, 1=manual) and gain settings
+- [ ] NR; — noise reduction status (P1: 0=off, 1=on)
+- [ ] NB; — noise blanker status (P1: 0=off, 1=on)
+- [ ] FA; — set VFO-A frequency
+- [ ] MD; — set operating mode
 
 ### Audio improvements
 - [ ] Discover FDM-DUO USB audio device automatically (similar to CAT serial discovery)
