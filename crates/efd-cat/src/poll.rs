@@ -133,7 +133,7 @@ fn run_poll(
 
         let state = {
             let p = lock_port(&port);
-            poll_radio_state(&p)
+            poll_radio_state(&p, &cancel)
         };
 
         match state {
@@ -147,12 +147,20 @@ fn run_poll(
     }
 }
 
-/// Read radio state via IF;, RF;, and SM; commands.
-fn poll_radio_state(port: &SerialPort) -> Result<RadioState, CatError> {
+/// Read radio state via IF;, RF;, RI;/SM; commands.
+/// Checks cancel between commands to allow quick shutdown.
+fn poll_radio_state(
+    port: &SerialPort,
+    cancel: &CancellationToken,
+) -> Result<RadioState, CatError> {
     let if_resp = port.command("IF;")?;
     let parsed = parse::parse_if_response(&if_resp).ok_or_else(|| {
         CatError::BadResponse(format!("cannot parse IF response: {if_resp}"))
     })?;
+
+    if cancel.is_cancelled() {
+        return Err(CatError::Cancelled);
+    }
 
     let filter_bw = if let Some(mode_ch) = parse::mode_char(parsed.mode) {
         let cmd = format!("RF{mode_ch};");
@@ -163,6 +171,10 @@ fn poll_radio_state(port: &SerialPort) -> Result<RadioState, CatError> {
     } else {
         String::new()
     };
+
+    if cancel.is_cancelled() {
+        return Err(CatError::Cancelled);
+    }
 
     // S-meter: try RI (RSSI in dBm, more accurate), fall back to SM
     let s_meter_db = match port.command("RI;") {

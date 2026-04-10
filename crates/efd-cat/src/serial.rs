@@ -109,14 +109,20 @@ impl SerialPort {
         })
     }
 
-    /// Send a CAT command and read the `;`-terminated response.
-    /// Uses nix::unistd::read/write directly — no unsafe File wrappers.
+    /// Send a CAT command and read the matching `;`-terminated response.
+    /// Discards stale responses from previous commands.
     pub fn command(&self, cmd: &str) -> Result<String, CatError> {
-        // Flush input
+        // Extract expected prefix (e.g. "IF" from "IF;", "RF" from "RF2;")
+        let expected_prefix: String = cmd
+            .chars()
+            .take_while(|c| c.is_ascii_alphabetic())
+            .collect();
+
+        // Flush input buffer
         termios::tcflush(&self.fd, termios::FlushArg::TCIFLUSH)
             .map_err(|e| CatError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
-        // Write command using nix::unistd::write
+        // Write command
         let mut written = 0;
         let cmd_bytes = cmd.as_bytes();
         while written < cmd_bytes.len() {
@@ -135,7 +141,33 @@ impl SerialPort {
         // Small delay for radio to process (50ms, same as EladSpectrum)
         std::thread::sleep(Duration::from_millis(50));
 
-        // Read response until ';' using nix::unistd::read
+        // Read responses until we get one matching our command prefix.
+        // Discards stale responses from previous commands.
+        let mut attempts = 3;
+        loop {
+            let resp = self.read_response()?;
+            if resp.is_empty() {
+                return Ok(resp);
+            }
+            if resp.starts_with(&expected_prefix) {
+                debug!(cmd = %cmd.trim_end_matches(';'), resp = %resp, "CAT");
+                return Ok(resp);
+            }
+            // Stale response — discard and try again
+            debug!(
+                cmd = %cmd.trim_end_matches(';'),
+                stale = %resp,
+                "discarding stale CAT response"
+            );
+            attempts -= 1;
+            if attempts == 0 {
+                return Ok(resp); // give up, return whatever we got
+            }
+        }
+    }
+
+    /// Read a single `;`-terminated response from the serial port.
+    fn read_response(&self) -> Result<String, CatError> {
         let mut response = Vec::with_capacity(64);
         let mut buf = [0u8; 64];
         let mut retries = 10;
@@ -173,9 +205,7 @@ impl SerialPort {
             }
         }
 
-        let resp = String::from_utf8_lossy(&response);
-        debug!(cmd = %cmd.trim_end_matches(';'), resp = %resp, "CAT");
-        Ok(resp.into_owned())
+        Ok(String::from_utf8_lossy(&response).into_owned())
     }
 
     pub fn device(&self) -> &str {

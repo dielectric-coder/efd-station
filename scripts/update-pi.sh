@@ -42,9 +42,15 @@ else
     fi
 fi
 
-echo "==> Restarting efd-server service..."
-sudo systemctl restart efd-server 2>/dev/null || true
+echo "==> Stopping old server..."
+sudo systemctl stop efd-server 2>/dev/null || true
+# Kill any lingering instances (they hold USB/serial)
+pkill -f 'efd-server' 2>/dev/null || true
+sleep 1
 
-echo "==> Done. Server version:"
-target/release/efd-server --version 2>/dev/null || echo "  (no --version flag yet)"
+echo "==> Starting efd-server service..."
+sudo systemctl start efd-server 2>/dev/null || true
+
+echo "==> Done."
 echo "  Binary: target/release/efd-server"
+echo "  Status: systemctl status efd-server"
