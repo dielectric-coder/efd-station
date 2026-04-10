@@ -10,7 +10,6 @@ use tracing::{debug, trace, warn};
 use efd_iq::IqBlock;
 
 use crate::error::DspError;
-use crate::filter::FirDecimator;
 
 /// Configuration for the demodulator task.
 #[derive(Debug, Clone)]
@@ -119,8 +118,68 @@ impl Nco {
     }
 }
 
-/// Complex FIR low-pass channel filter.
-/// Filters both I and Q channels with the same real-valued FIR coefficients.
+/// Complex FIR decimator: low-pass filter + downsample for IQ signals.
+/// Applies the same real-valued FIR to both I and Q channels.
+struct ComplexDecimator {
+    coeffs: Vec<f32>,
+    history_i: Vec<f32>,
+    history_q: Vec<f32>,
+    taps: usize,
+    factor: usize,
+    pos: usize,
+}
+
+impl ComplexDecimator {
+    fn new(factor: usize, num_taps: usize) -> Self {
+        let taps = num_taps | 1;
+        let cutoff = 0.45 / factor as f32;
+        let coeffs = design_lowpass(taps, cutoff);
+        Self {
+            coeffs,
+            history_i: vec![0.0; taps],
+            history_q: vec![0.0; taps],
+            taps,
+            factor,
+            pos: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.history_i.fill(0.0);
+        self.history_q.fill(0.0);
+        self.pos = 0;
+    }
+
+    fn process(&mut self, iq: &[[f32; 2]], out: &mut Vec<[f32; 2]>) {
+        out.clear();
+        if self.factor <= 1 {
+            out.extend_from_slice(iq);
+            return;
+        }
+        out.reserve(iq.len() / self.factor + 1);
+        for &[i, q] in iq {
+            self.history_i.copy_within(1.., 0);
+            self.history_i[self.taps - 1] = i;
+            self.history_q.copy_within(1.., 0);
+            self.history_q[self.taps - 1] = q;
+            self.pos += 1;
+
+            if self.pos >= self.factor {
+                self.pos = 0;
+                let mut sum_i = 0.0f32;
+                let mut sum_q = 0.0f32;
+                for (idx, &c) in self.coeffs.iter().enumerate() {
+                    sum_i += self.history_i[idx] * c;
+                    sum_q += self.history_q[idx] * c;
+                }
+                out.push([sum_i, sum_q]);
+            }
+        }
+    }
+}
+
+/// Complex FIR channel filter at the decimated sample rate.
+/// Much sharper selectivity than filtering at the original rate.
 struct ChannelFilter {
     coeffs: Vec<f32>,
     history_i: Vec<f32>,
@@ -130,7 +189,7 @@ struct ChannelFilter {
 
 impl ChannelFilter {
     fn new(bandwidth_hz: f64, sample_rate: u32, num_taps: usize) -> Self {
-        let taps = num_taps | 1; // ensure odd
+        let taps = num_taps | 1;
         let cutoff = (bandwidth_hz / 2.0) / sample_rate as f64;
         let coeffs = design_lowpass(taps, cutoff as f32);
         Self {
@@ -172,6 +231,32 @@ impl ChannelFilter {
     }
 }
 
+/// DC blocking filter — removes DC offset from demodulated audio.
+struct DcBlock {
+    prev_in: f32,
+    prev_out: f32,
+    alpha: f32, // pole position, typically 0.995-0.999
+}
+
+impl DcBlock {
+    fn new() -> Self {
+        Self {
+            prev_in: 0.0,
+            prev_out: 0.0,
+            alpha: 0.998,
+        }
+    }
+
+    fn process(&mut self, samples: &mut [f32]) {
+        for s in samples.iter_mut() {
+            let inp = *s;
+            *s = inp - self.prev_in + self.alpha * self.prev_out;
+            self.prev_in = inp;
+            self.prev_out = *s;
+        }
+    }
+}
+
 fn run_demod(
     mut iq_rx: broadcast::Receiver<Arc<IqBlock>>,
     audio_tx: mpsc::Sender<AudioBlock>,
@@ -180,17 +265,29 @@ fn run_demod(
     cancel: CancellationToken,
 ) -> Result<(), DspError> {
     let decim_factor = (config.input_rate / config.output_rate) as usize;
-    let num_taps = 8 * decim_factor + 1;
-    let mut decimator = FirDecimator::new(decim_factor, num_taps);
+
+    // Complex decimator: 192kHz → 48kHz IQ with anti-alias filter
+    let decim_taps = 8 * decim_factor + 1;
+    let mut iq_decimator = ComplexDecimator::new(decim_factor, decim_taps);
+
+    // Channel filter at 48kHz — 127 taps gives ~375Hz transition bandwidth
+    // (much sharper than 65 taps at 192kHz which had ~3kHz transition)
+    let mut chan_filter = ChannelFilter::new(
+        DemodTuning::default().filter_bw_hz,
+        config.output_rate,
+        127,
+    );
+
+    let mut dc_block = DcBlock::new();
     let mut agc = Agc::new();
 
     let mut tuning = *tuning_rx.borrow_and_update();
     let mut nco = Nco::new(-tuning.vfo_offset_hz, config.input_rate);
-    // Channel filter: 65 taps gives decent selectivity
-    let mut chan_filter = ChannelFilter::new(tuning.filter_bw_hz, config.input_rate, 65);
+    chan_filter.set_bandwidth(tuning.filter_bw_hz, config.output_rate);
 
     // Reusable buffers
     let mut shifted_buf: Vec<[f32; 2]> = Vec::new();
+    let mut decimated_iq: Vec<[f32; 2]> = Vec::new();
     let mut filtered_buf: Vec<[f32; 2]> = Vec::new();
 
     debug!(
@@ -200,6 +297,7 @@ fn run_demod(
         input_rate = config.input_rate,
         output_rate = config.output_rate,
         decim_factor,
+        chan_filter_taps = 127,
         "demod task started"
     );
 
@@ -216,11 +314,12 @@ fn run_demod(
                     nco.set_freq(-new_tuning.vfo_offset_hz, config.input_rate);
                 }
                 if new_tuning.filter_bw_hz != tuning.filter_bw_hz {
-                    chan_filter.set_bandwidth(new_tuning.filter_bw_hz, config.input_rate);
+                    chan_filter.set_bandwidth(new_tuning.filter_bw_hz, config.output_rate);
                 }
                 if new_tuning.mode != tuning.mode {
                     debug!(old = ?tuning.mode, new = ?new_tuning.mode, "demod mode changed");
-                    decimator.reset();
+                    iq_decimator.reset();
+                    chan_filter.reset();
                 }
                 tuning = new_tuning;
             }
@@ -241,32 +340,35 @@ fn run_demod(
             }
         };
 
-        // 1. Frequency-shift to center VFO at DC
+        // 1. NCO frequency shift at 192kHz (center VFO at DC)
         nco.shift(&block.samples, &mut shifted_buf);
 
-        // 2. Channel filter (bandwidth selection)
-        chan_filter.process(&shifted_buf, &mut filtered_buf);
+        // 2. Complex decimate 192kHz → 48kHz (anti-alias + downsample IQ)
+        iq_decimator.process(&shifted_buf, &mut decimated_iq);
 
-        // 3. Demodulate
-        let mut demod_samples = demodulate(&filtered_buf, tuning.mode);
+        // 3. Channel filter at 48kHz (sharp selectivity: 127 taps ≈ 375Hz transition)
+        chan_filter.process(&decimated_iq, &mut filtered_buf);
 
-        // 4. AGC
-        agc.process(&mut demod_samples);
+        // 4. Demodulate (now at 48kHz)
+        let mut audio = demodulate(&filtered_buf, tuning.mode);
 
-        // 5. Anti-alias filter + decimate
-        let decimated = decimator.process(&demod_samples);
+        // 5. DC block (removes DC offset from demod)
+        dc_block.process(&mut audio);
 
-        if decimated.is_empty() {
+        // 6. AGC
+        agc.process(&mut audio);
+
+        if audio.is_empty() {
             continue;
         }
 
-        let audio = AudioBlock {
-            samples: decimated,
+        let block = AudioBlock {
+            samples: audio,
             sample_rate: config.output_rate,
             timestamp_us: block.timestamp_us,
         };
 
-        if audio_tx.blocking_send(audio).is_err() {
+        if audio_tx.blocking_send(block).is_err() {
             trace!("audio channel closed");
             return Err(DspError::ChannelClosed);
         }
