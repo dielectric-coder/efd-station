@@ -32,7 +32,6 @@ priority = "optional"
 depends = "libusb-1.0-0, libasound2, libopus0, hamlib-utils"
 assets = [
     ["target/release/efd-server", "usr/bin/", "755"],
-    ["../dist/systemd/efd-server.service", "lib/systemd/system/", "644"],
     ["../dist/config/config.toml", "etc/efd-backend/config.toml.example", "644"],
 ]
 conf-files = ["/etc/efd-backend/config.toml.example"]

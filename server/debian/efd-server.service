@@ -1,0 +1,28 @@
+[Unit]
+Description=efd-station SDR backend for Elad FDM-DUO
+After=network.target sound.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/efd-server
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+
+# Run as dedicated user
+User=efd
+Group=efd
+
+# USB and audio access
+SupplementaryGroups=dialout audio plugdev
+
+# Hardening
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/efd/.config/efd-backend
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
