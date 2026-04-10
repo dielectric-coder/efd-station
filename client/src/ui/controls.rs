@@ -1,12 +1,25 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Instant;
 
-use efd_proto::{ClientMsg, Ptt, RadioState};
+use efd_proto::{ClientMsg, Mode, Ptt, RadioState, Vfo};
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, Label, LevelBar, Orientation, ToggleButton};
+use gtk4::{
+    Adjustment, Align, Box as GtkBox, Button, DropDown, Entry, Label, LevelBar, Orientation,
+    Scale, StringList, ToggleButton,
+};
 use tokio::sync::mpsc;
 
+use crate::audio::AudioPlayer;
+use crate::cat_commands;
+
+// ---------------------------------------------------------------------------
+// Display bar (top) — read-only status: VFO, freq, mode, BW, S-meter, RX/TX
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
-pub struct Controls {
+pub struct DisplayBar {
     container: GtkBox,
     freq_label: Label,
     mode_label: Label,
@@ -15,7 +28,6 @@ pub struct Controls {
     smeter: LevelBar,
     smeter_label: Label,
     tx_label: Label,
-    /// Cache previous state to avoid redundant GTK updates.
     prev: RefCell<Option<CachedState>>,
 }
 
@@ -25,12 +37,12 @@ struct CachedState {
     mode: String,
     vfo: String,
     filter_bw: String,
-    s_reading: u16, // quantized to avoid float comparison
+    s_reading: u16,
     tx: bool,
 }
 
-impl Controls {
-    pub fn new(ws_tx: mpsc::UnboundedSender<ClientMsg>) -> Self {
+impl DisplayBar {
+    pub fn new() -> Self {
         let container = GtkBox::new(Orientation::Horizontal, 12);
         container.set_margin_start(8);
         container.set_margin_end(8);
@@ -40,26 +52,26 @@ impl Controls {
 
         let vfo_label = Label::new(Some("VFO A"));
         vfo_label.add_css_class("monospace");
-        vfo_label.set_width_chars(5); // "VFO A" / "VFO B"
+        vfo_label.set_width_chars(5);
         vfo_label.set_xalign(0.0);
         container.append(&vfo_label);
 
         let freq_label = Label::new(Some("--- Hz"));
         freq_label.add_css_class("monospace");
-        freq_label.set_width_chars(16); // "14.250.000 Hz" widest
+        freq_label.set_width_chars(16);
         freq_label.set_xalign(1.0);
         freq_label.set_markup("<span font='18' weight='bold'>--- Hz</span>");
         container.append(&freq_label);
 
         let mode_label = Label::new(Some("---"));
         mode_label.add_css_class("monospace");
-        mode_label.set_width_chars(5); // "FreeDV" longest realistic
+        mode_label.set_width_chars(5);
         mode_label.set_xalign(0.0);
         container.append(&mode_label);
 
         let bw_label = Label::new(Some("BW: ---"));
         bw_label.add_css_class("monospace");
-        bw_label.set_width_chars(10); // "BW: 3000" etc.
+        bw_label.set_width_chars(10);
         bw_label.set_xalign(0.0);
         container.append(&bw_label);
 
@@ -79,7 +91,7 @@ impl Controls {
 
         let smeter_label = Label::new(Some("S0"));
         smeter_label.add_css_class("monospace");
-        smeter_label.set_width_chars(6); // "S9+60" widest
+        smeter_label.set_width_chars(6);
         smeter_label.set_xalign(0.0);
         smeter_box.append(&smeter_label);
         container.append(&smeter_box);
@@ -87,18 +99,9 @@ impl Controls {
         let tx_label = Label::new(Some("RX"));
         tx_label.add_css_class("monospace");
         tx_label.add_css_class("tx-rx-rx");
-        tx_label.set_width_chars(2); // "RX" / "TX"
+        tx_label.set_width_chars(2);
         tx_label.set_xalign(0.5);
         container.append(&tx_label);
-
-        let ptt_btn = ToggleButton::with_label("PTT");
-        ptt_btn.set_valign(Align::Center);
-        let tx = ws_tx;
-        ptt_btn.connect_toggled(move |btn| {
-            let on = btn.is_active();
-            let _ = tx.send(ClientMsg::Ptt(Ptt { on }));
-        });
-        container.append(&ptt_btn);
 
         Self {
             container,
@@ -117,6 +120,23 @@ impl Controls {
         &self.container
     }
 
+    /// Optimistic frequency update (before radio confirms).
+    pub fn set_freq_immediate(&self, hz: u64) {
+        let freq = format_freq(hz);
+        self.freq_label
+            .set_markup(&format!("<span font='18' weight='bold'>{freq}</span>"));
+    }
+
+    /// Optimistic mode update.
+    pub fn set_mode_immediate(&self, mode: Mode) {
+        self.mode_label.set_text(&format!("{:?}", mode));
+    }
+
+    /// Optimistic VFO update.
+    pub fn set_vfo_immediate(&self, vfo: Vfo) {
+        self.vfo_label.set_text(&format!("VFO {:?}", vfo));
+    }
+
     pub fn update(&self, state: &RadioState) {
         let s_reading = db_to_s_reading(state.s_meter_db);
         let mode_str = format!("{:?}", state.mode);
@@ -131,7 +151,6 @@ impl Controls {
             tx: state.tx,
         };
 
-        // Skip update if nothing changed
         let mut prev = self.prev.borrow_mut();
         if prev.as_ref() == Some(&new_state) {
             return;
@@ -159,6 +178,283 @@ impl Controls {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Control bar (bottom) — interactive: PTT, Mute, Volume
+// ---------------------------------------------------------------------------
+
+const MODES: &[(&str, Mode)] = &[
+    ("LSB", Mode::LSB),
+    ("USB", Mode::USB),
+    ("CW", Mode::CW),
+    ("CWR", Mode::CWR),
+    ("AM", Mode::AM),
+    ("FM", Mode::FM),
+];
+
+const STEPS: &[(&str, u64)] = &[
+    ("100 Hz", 100),
+    ("1 kHz", 1_000),
+    ("5 kHz", 5_000),
+    ("10 kHz", 10_000),
+    ("25 kHz", 25_000),
+];
+
+#[derive(Clone)]
+pub struct ControlBar {
+    container: GtkBox,
+    sdr_box: GtkBox,
+    freq_entry: Entry,
+    mode_dropdown: DropDown,
+    step_dropdown: DropDown,
+    /// Shared sender for upstream WS messages.
+    ws_tx: mpsc::UnboundedSender<ClientMsg>,
+    /// Suppress RadioState-driven sync during internal updates.
+    syncing: Rc<Cell<bool>>,
+    /// Timestamp of last user command — suppress sync briefly after.
+    last_cmd: Rc<Cell<Instant>>,
+    /// Reference to DisplayBar for optimistic updates.
+    display_bar: DisplayBar,
+}
+
+impl ControlBar {
+    pub fn new(
+        ws_tx: mpsc::UnboundedSender<ClientMsg>,
+        audio: Option<Arc<AudioPlayer>>,
+        display_bar: DisplayBar,
+    ) -> Self {
+        let container = GtkBox::new(Orientation::Horizontal, 12);
+        container.set_margin_start(8);
+        container.set_margin_end(8);
+        container.set_margin_top(4);
+        container.set_margin_bottom(4);
+        container.set_halign(Align::Center);
+
+        let syncing = Rc::new(Cell::new(false));
+        let last_cmd = Rc::new(Cell::new(Instant::now() - std::time::Duration::from_secs(10)));
+
+        // --- Mode toggle ---
+        let sdr_box = GtkBox::new(Orientation::Horizontal, 8);
+        sdr_box.set_visible(false);
+
+        let mode_btn = ToggleButton::with_label("MON");
+        mode_btn.set_valign(Align::Center);
+        let sb = sdr_box.clone();
+        mode_btn.connect_toggled(move |btn| {
+            let is_sdr = btn.is_active();
+            btn.set_label(if is_sdr { "SDR" } else { "MON" });
+            sb.set_visible(is_sdr);
+        });
+        container.append(&mode_btn);
+
+        // --- SDR controls ---
+
+        // Frequency entry
+        let freq_entry = Entry::new();
+        freq_entry.set_width_chars(14);
+        freq_entry.set_placeholder_text(Some("Freq Hz"));
+        freq_entry.add_css_class("monospace");
+        let tx = ws_tx.clone();
+        let lc = last_cmd.clone();
+        let db = display_bar.clone();
+        freq_entry.connect_activate(move |entry| {
+            let text = entry.text();
+            if let Ok(hz) = text.replace(['.', ',', ' '], "").parse::<u64>() {
+                lc.set(Instant::now());
+                db.set_freq_immediate(hz);
+                let _ = tx.send(ClientMsg::CatCommand(cat_commands::set_freq(hz)));
+            }
+        });
+        sdr_box.append(&freq_entry);
+
+        // Mode dropdown
+        let mode_list = StringList::new(&MODES.iter().map(|(s, _)| *s).collect::<Vec<_>>());
+        let mode_dropdown = DropDown::new(Some(mode_list), gtk4::Expression::NONE);
+        mode_dropdown.set_valign(Align::Center);
+        let tx = ws_tx.clone();
+        let sync = syncing.clone();
+        let lc = last_cmd.clone();
+        let db = display_bar.clone();
+        mode_dropdown.connect_selected_notify(move |dd| {
+            if sync.get() {
+                return;
+            }
+            let idx = dd.selected() as usize;
+            if let Some(&(_, mode)) = MODES.get(idx) {
+                if let Some(cmd) = cat_commands::set_mode(mode) {
+                    lc.set(Instant::now());
+                    db.set_mode_immediate(mode);
+                    let _ = tx.send(ClientMsg::CatCommand(cmd));
+                }
+            }
+        });
+        sdr_box.append(&mode_dropdown);
+
+        // VFO toggle
+        let vfo_btn = ToggleButton::with_label("VFO A");
+        vfo_btn.set_valign(Align::Center);
+        let tx = ws_tx.clone();
+        let lc = last_cmd.clone();
+        let db = display_bar.clone();
+        vfo_btn.connect_toggled(move |btn| {
+            let vfo = if btn.is_active() {
+                btn.set_label("VFO B");
+                Vfo::B
+            } else {
+                btn.set_label("VFO A");
+                Vfo::A
+            };
+            lc.set(Instant::now());
+            db.set_vfo_immediate(vfo);
+            let _ = tx.send(ClientMsg::CatCommand(cat_commands::set_vfo(vfo)));
+        });
+        sdr_box.append(&vfo_btn);
+
+        // Step size dropdown
+        let step_list = StringList::new(&STEPS.iter().map(|(s, _)| *s).collect::<Vec<_>>());
+        let step_dropdown = DropDown::new(Some(step_list), gtk4::Expression::NONE);
+        step_dropdown.set_selected(1); // default 1 kHz
+        step_dropdown.set_valign(Align::Center);
+        sdr_box.append(&step_dropdown);
+
+        // Tune up/down
+        let tune_down = Button::with_label("\u{25BC}"); // ▼
+        tune_down.set_valign(Align::Center);
+        let fe = freq_entry.clone();
+        let sd = step_dropdown.clone();
+        let tx = ws_tx.clone();
+        let lc = last_cmd.clone();
+        let db = display_bar.clone();
+        tune_down.connect_clicked(move |_| {
+            lc.set(Instant::now());
+            tune_by_step(&fe, &sd, &tx, &db, false);
+        });
+        sdr_box.append(&tune_down);
+
+        let tune_up = Button::with_label("\u{25B2}"); // ▲
+        tune_up.set_valign(Align::Center);
+        let fe = freq_entry.clone();
+        let sd = step_dropdown.clone();
+        let tx = ws_tx.clone();
+        let lc = last_cmd.clone();
+        let db = display_bar.clone();
+        tune_up.connect_clicked(move |_| {
+            lc.set(Instant::now());
+            tune_by_step(&fe, &sd, &tx, &db, true);
+        });
+        sdr_box.append(&tune_up);
+
+        container.append(&sdr_box);
+
+        // --- Always-visible controls: PTT, Mute, Volume ---
+        let ptt_btn = ToggleButton::with_label("PTT");
+        ptt_btn.set_valign(Align::Center);
+        let tx = ws_tx.clone();
+        ptt_btn.connect_toggled(move |btn| {
+            let on = btn.is_active();
+            let _ = tx.send(ClientMsg::Ptt(Ptt { on }));
+        });
+        container.append(&ptt_btn);
+
+        if let Some(ref player) = audio {
+            let mute_btn = ToggleButton::with_label("Mute");
+            mute_btn.set_valign(Align::Center);
+            let ap = player.clone();
+            mute_btn.connect_toggled(move |btn| {
+                let muted = btn.is_active();
+                if muted != ap.is_muted() {
+                    ap.toggle_mute();
+                }
+            });
+            container.append(&mute_btn);
+
+            let vol_label = Label::new(Some("Vol:"));
+            vol_label.add_css_class("monospace");
+            container.append(&vol_label);
+
+            let vol_adj = Adjustment::new(70.0, 0.0, 100.0, 5.0, 10.0, 0.0);
+            let vol_scale = Scale::new(Orientation::Horizontal, Some(&vol_adj));
+            vol_scale.set_width_request(100);
+            vol_scale.set_valign(Align::Center);
+            vol_scale.set_draw_value(false);
+            let ap = player.clone();
+            vol_adj.connect_value_changed(move |adj| {
+                ap.set_volume(adj.value() as f32 / 100.0);
+            });
+            container.append(&vol_scale);
+        }
+
+        Self {
+            container,
+            sdr_box,
+            freq_entry,
+            mode_dropdown,
+            step_dropdown,
+            ws_tx: ws_tx.clone(),
+            syncing,
+            last_cmd,
+            display_bar,
+        }
+    }
+
+    pub fn widget(&self) -> &GtkBox {
+        &self.container
+    }
+
+    /// Sync SDR controls from RadioState (only when SDR box is visible,
+    /// the user is not actively editing, and no recent command was sent).
+    pub fn sync_from_radio(&self, state: &RadioState) {
+        if !self.sdr_box.is_visible() {
+            return;
+        }
+        // Suppress sync briefly after user sent a command (one CAT poll cycle)
+        if self.last_cmd.get().elapsed().as_millis() < 300 {
+            return;
+        }
+        if self.freq_entry.has_focus() {
+            return;
+        }
+        self.syncing.set(true);
+
+        self.freq_entry.set_text(&format!("{}", state.freq_hz));
+
+        let mode_idx = MODES
+            .iter()
+            .position(|&(_, m)| m == state.mode)
+            .unwrap_or(0);
+        self.mode_dropdown.set_selected(mode_idx as u32);
+
+        self.syncing.set(false);
+    }
+}
+
+fn tune_by_step(
+    freq_entry: &Entry,
+    step_dropdown: &DropDown,
+    ws_tx: &mpsc::UnboundedSender<ClientMsg>,
+    display_bar: &DisplayBar,
+    up: bool,
+) {
+    let step_idx = step_dropdown.selected() as usize;
+    let step_hz = STEPS.get(step_idx).map(|&(_, hz)| hz).unwrap_or(1000);
+    let text = freq_entry.text();
+    let current: u64 = text
+        .replace(['.', ',', ' '], "")
+        .parse()
+        .unwrap_or(0);
+    let new_freq = if up {
+        current.saturating_add(step_hz)
+    } else {
+        current.saturating_sub(step_hz)
+    };
+    freq_entry.set_text(&format!("{new_freq}"));
+    display_bar.set_freq_immediate(new_freq);
+    let _ = ws_tx.send(ClientMsg::CatCommand(cat_commands::set_freq(new_freq)));
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 fn format_freq(hz: u64) -> String {
     if hz >= 1_000_000 {

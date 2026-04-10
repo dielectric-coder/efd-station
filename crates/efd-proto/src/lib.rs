@@ -5,7 +5,7 @@ pub mod wire;
 
 pub use downstream::{AudioChunk, ErrorMsg, FftBins, RadioState};
 pub use radio::{AgcMode, Mode, Vfo};
-pub use upstream::{CatCommand, Ptt, TxAudio};
+pub use upstream::{AudioSource, CatCommand, Ptt, TxAudio};
 pub use wire::{ClientMsg, ServerMsg};
 
 #[cfg(test)]

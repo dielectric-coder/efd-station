@@ -1,4 +1,5 @@
 mod audio;
+mod cat_commands;
 mod ws;
 mod ui;
 
@@ -105,8 +106,8 @@ fn build_ui(app: &Application, url: &str) {
     main_box.set_margin_top(4);
     main_box.set_margin_bottom(4);
 
-    let controls = ui::controls::Controls::new(ws_tx.clone());
-    main_box.append(controls.widget());
+    let display_bar = ui::controls::DisplayBar::new();
+    main_box.append(display_bar.widget());
 
     let (spectrum, display_range) =
         ui::spectrum::Spectrum::new(fft_data.clone(), radio_state.clone());
@@ -118,6 +119,10 @@ fn build_ui(app: &Application, url: &str) {
     waterfall.widget().set_vexpand(true);
     main_box.append(waterfall.widget());
 
+    let control_bar =
+        ui::controls::ControlBar::new(ws_tx.clone(), audio_player.clone(), display_bar.clone());
+    main_box.append(control_bar.widget());
+
     window.set_child(Some(&main_box));
 
     // Poll message queue from GTK main loop (60 fps tick)
@@ -125,7 +130,8 @@ fn build_ui(app: &Application, url: &str) {
     let radio_state2 = radio_state.clone();
     let spectrum2 = spectrum.clone();
     let waterfall2 = waterfall.clone();
-    let controls2 = controls.clone();
+    let display_bar2 = display_bar.clone();
+    let control_bar2 = control_bar.clone();
     let audio2 = audio_player.clone();
     let queue = msg_queue.clone();
 
@@ -145,7 +151,8 @@ fn build_ui(app: &Application, url: &str) {
                     need_redraw = true;
                 }
                 ServerMsg::RadioState(state) => {
-                    controls2.update(&state);
+                    display_bar2.update(&state);
+                    control_bar2.sync_from_radio(&state);
                     *radio_state2.lock().unwrap() = Some(state);
                 }
                 ServerMsg::Audio(chunk) => {

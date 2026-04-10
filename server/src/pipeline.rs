@@ -211,12 +211,21 @@ impl Pipeline {
                                     let vfo_offset = if iq_center_hz > 0 {
                                         state.freq_hz as f64 - iq_center_hz as f64
                                     } else {
-                                        0.0 // IQ center unknown, assume VFO at center
+                                        0.0
                                     };
                                     let filter_bw = parse_filter_bw(&state.filter_bw);
+                                    // For SSB/CW, offset NCO by ±BW/2 so the
+                                    // desired sideband centers at DC where the
+                                    // symmetric channel filter works correctly.
+                                    use efd_proto::Mode;
+                                    let ssb_offset = match state.mode {
+                                        Mode::USB | Mode::CW => filter_bw / 2.0,
+                                        Mode::LSB | Mode::CWR => -filter_bw / 2.0,
+                                        _ => 0.0, // AM/FM: carrier at DC
+                                    };
                                     let _ = tuning_tx.send(efd_dsp::DemodTuning {
                                         mode: state.mode,
-                                        vfo_offset_hz: vfo_offset,
+                                        vfo_offset_hz: vfo_offset + ssb_offset,
                                         filter_bw_hz: filter_bw,
                                     });
                                 }

@@ -2,7 +2,7 @@ use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
 use crate::downstream::{AudioChunk, ErrorMsg, FftBins, RadioState};
-use crate::upstream::{CatCommand, Ptt, TxAudio};
+use crate::upstream::{AudioSource, CatCommand, Ptt, TxAudio};
 
 /// Envelope for all server → client WebSocket messages.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Encode, Decode)]
@@ -19,4 +19,5 @@ pub enum ClientMsg {
     CatCommand(CatCommand),
     TxAudio(TxAudio),
     Ptt(Ptt),
+    SetAudioSource(AudioSource),
 }

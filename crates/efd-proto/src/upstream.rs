@@ -20,3 +20,12 @@ pub struct TxAudio {
 pub struct Ptt {
     pub on: bool,
 }
+
+/// Audio source selection for RX audio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+pub enum AudioSource {
+    /// Software demod from IQ stream (NCO + filter + demod + AGC).
+    SoftwareDemod,
+    /// Hardware demod from FDM-DUO USB audio capture.
+    RadioUsb,
+}

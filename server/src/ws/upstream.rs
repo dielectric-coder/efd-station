@@ -102,6 +102,10 @@ pub async fn run(
                     break;
                 }
             }
+            ClientMsg::SetAudioSource(src) => {
+                debug!(?src, "upstream: audio source selection (not yet implemented)");
+                // Phase 2: route to per-client audio source watch channel
+            }
         }
     }
 }

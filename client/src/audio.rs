@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use audiopus::coder::Decoder;
@@ -19,6 +19,8 @@ pub struct AudioPlayer {
     _stream: Stream,
     decoder: Mutex<(Decoder, Vec<f32>)>, // decoder + reusable PCM buffer
     chunks_received: AtomicU64,
+    volume: Arc<AtomicU32>,  // volume as fixed-point: 0..1000 → 0.0..1.0
+    muted: Arc<AtomicBool>,
 }
 
 impl AudioPlayer {
@@ -36,15 +38,26 @@ impl AudioPlayer {
         let ring: Arc<Mutex<VecDeque<f32>>> =
             Arc::new(Mutex::new(VecDeque::with_capacity(RING_CAPACITY)));
 
+        let volume: Arc<AtomicU32> = Arc::new(AtomicU32::new(700)); // default 70%
+        let muted: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
         let ring2 = ring.clone();
+        let vol2 = volume.clone();
+        let mute2 = muted.clone();
         let stream = device
             .build_output_stream(
                 &config,
                 move |data: &mut [f32], _info: &cpal::OutputCallbackInfo| {
+                    let is_muted = mute2.load(Ordering::Relaxed);
+                    let gain = vol2.load(Ordering::Relaxed) as f32 / 1000.0;
                     let mut rb = ring2.lock().unwrap_or_else(|e| e.into_inner());
                     for frame in data.chunks_mut(channels) {
-                        let sample = rb.pop_front().unwrap_or(0.0);
-                        // Output mono to all channels
+                        let sample = if is_muted {
+                            let _ = rb.pop_front(); // drain buffer even when muted
+                            0.0
+                        } else {
+                            rb.pop_front().unwrap_or(0.0) * gain
+                        };
                         for ch in frame.iter_mut() {
                             *ch = sample;
                         }
@@ -74,7 +87,30 @@ impl AudioPlayer {
             _stream: stream,
             decoder: Mutex::new((decoder, pcm_buf)),
             chunks_received: AtomicU64::new(0),
+            volume,
+            muted,
         })
+    }
+
+    /// Set volume (0.0 to 1.0).
+    pub fn set_volume(&self, vol: f32) {
+        self.volume.store((vol.clamp(0.0, 1.0) * 1000.0) as u32, Ordering::Relaxed);
+    }
+
+    /// Get current volume (0.0 to 1.0).
+    pub fn volume(&self) -> f32 {
+        self.volume.load(Ordering::Relaxed) as f32 / 1000.0
+    }
+
+    /// Toggle mute. Returns new mute state.
+    pub fn toggle_mute(&self) -> bool {
+        let was = self.muted.load(Ordering::Relaxed);
+        self.muted.store(!was, Ordering::Relaxed);
+        !was
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.muted.load(Ordering::Relaxed)
     }
 
     /// Decode an Opus chunk and push PCM samples into the ring buffer.

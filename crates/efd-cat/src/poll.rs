@@ -94,6 +94,7 @@ pub fn spawn_cat_tasks(
     };
 
     let port2 = port.clone();
+    let state_tx2 = state_tx.clone();
     let poll_cancel = cancel.clone();
     let poll_handle = tokio::task::spawn_blocking(move || {
         run_poll(port, config.poll_interval, state_tx, poll_cancel)
@@ -101,7 +102,7 @@ pub fn spawn_cat_tasks(
 
     let cmd_cancel = cancel;
     let cmd_handle = tokio::task::spawn_blocking(move || {
-        run_commands(port2, cmd_rx, cmd_cancel)
+        run_commands(port2, cmd_rx, state_tx2, cmd_cancel)
     });
 
     (poll_handle, cmd_handle)
@@ -204,9 +205,12 @@ fn poll_radio_state(
 }
 
 /// Forward CAT commands from WS clients to the serial port.
+/// After each command, immediately polls the radio state and broadcasts it,
+/// eliminating the round-trip delay of waiting for the next poll cycle.
 fn run_commands(
     port: Arc<Mutex<SerialPort>>,
     mut cmd_rx: mpsc::Receiver<CatCommand>,
+    state_tx: broadcast::Sender<RadioState>,
     cancel: CancellationToken,
 ) -> Result<(), CatError> {
     debug!("CAT command task started");
@@ -234,6 +238,17 @@ fn run_commands(
             }
             Err(e) => {
                 warn!(cmd = %cmd.raw, "CAT command error: {e}");
+            }
+        }
+
+        // Immediately poll state after command — gives instant feedback
+        match poll_radio_state(&p, &cancel) {
+            Ok(state) => {
+                let _ = state_tx.send(state);
+            }
+            Err(CatError::Cancelled) => return Err(CatError::Cancelled),
+            Err(e) => {
+                debug!("post-command poll failed: {e}");
             }
         }
     }
