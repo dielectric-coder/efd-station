@@ -40,19 +40,27 @@ impl Controls {
 
         let vfo_label = Label::new(Some("VFO A"));
         vfo_label.add_css_class("monospace");
+        vfo_label.set_width_chars(5); // "VFO A" / "VFO B"
+        vfo_label.set_xalign(0.0);
         container.append(&vfo_label);
 
         let freq_label = Label::new(Some("--- Hz"));
         freq_label.add_css_class("monospace");
+        freq_label.set_width_chars(16); // "14.250.000 Hz" widest
+        freq_label.set_xalign(1.0);
         freq_label.set_markup("<span font='18' weight='bold'>--- Hz</span>");
         container.append(&freq_label);
 
         let mode_label = Label::new(Some("---"));
         mode_label.add_css_class("monospace");
+        mode_label.set_width_chars(5); // "FreeDV" longest realistic
+        mode_label.set_xalign(0.0);
         container.append(&mode_label);
 
         let bw_label = Label::new(Some("BW: ---"));
         bw_label.add_css_class("monospace");
+        bw_label.set_width_chars(10); // "BW: 3000" etc.
+        bw_label.set_xalign(0.0);
         container.append(&bw_label);
 
         let smeter_box = GtkBox::new(Orientation::Horizontal, 4);
@@ -71,11 +79,16 @@ impl Controls {
 
         let smeter_label = Label::new(Some("S0"));
         smeter_label.add_css_class("monospace");
+        smeter_label.set_width_chars(6); // "S9+60" widest
+        smeter_label.set_xalign(0.0);
         smeter_box.append(&smeter_label);
         container.append(&smeter_box);
 
         let tx_label = Label::new(Some("RX"));
         tx_label.add_css_class("monospace");
+        tx_label.add_css_class("tx-rx-rx");
+        tx_label.set_width_chars(2); // "RX" / "TX"
+        tx_label.set_xalign(0.5);
         container.append(&tx_label);
 
         let ptt_btn = ToggleButton::with_label("PTT");
@@ -136,9 +149,12 @@ impl Controls {
         self.smeter_label.set_text(&s_reading_to_string(s_reading));
 
         if state.tx {
-            self.tx_label
-                .set_markup("<span foreground='red' weight='bold'>TX</span>");
+            self.tx_label.remove_css_class("tx-rx-rx");
+            self.tx_label.add_css_class("tx-rx-tx");
+            self.tx_label.set_text("TX");
         } else {
+            self.tx_label.remove_css_class("tx-rx-tx");
+            self.tx_label.add_css_class("tx-rx-rx");
             self.tx_label.set_text("RX");
         }
     }

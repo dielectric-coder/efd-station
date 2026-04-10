@@ -59,6 +59,7 @@ fn run_demod(
     cancel: CancellationToken,
 ) -> Result<(), DspError> {
     let decim_factor = (config.input_rate / config.output_rate) as usize;
+    let mut agc = Agc::new();
     debug!(
         mode = ?config.mode,
         input_rate = config.input_rate,
@@ -89,7 +90,10 @@ fn run_demod(
         };
 
         // Demodulate
-        let demod_samples = demodulate(&block.samples, config.mode);
+        let mut demod_samples = demodulate(&block.samples, config.mode);
+
+        // Apply AGC to bring weak signals to audible level
+        agc.process(&mut demod_samples);
 
         // Decimate to output rate
         let decimated = decimate(&demod_samples, decim_factor);
@@ -177,6 +181,45 @@ fn demod_fm(iq: &[[f32; 2]]) -> Vec<f32> {
     }
 
     out
+}
+
+/// Simple AGC: measures peak level and applies gain to target -6 dB (0.5 peak).
+/// Uses a slow attack / fast release to avoid pumping.
+struct Agc {
+    gain: f32,
+    target: f32,
+    attack: f32,  // gain reduction speed (fast)
+    release: f32, // gain increase speed (slow)
+    max_gain: f32,
+}
+
+impl Agc {
+    fn new() -> Self {
+        Self {
+            gain: 1000.0, // start with high gain for weak signals
+            target: 0.5,
+            attack: 0.1,   // fast attack
+            release: 0.001, // slow release
+            max_gain: 100_000.0,
+        }
+    }
+
+    fn process(&mut self, samples: &mut [f32]) {
+        for s in samples.iter_mut() {
+            *s *= self.gain;
+            let level = s.abs();
+            if level > self.target {
+                // Too loud — reduce gain quickly
+                self.gain *= 1.0 - self.attack * (level / self.target - 1.0).min(1.0);
+            } else if level < self.target * 0.5 {
+                // Too quiet — increase gain slowly
+                self.gain *= 1.0 + self.release;
+            }
+            self.gain = self.gain.clamp(1.0, self.max_gain);
+            // Hard clip to prevent distortion
+            *s = s.clamp(-1.0, 1.0);
+        }
+    }
 }
 
 /// Simple decimation by integer factor (no anti-alias filter — good enough
