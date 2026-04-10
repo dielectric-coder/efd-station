@@ -14,6 +14,10 @@ if [ ! -f /home/efd/.config/efd-backend/config.toml ]; then
 fi
 chown -R efd:efd /home/efd/.config/efd-backend
 
+# Reload udev rules for FDM-DUO symlink
+udevadm control --reload-rules 2>/dev/null || true
+udevadm trigger 2>/dev/null || true
+
 #DEBHELPER#
 
 echo ""

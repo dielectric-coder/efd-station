@@ -110,8 +110,24 @@ impl RigctldProcess {
 
         info!(pid = child.id().unwrap_or(0), "rigctld started");
 
-        // Give rigctld a moment to open the serial port and start listening
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Wait until rigctld is actually listening on the TCP port
+        let addr = format!("{}:{}", config.listen_host, config.listen_port);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match tokio::net::TcpStream::connect(&addr).await {
+                Ok(_) => {
+                    info!("rigctld is ready on {addr}");
+                    break;
+                }
+                Err(_) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        warn!("rigctld did not become ready within 5s, continuing anyway");
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
 
         Ok(Some(Self {
             child,
@@ -163,6 +179,15 @@ impl RigctldProcess {
 /// 2. Fallback: find the Elad IQ device (1721:061a) in sysfs, then find
 ///    a ttyUSB*/ttyACM* sibling on the same USB hub
 pub fn discover_serial_device() -> Result<Option<String>, CatError> {
+    // Strategy 0: udev symlink
+    let udev_path = Path::new("/dev/fdm-duo-cat");
+    if udev_path.exists() {
+        let resolved = udev_path.canonicalize().map_err(CatError::Io)?;
+        let device = resolved.to_string_lossy().to_string();
+        info!(device = %device, "found FDM-DUO CAT serial (udev symlink)");
+        return Ok(Some(device));
+    }
+
     // Strategy 1: /dev/serial/by-id/
     if let Some(dev) = discover_by_id()? {
         return Ok(Some(dev));

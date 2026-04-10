@@ -29,4 +29,7 @@ package() {
 
     # Example config
     install -Dm644 "dist/config/config.toml" "$pkgdir/etc/efd-backend/config.toml.example"
+
+    # udev rules
+    install -Dm644 "dist/udev/99-fdm-duo.rules" "$pkgdir/usr/lib/udev/rules.d/99-fdm-duo.rules"
 }

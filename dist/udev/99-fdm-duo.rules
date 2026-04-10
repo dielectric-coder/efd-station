@@ -1,0 +1,8 @@
+# Elad FDM-DUO transceiver — IQ data interface
+SUBSYSTEM=="usb", ATTR{idVendor}=="1721", ATTR{idProduct}=="061a", MODE="0666", GROUP="plugdev"
+
+# Elad FDM-DUO CAT serial port (FTDI FT232 on the same hub as the IQ device)
+# Creates a stable symlink at /dev/fdm-duo-cat
+SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", \
+    DRIVERS=="ftdi_sio", \
+    SYMLINK+="fdm-duo-cat", MODE="0666", GROUP="dialout"
