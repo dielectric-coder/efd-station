@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "server",
+    "client",
     "crates/efd-proto",
     "crates/efd-iq",
     "crates/efd-dsp",

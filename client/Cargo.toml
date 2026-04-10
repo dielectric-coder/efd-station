@@ -1,0 +1,19 @@
+[package]
+name = "efd-client"
+version = "0.3.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+efd-proto = { workspace = true }
+tokio = { workspace = true }
+bincode = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio-tungstenite = "0.28"
+futures-util = "0.3"
+gtk4 = { version = "0.9", features = ["v4_6"] }
+glib = "0.20"
+
+[[example]]
+name = "ws_test"
