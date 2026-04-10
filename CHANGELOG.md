@@ -1,0 +1,70 @@
+# Changelog
+
+All notable changes to efd-station are documented in this file.
+
+## [0.3.0] - 2026-04-10
+
+### Security
+- Add bincode size limit (4 KB) on WS frame decode to prevent OOM from malicious clients
+- Validate CAT commands from WS clients: length limit, printable ASCII only, must end with `;`
+- Add TX audio frame size limit (2 KB)
+
+### Fixed
+- Replace unsafe `File::from_raw_fd` + `mem::forget` in serial.rs with safe `nix::unistd::read/write`
+- Handle mutex poison gracefully in CAT poll/command tasks (recover instead of panic)
+- Proper graceful shutdown via `Pipeline::shutdown()` with 3s timeout instead of immediate `process::exit(0)`
+
+### Added
+- S-meter polling via `SM0;` CAT command — `RadioState.s_meter_db` now has live readings
+- TX state extracted from IF response — `RadioState.tx` reflects actual transmit status
+- Separate `audio.tx_device` config field for USB TX audio output
+- New `parse_sm_response()` and `IfResponse` struct in parse module
+
+### Changed
+- efd-dsp now depends on efd-iq directly, using `efd_iq::IqBlock` as the single source of truth
+- Removed IQ forwarder task — eliminated per-block sample Vec clone
+- FFT `center_freq_hz` initialized to 0 (clients use `RadioState.freq_hz` for display)
+
+## [0.2.0] - 2026-04-10
+
+### Added
+- Direct serial CAT control (38400 8N1) — talks to FDM-DUO FTDI port directly
+- Auto-discovery of CAT serial port via sysfs hub-sibling scanning
+- Udev rule creating `/dev/fdm-duo-cat` symlink
+
+### Removed
+- rigctld dependency — no longer needed
+- hamlib-utils from package dependencies
+
+### Changed
+- Simplified `[cat]` config: just `serial_device` and `poll_interval_ms`
+
+## [0.1.0] - 2026-04-09
+
+### Added
+- Initial release — complete backend implementation
+- **efd-proto**: shared WS message types with bincode serialization
+  - `ServerMsg`: FftBins, AudioChunk, RadioState, Error
+  - `ClientMsg`: CatCommand, TxAudio, Ptt
+- **efd-iq**: USB IQ capture from FDM-DUO (rusb, 192 kHz, 32-bit IQ)
+  - FIFO init sequence ported from EladSpectrum
+  - Auto-discover by USB VID:PID (1721:061a)
+- **efd-dsp**: FFT processing + demodulation
+  - 4096-point FFT with Blackman-Harris window and 3-frame averaging (rustfft)
+  - AM, USB, LSB, FM demodulators with 192k→48k decimation
+- **efd-audio**: ALSA playback, Opus codec, USB TX audio
+  - Opus wideband 48 kHz encode/decode (20ms frames)
+  - ALSA HAT output with configurable latency
+  - USB TX audio path for client-originated transmit
+- **efd-cat**: rigctld TCP client with Kenwood CAT parsing
+  - IF response parsing (frequency, mode, VFO)
+  - RF response parsing (filter bandwidth with lookup tables)
+  - Periodic state polling (200ms default)
+- **server**: Axum HTTP/WS server
+  - Full tokio pipeline: IQ → FFT → WS, IQ → demod → Opus → WS/ALSA
+  - Per-client WS handler with downstream (broadcast→bincode→WS) and upstream (WS→bincode→mpsc)
+  - TOML config at `~/.config/efd-backend/config.toml`
+  - `/health` endpoint, `/ws` WebSocket endpoint
+  - Graceful shutdown on SIGINT/SIGTERM
+- Packaging: .deb (cargo-deb) and Arch/Manjaro (PKGBUILD)
+- Systemd service with dedicated `efd` user

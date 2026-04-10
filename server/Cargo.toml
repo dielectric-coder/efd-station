@@ -3,7 +3,7 @@ name = "efd-server"
 version = "0.3.0"
 edition = "2021"
 description = "SDR backend for the Elad FDM-DUO transceiver"
-license = "MIT"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/dielectric-coder/efd-station"
 
 [dependencies]
