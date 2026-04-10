@@ -25,6 +25,7 @@ Single Cargo workspace:
 | `efd-audio` | ALSA playback, Opus wideband encode/decode, USB TX audio |
 | `efd-cat` | Direct serial CAT control (38400 8N1), auto-discovery |
 | `server` | Axum HTTP/WS server, tokio pipeline wiring |
+| `client` | GTK4 native client: spectrum, waterfall, controls, PTT |
 
 ### Data flow
 
@@ -79,6 +80,23 @@ sudo pacman -U efd-server-*.pkg.tar.zst
 ```
 
 Both packages install a systemd service, udev rules, and example config.
+
+### Client
+
+The GTK4 client runs on any Linux machine with a display:
+
+```bash
+# Install GTK4 dev (if not present)
+# Debian: sudo apt install libgtk-4-dev
+# Arch: sudo pacman -S gtk4
+
+cargo run --package efd-client -- ws://pi-hostname:8080/ws
+```
+
+**Headless test client** (no GUI, validates the pipeline):
+```bash
+cargo run --example ws_test --package efd-client -- ws://pi-hostname:8080/ws
+```
 
 ## Configuration
 

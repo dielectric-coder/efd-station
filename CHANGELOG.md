@@ -2,6 +2,26 @@
 
 All notable changes to efd-station are documented in this file.
 
+## [0.4.0] - 2026-04-10
+
+### Security
+- Bounded client message queue (max 256) — prevents OOM if GTK can't keep up
+- Bounded waterfall pending buffer (max 64 lines)
+- WS downstream send timeout (2s) — disconnects slow clients instead of blocking
+- Eliminated unsafe `create_for_data_unsafe` in waterfall — now clones pixel data safely
+
+### Fixed
+- WS handler now aborts the other task on client disconnect (was leaking tasks + broadcast receivers)
+- Simplified server shutdown: cancel + 3s wait (removed fragile `Arc::try_unwrap` logic)
+- FM demod output normalized to [-1.0, 1.0] based on 5kHz max deviation (was raw radians)
+- Demod lag warning now logs estimated milliseconds of dropped audio
+- Mutex poison recovery throughout client (unwrap_or_else + into_inner)
+
+### Changed
+- Spectrum grid drawn with single Cairo stroke (was 18 per frame)
+- Controls bar caches previous state, skips redundant GTK widget updates
+- WS client reconnect uses exponential backoff (2s → 30s cap)
+
 ## [0.3.1] - 2026-04-10
 
 ### Added

@@ -92,6 +92,24 @@ Full pipeline verified on CM5 + FDM-DUO hardware:
 - Audio: 50 Opus chunks/sec (48kHz wideband)
 - Ctrl-C shutdown: clean exit within 3s
 
+### Second code review fixes (v0.4.0)
+Client:
+- Bounded message queue (256) and waterfall pending buffer (64)
+- Eliminated unsafe pixel buffer — safe clone before Cairo surface
+- Spectrum grid: single stroke call (was 18/frame)
+- Controls: state caching, skip redundant GTK updates
+- WS reconnect: exponential backoff (2s→30s)
+- Mutex poison recovery everywhere
+
+Server:
+- WS task leak fixed — abort sibling task on disconnect
+- Simplified shutdown (cancel + 3s wait, no Arc::try_unwrap)
+- Downstream WS send timeout (2s, disconnects slow clients)
+- Demod lag logs estimated ms of dropped audio
+
+DSP:
+- FM demod normalized to ±1.0 (5kHz max deviation at 192kHz)
+
 ---
 
 ## Suggested next steps
