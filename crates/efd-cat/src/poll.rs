@@ -164,11 +164,17 @@ fn poll_radio_state(port: &SerialPort) -> Result<RadioState, CatError> {
         String::new()
     };
 
-    // S-meter reading
-    let s_meter_db = match port.command("SM0;") {
-        Ok(sm_resp) => parse::parse_sm_response(&sm_resp).unwrap_or(-127.0),
-        Err(_) => -127.0,
-    };
+    // S-meter: try RI (RSSI in dBm, more accurate), fall back to SM
+    let s_meter_db = match port.command("RI;") {
+        Ok(ri_resp) => parse::parse_ri_response(&ri_resp),
+        Err(_) => None,
+    }
+    .or_else(|| {
+        port.command("SM0;")
+            .ok()
+            .and_then(|sm_resp| parse::parse_sm_response(&sm_resp))
+    })
+    .unwrap_or(-127.0);
 
     Ok(RadioState {
         vfo: parsed.vfo,

@@ -70,24 +70,51 @@ pub fn parse_if_response_tuple(response: &str) -> Option<(u64, Mode, Vfo)> {
     Some((r.freq_hz, r.mode, r.vfo))
 }
 
-/// Parse an SM; (S-meter) response. Returns S-meter value in dB.
+/// Parse an SM; (S-meter) response. Returns S-meter value in dBm.
+///
 /// SM response format: `SM` + P1(1) + P2P2P2P2(4) + `;`
-/// P2 is 0000-0030, representing S0-S9+60dB.
+/// FDM-DUO SM scale (from manual):
+///   0000=S0, 0002=S1, 0003=S2, 0004=S3, 0005=S4,
+///   0006=S5, 0008=S6, 0009=S7, 0010=S8, 0011=S9,
+///   0012=S9+10, 0014=S9+20, 0016=S9+30,
+///   0018=S9+40, 0020=S9+50, 0022=S9+60
 pub fn parse_sm_response(response: &str) -> Option<f32> {
     let s = response.trim();
     if s.len() < 7 || !s.starts_with("SM") {
         return None;
     }
     let reading: u16 = s[3..7].parse().ok()?;
-    // 0000=S0 (-54dBm), 0015=S9 (-73+6*9=-73+54=-19? no)
-    // Kenwood scale: 0=S0, 15=S9, 30=S9+60dB
-    // S0 = -127dBm, S9 = -73dBm, each S-unit = ~6dB
-    if reading <= 15 {
-        // S0 to S9: linear map 0..15 → -127..-73
-        Some(-127.0 + (reading as f32 / 15.0) * 54.0)
+
+    // Map the FDM-DUO discrete SM values to dBm.
+    // S0=-127, S9=-73 (54dB range over 11 steps), S9+60=-13
+    let dbm = if reading <= 11 {
+        // S0 to S9: 0..11 → -127..-73
+        -127.0 + (reading as f32 / 11.0) * 54.0
     } else {
-        // S9+ : linear map 15..30 → -73..-13
-        Some(-73.0 + ((reading - 15) as f32 / 15.0) * 60.0)
+        // S9+ : 11..22 → -73..-13 (60dB over 11 steps)
+        -73.0 + ((reading - 11) as f32 / 11.0) * 60.0
+    };
+    Some(dbm.clamp(-127.0, 0.0))
+}
+
+/// Parse an RI; (RSSI) response. Returns RSSI in dBm.
+///
+/// RI response format: `RI` + P1(sign: +/-/!) + P2P2P2P2P2(5 digits) + `;`
+/// P1: '-' negative, '+' positive, '!' unreliable
+pub fn parse_ri_response(response: &str) -> Option<f32> {
+    let s = response.trim();
+    if s.len() < 8 || !s.starts_with("RI") {
+        return None;
+    }
+    let sign = s.as_bytes()[2];
+    if sign == b'!' {
+        return None; // unreliable
+    }
+    let value: f32 = s[3..8].trim().parse().ok()?;
+    if sign == b'-' {
+        Some(-value)
+    } else {
+        Some(value)
     }
 }
 
@@ -167,11 +194,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_sm_basic() {
-        // S9 = reading 0015
-        let resp = "SM00015;";
+    fn parse_sm_s9() {
+        // S9 = reading 0011 per FDM-DUO manual
+        let resp = "SM00011;";
         let db = parse_sm_response(resp).unwrap();
-        assert!((db - (-73.0)).abs() < 0.1);
+        assert!((db - (-73.0)).abs() < 0.1, "S9 should be -73 dBm, got {db}");
     }
 
     #[test]
@@ -179,6 +206,27 @@ mod tests {
         let resp = "SM00000;";
         let db = parse_sm_response(resp).unwrap();
         assert!((db - (-127.0)).abs() < 0.1);
+    }
+
+    #[test]
+    fn parse_sm_s9_plus_60() {
+        // S9+60 = reading 0022
+        let resp = "SM00022;";
+        let db = parse_sm_response(resp).unwrap();
+        assert!((db - (-13.0)).abs() < 0.1, "S9+60 should be -13 dBm, got {db}");
+    }
+
+    #[test]
+    fn parse_ri_negative() {
+        let resp = "RI-00085;";
+        let db = parse_ri_response(resp).unwrap();
+        assert!((db - (-85.0)).abs() < 0.1);
+    }
+
+    #[test]
+    fn parse_ri_unreliable() {
+        let resp = "RI!00000;";
+        assert!(parse_ri_response(resp).is_none());
     }
 
     #[test]
