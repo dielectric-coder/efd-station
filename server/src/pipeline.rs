@@ -224,17 +224,14 @@ impl Pipeline {
                                     let filter_bw = parse_filter_bw(&state.filter_bw);
                                     // Use client override if set (SDR mode),
                                     // otherwise use radio's reported mode (Monitor mode).
-                                    use efd_proto::Mode;
                                     let mode = mode_override.borrow()
                                         .unwrap_or(state.mode);
-                                    let ssb_offset = match mode {
-                                        Mode::USB | Mode::CW => filter_bw / 2.0,
-                                        Mode::LSB | Mode::CWR => -filter_bw / 2.0,
-                                        _ => 0.0,
-                                    };
+                                    // No SSB offset here — the channel filter in
+                                    // efd-dsp uses a complex bandpass to select
+                                    // only the desired sideband around DC.
                                     let _ = tuning_tx.send(efd_dsp::DemodTuning {
                                         mode,
-                                        vfo_offset_hz: vfo_offset + ssb_offset,
+                                        vfo_offset_hz: vfo_offset,
                                         filter_bw_hz: filter_bw,
                                     });
                                 }

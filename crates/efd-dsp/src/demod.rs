@@ -180,29 +180,35 @@ impl ComplexDecimator {
 
 /// Complex FIR channel filter at the decimated sample rate.
 /// Much sharper selectivity than filtering at the original rate.
+///
+/// For SSB modes, uses complex (asymmetric) coefficients to pass only
+/// the desired sideband: USB passes [0, +bw], LSB passes [-bw, 0].
+/// For AM/FM, uses real (symmetric) coefficients passing [-bw/2, +bw/2].
 struct ChannelFilter {
-    coeffs: Vec<f32>,
+    coeffs_i: Vec<f32>,
+    coeffs_q: Vec<f32>,
     history_i: Vec<f32>,
     history_q: Vec<f32>,
     taps: usize,
 }
 
 impl ChannelFilter {
-    fn new(bandwidth_hz: f64, sample_rate: u32, num_taps: usize) -> Self {
+    fn new(bandwidth_hz: f64, sample_rate: u32, num_taps: usize, mode: Mode) -> Self {
         let taps = num_taps | 1;
-        let cutoff = (bandwidth_hz / 2.0) / sample_rate as f64;
-        let coeffs = design_lowpass(taps, cutoff as f32);
+        let (coeffs_i, coeffs_q) = design_channel_filter(taps, bandwidth_hz, sample_rate, mode);
         Self {
-            coeffs,
+            coeffs_i,
+            coeffs_q,
             history_i: vec![0.0; taps],
             history_q: vec![0.0; taps],
             taps,
         }
     }
 
-    fn set_bandwidth(&mut self, bandwidth_hz: f64, sample_rate: u32) {
-        let cutoff = (bandwidth_hz / 2.0) / sample_rate as f64;
-        self.coeffs = design_lowpass(self.taps, cutoff as f32);
+    fn configure(&mut self, bandwidth_hz: f64, sample_rate: u32, mode: Mode) {
+        let (ci, cq) = design_channel_filter(self.taps, bandwidth_hz, sample_rate, mode);
+        self.coeffs_i = ci;
+        self.coeffs_q = cq;
         self.reset();
     }
 
@@ -220,16 +226,65 @@ impl ChannelFilter {
             self.history_q.copy_within(1.., 0);
             self.history_q[self.taps - 1] = q;
 
+            // Complex convolution: (coeffs_i + j·coeffs_q) * (in_i + j·in_q)
             let mut sum_i = 0.0f32;
             let mut sum_q = 0.0f32;
-            for (idx, &c) in self.coeffs.iter().enumerate() {
-                sum_i += self.history_i[idx] * c;
-                sum_q += self.history_q[idx] * c;
+            for idx in 0..self.taps {
+                let ci = self.coeffs_i[idx];
+                let cq = self.coeffs_q[idx];
+                let hi = self.history_i[idx];
+                let hq = self.history_q[idx];
+                sum_i += ci * hi - cq * hq;
+                sum_q += ci * hq + cq * hi;
             }
             out.push([sum_i, sum_q]);
         }
     }
 }
+
+/// Design channel filter coefficients — complex bandpass for SSB,
+/// real symmetric lowpass for AM/FM.
+fn design_channel_filter(
+    taps: usize,
+    bandwidth_hz: f64,
+    sample_rate: u32,
+    mode: Mode,
+) -> (Vec<f32>, Vec<f32>) {
+    let cutoff = (bandwidth_hz / 2.0) / sample_rate as f64;
+    let h = design_lowpass(taps, cutoff as f32);
+
+    match mode {
+        Mode::USB | Mode::CW => {
+            // Shift lowpass up by bw/2 to create bandpass [0, +bw]
+            let shift = bandwidth_hz / 2.0 / sample_rate as f64;
+            shift_filter(&h, shift)
+        }
+        Mode::LSB | Mode::CWR => {
+            // Shift lowpass down by bw/2 to create bandpass [-bw, 0]
+            let shift = -bandwidth_hz / 2.0 / sample_rate as f64;
+            shift_filter(&h, shift)
+        }
+        _ => {
+            // Symmetric lowpass for AM, FM, etc.
+            let coeffs_q = vec![0.0; taps];
+            (h, coeffs_q)
+        }
+    }
+}
+
+/// Frequency-shift real FIR coefficients to create a complex bandpass.
+/// h_bp[n] = h[n] · e^(j·2π·f_shift·n)
+fn shift_filter(h: &[f32], f_shift: f64) -> (Vec<f32>, Vec<f32>) {
+    let mut ci = Vec::with_capacity(h.len());
+    let mut cq = Vec::with_capacity(h.len());
+    for (n, &coeff) in h.iter().enumerate() {
+        let phase = 2.0 * std::f64::consts::PI * f_shift * n as f64;
+        ci.push(coeff * phase.cos() as f32);
+        cq.push(coeff * phase.sin() as f32);
+    }
+    (ci, cq)
+}
+
 
 /// DC blocking filter — removes DC offset from demodulated audio.
 struct DcBlock {
@@ -272,10 +327,12 @@ fn run_demod(
 
     // Channel filter at 48kHz — 127 taps gives ~375Hz transition bandwidth
     // (much sharper than 65 taps at 192kHz which had ~3kHz transition)
+    // For SSB modes, uses complex bandpass to select only the desired sideband.
     let mut chan_filter = ChannelFilter::new(
         DemodTuning::default().filter_bw_hz,
         config.output_rate,
         127,
+        config.mode,
     );
 
     let mut dc_block = DcBlock::new();
@@ -283,7 +340,7 @@ fn run_demod(
 
     let mut tuning = *tuning_rx.borrow_and_update();
     let mut nco = Nco::new(-tuning.vfo_offset_hz, config.input_rate);
-    chan_filter.set_bandwidth(tuning.filter_bw_hz, config.output_rate);
+    chan_filter.configure(tuning.filter_bw_hz, config.output_rate, tuning.mode);
 
     // Reusable buffers
     let mut shifted_buf: Vec<[f32; 2]> = Vec::new();
@@ -313,13 +370,18 @@ fn run_demod(
                 if new_tuning.vfo_offset_hz != tuning.vfo_offset_hz {
                     nco.set_freq(-new_tuning.vfo_offset_hz, config.input_rate);
                 }
-                if new_tuning.filter_bw_hz != tuning.filter_bw_hz {
-                    chan_filter.set_bandwidth(new_tuning.filter_bw_hz, config.output_rate);
-                }
-                if new_tuning.mode != tuning.mode {
-                    debug!(old = ?tuning.mode, new = ?new_tuning.mode, "demod mode changed");
-                    iq_decimator.reset();
-                    chan_filter.reset();
+                if new_tuning.filter_bw_hz != tuning.filter_bw_hz
+                    || new_tuning.mode != tuning.mode
+                {
+                    if new_tuning.mode != tuning.mode {
+                        debug!(old = ?tuning.mode, new = ?new_tuning.mode, "demod mode changed");
+                        iq_decimator.reset();
+                    }
+                    chan_filter.configure(
+                        new_tuning.filter_bw_hz,
+                        config.output_rate,
+                        new_tuning.mode,
+                    );
                 }
                 tuning = new_tuning;
             }
@@ -399,10 +461,10 @@ fn demod_usb(iq: &[[f32; 2]]) -> Vec<f32> {
     iq.iter().map(|&[i, _q]| i).collect()
 }
 
-/// LSB demodulation: negate Q to mirror the sideband, then take real part.
+/// LSB demodulation: real part extraction.
+/// Sideband selection is handled by the complex channel filter which
+/// passes only [-bw, 0], so taking Re{} recovers the audio correctly.
 fn demod_lsb(iq: &[[f32; 2]]) -> Vec<f32> {
-    // After frequency shifting to baseband, LSB content is in the
-    // negative frequencies. Conjugating (negating Q) mirrors it to positive.
     iq.iter().map(|&[i, _q]| i).collect()
 }
 
