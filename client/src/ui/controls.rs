@@ -347,18 +347,11 @@ impl ControlBar {
         &self.container
     }
 
-    /// Sync frequency entry from RadioState.
-    pub fn sync_from_radio(&self, state: &RadioState) {
-        if !self.sdr_box.is_visible() {
-            return;
-        }
-        if self.last_cmd.get().elapsed().as_millis() < 300 {
-            return;
-        }
-        if self.freq_entry.has_focus() {
-            return;
-        }
-        self.freq_entry.set_text(&format!("{}", state.freq_hz));
+    /// Sync control bar from RadioState (display bar handles freq display).
+    pub fn sync_from_radio(&self, _state: &RadioState) {
+        // freq_entry is input-only — the display bar shows the current
+        // frequency. Overwriting the entry from RadioState would fight
+        // with user input.
     }
 }
 
