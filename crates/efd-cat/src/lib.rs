@@ -1,10 +1,10 @@
-pub mod client;
+pub mod discover;
 pub mod error;
 pub mod parse;
 pub mod poll;
-pub mod rigctld;
+pub mod serial;
 
-pub use client::RigctldConn;
+pub use discover::discover_serial_device;
 pub use error::CatError;
 pub use poll::{spawn_cat_tasks, CatConfig};
-pub use rigctld::{discover_serial_device, RigctldConfig, RigctldProcess};
+pub use serial::SerialPort;

@@ -24,13 +24,11 @@ pub struct Pipeline {
     pub(crate) cancel: CancellationToken,
     #[allow(dead_code)]
     tasks: Vec<(&'static str, JoinHandle<()>)>,
-    #[allow(dead_code)]
-    rigctld: Option<efd_cat::RigctldProcess>,
 }
 
 impl Pipeline {
     /// Create all channels, spawn all tasks.
-    pub async fn start(config: &Config) -> Self {
+    pub fn start(config: &Config) -> Self {
         let cancel = CancellationToken::new();
 
         // -- broadcast channels (fan-out) --
@@ -183,29 +181,10 @@ impl Pipeline {
             tasks.push(("usb_tx", handle));
         }
 
-        // --- rigctld process management ---
-        let rigctld = {
-            let rigctld_cfg = efd_cat::RigctldConfig {
-                serial_device: config.cat.serial_device.clone(),
-                model: config.cat.rigctld_model,
-                baud_rate: config.cat.baud_rate,
-                listen_host: config.cat.rigctld_host.clone(),
-                listen_port: config.cat.rigctld_port,
-            };
-            match efd_cat::RigctldProcess::start(&rigctld_cfg).await {
-                Ok(proc) => proc,
-                Err(e) => {
-                    error!("failed to start rigctld: {e}");
-                    None
-                }
-            }
-        };
-
-        // --- CAT tasks ---
+        // --- CAT tasks (direct serial, no rigctld) ---
         {
             let cat_cfg = efd_cat::CatConfig {
-                host: config.cat.rigctld_host.clone(),
-                port: config.cat.rigctld_port,
+                serial_device: config.cat.serial_device.clone(),
                 poll_interval: Duration::from_millis(config.cat.poll_interval_ms),
             };
             let st_tx = state_tx.clone();
@@ -241,7 +220,6 @@ impl Pipeline {
             tx_audio_tx,
             cancel,
             tasks,
-            rigctld,
         }
     }
 

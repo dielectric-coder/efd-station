@@ -15,14 +15,9 @@ fft_averaging = 3
 sample_rate = 192000
 
 [cat]
-# "auto" scans /dev/serial/by-id/ for the FDM-DUO
-# "none" to skip (if rigctld is managed externally)
+# "auto" discovers the FDM-DUO CAT serial port automatically
 # or an explicit path like "/dev/ttyUSB0"
 serial_device = "auto"
-rigctld_model = 3077
-baud_rate = 38400
-rigctld_host = "127.0.0.1"
-rigctld_port = 4532
 poll_interval_ms = 200
 
 [audio]
