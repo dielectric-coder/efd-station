@@ -205,8 +205,10 @@ fn poll_radio_state(
 }
 
 /// Forward CAT commands from WS clients to the serial port.
-/// After each command, immediately polls the radio state and broadcasts it,
-/// eliminating the round-trip delay of waiting for the next poll cycle.
+///
+/// Coalesces rapid commands: drains the queue and only sends the last
+/// command of each type (e.g., only the final FA frequency command).
+/// Polls radio state once after the batch.
 fn run_commands(
     port: Arc<Mutex<SerialPort>>,
     mut cmd_rx: mpsc::Receiver<CatCommand>,
@@ -220,28 +222,43 @@ fn run_commands(
             return Err(CatError::Cancelled);
         }
 
-        let cmd = match cmd_rx.blocking_recv() {
+        // Wait for first command
+        let first = match cmd_rx.blocking_recv() {
             Some(c) => c,
             None => return Ok(()),
         };
 
-        // Validate command (defense in depth — upstream.rs also validates)
-        if cmd.raw.len() > MAX_CAT_CMD_LEN || !cmd.raw.ends_with(';') {
-            warn!(cmd = %cmd.raw, "invalid CAT command, dropping");
-            continue;
+        // Drain any queued commands — keep only the last of each prefix
+        // (e.g., last FA, last MD, last TX/RX)
+        let mut last_by_prefix: Vec<CatCommand> = vec![first];
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            // Check if this replaces a previous command with the same prefix
+            let prefix = &cmd.raw[..2.min(cmd.raw.len())];
+            if let Some(existing) = last_by_prefix.iter_mut().find(|c| c.raw.starts_with(prefix)) {
+                *existing = cmd; // replace with newer
+            } else {
+                last_by_prefix.push(cmd);
+            }
         }
 
         let p = lock_port(&port);
-        match p.command(&cmd.raw) {
-            Ok(resp) => {
-                debug!(cmd = %cmd.raw, response = %resp, "CAT command");
+
+        for cmd in &last_by_prefix {
+            if cmd.raw.len() > MAX_CAT_CMD_LEN || !cmd.raw.ends_with(';') {
+                warn!(cmd = %cmd.raw, "invalid CAT command, dropping");
+                continue;
             }
-            Err(e) => {
-                warn!(cmd = %cmd.raw, "CAT command error: {e}");
+            match p.command(&cmd.raw) {
+                Ok(resp) => {
+                    debug!(cmd = %cmd.raw, response = %resp, "CAT command");
+                }
+                Err(e) => {
+                    warn!(cmd = %cmd.raw, "CAT command error: {e}");
+                }
             }
         }
 
-        // Immediately poll state after command — gives instant feedback
+        // Poll state once after the batch
         match poll_radio_state(&p, &cancel) {
             Ok(state) => {
                 let _ = state_tx.send(state);

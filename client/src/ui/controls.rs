@@ -3,7 +3,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use efd_proto::{ClientMsg, Mode, Ptt, RadioState, Vfo};
+use efd_proto::{ClientMsg, Ptt, RadioState};
 use gtk4::prelude::*;
 use gtk4::{
     Adjustment, Align, Box as GtkBox, Button, DropDown, Entry, Label, LevelBar, Orientation,
@@ -127,16 +127,6 @@ impl DisplayBar {
             .set_markup(&format!("<span font='18' weight='bold'>{freq}</span>"));
     }
 
-    /// Optimistic mode update.
-    pub fn set_mode_immediate(&self, mode: Mode) {
-        self.mode_label.set_text(&format!("{:?}", mode));
-    }
-
-    /// Optimistic VFO update.
-    pub fn set_vfo_immediate(&self, vfo: Vfo) {
-        self.vfo_label.set_text(&format!("VFO {:?}", vfo));
-    }
-
     pub fn update(&self, state: &RadioState) {
         let s_reading = db_to_s_reading(state.s_meter_db);
         let mode_str = format!("{:?}", state.mode);
@@ -183,15 +173,6 @@ impl DisplayBar {
 // Control bar (bottom) — interactive: PTT, Mute, Volume
 // ---------------------------------------------------------------------------
 
-const MODES: &[(&str, Mode)] = &[
-    ("LSB", Mode::LSB),
-    ("USB", Mode::USB),
-    ("CW", Mode::CW),
-    ("CWR", Mode::CWR),
-    ("AM", Mode::AM),
-    ("FM", Mode::FM),
-];
-
 const STEPS: &[(&str, u64)] = &[
     ("100 Hz", 100),
     ("1 kHz", 1_000),
@@ -205,16 +186,8 @@ pub struct ControlBar {
     container: GtkBox,
     sdr_box: GtkBox,
     freq_entry: Entry,
-    mode_dropdown: DropDown,
-    step_dropdown: DropDown,
-    /// Shared sender for upstream WS messages.
-    ws_tx: mpsc::UnboundedSender<ClientMsg>,
-    /// Suppress RadioState-driven sync during internal updates.
-    syncing: Rc<Cell<bool>>,
     /// Timestamp of last user command — suppress sync briefly after.
     last_cmd: Rc<Cell<Instant>>,
-    /// Reference to DisplayBar for optimistic updates.
-    display_bar: DisplayBar,
 }
 
 impl ControlBar {
@@ -230,7 +203,6 @@ impl ControlBar {
         container.set_margin_bottom(4);
         container.set_halign(Align::Center);
 
-        let syncing = Rc::new(Cell::new(false));
         let last_cmd = Rc::new(Cell::new(Instant::now() - std::time::Duration::from_secs(10)));
 
         // --- Mode toggle ---
@@ -247,7 +219,8 @@ impl ControlBar {
         });
         container.append(&mode_btn);
 
-        // --- SDR controls ---
+        // --- SDR controls: frequency only ---
+        // Mode/BW/filter are software DSP parameters, not radio commands.
 
         // Frequency entry
         let freq_entry = Entry::new();
@@ -267,49 +240,6 @@ impl ControlBar {
         });
         sdr_box.append(&freq_entry);
 
-        // Mode dropdown
-        let mode_list = StringList::new(&MODES.iter().map(|(s, _)| *s).collect::<Vec<_>>());
-        let mode_dropdown = DropDown::new(Some(mode_list), gtk4::Expression::NONE);
-        mode_dropdown.set_valign(Align::Center);
-        let tx = ws_tx.clone();
-        let sync = syncing.clone();
-        let lc = last_cmd.clone();
-        let db = display_bar.clone();
-        mode_dropdown.connect_selected_notify(move |dd| {
-            if sync.get() {
-                return;
-            }
-            let idx = dd.selected() as usize;
-            if let Some(&(_, mode)) = MODES.get(idx) {
-                if let Some(cmd) = cat_commands::set_mode(mode) {
-                    lc.set(Instant::now());
-                    db.set_mode_immediate(mode);
-                    let _ = tx.send(ClientMsg::CatCommand(cmd));
-                }
-            }
-        });
-        sdr_box.append(&mode_dropdown);
-
-        // VFO toggle
-        let vfo_btn = ToggleButton::with_label("VFO A");
-        vfo_btn.set_valign(Align::Center);
-        let tx = ws_tx.clone();
-        let lc = last_cmd.clone();
-        let db = display_bar.clone();
-        vfo_btn.connect_toggled(move |btn| {
-            let vfo = if btn.is_active() {
-                btn.set_label("VFO B");
-                Vfo::B
-            } else {
-                btn.set_label("VFO A");
-                Vfo::A
-            };
-            lc.set(Instant::now());
-            db.set_vfo_immediate(vfo);
-            let _ = tx.send(ClientMsg::CatCommand(cat_commands::set_vfo(vfo)));
-        });
-        sdr_box.append(&vfo_btn);
-
         // Step size dropdown
         let step_list = StringList::new(&STEPS.iter().map(|(s, _)| *s).collect::<Vec<_>>());
         let step_dropdown = DropDown::new(Some(step_list), gtk4::Expression::NONE);
@@ -326,8 +256,7 @@ impl ControlBar {
         let lc = last_cmd.clone();
         let db = display_bar.clone();
         tune_down.connect_clicked(move |_| {
-            lc.set(Instant::now());
-            tune_by_step(&fe, &sd, &tx, &db, false);
+            tune_by_step(&fe, &sd, &tx, &db, &lc, false);
         });
         sdr_box.append(&tune_down);
 
@@ -339,8 +268,7 @@ impl ControlBar {
         let lc = last_cmd.clone();
         let db = display_bar.clone();
         tune_up.connect_clicked(move |_| {
-            lc.set(Instant::now());
-            tune_by_step(&fe, &sd, &tx, &db, true);
+            tune_by_step(&fe, &sd, &tx, &db, &lc, true);
         });
         sdr_box.append(&tune_up);
 
@@ -388,12 +316,7 @@ impl ControlBar {
             container,
             sdr_box,
             freq_entry,
-            mode_dropdown,
-            step_dropdown,
-            ws_tx: ws_tx.clone(),
-            syncing,
             last_cmd,
-            display_bar,
         }
     }
 
@@ -401,44 +324,35 @@ impl ControlBar {
         &self.container
     }
 
-    /// Sync SDR controls from RadioState (only when SDR box is visible,
-    /// the user is not actively editing, and no recent command was sent).
+    /// Sync frequency entry from RadioState.
     pub fn sync_from_radio(&self, state: &RadioState) {
         if !self.sdr_box.is_visible() {
             return;
         }
-        // Suppress sync briefly after user sent a command (one CAT poll cycle)
         if self.last_cmd.get().elapsed().as_millis() < 300 {
             return;
         }
         if self.freq_entry.has_focus() {
             return;
         }
-        self.syncing.set(true);
-
         self.freq_entry.set_text(&format!("{}", state.freq_hz));
-
-        let mode_idx = MODES
-            .iter()
-            .position(|&(_, m)| m == state.mode)
-            .unwrap_or(0);
-        self.mode_dropdown.set_selected(mode_idx as u32);
-
-        self.syncing.set(false);
     }
 }
 
+/// Tune up/down by step. Sends command immediately — the server coalesces
+/// rapid commands so only the last frequency actually gets sent to the radio.
 fn tune_by_step(
     freq_entry: &Entry,
     step_dropdown: &DropDown,
     ws_tx: &mpsc::UnboundedSender<ClientMsg>,
     display_bar: &DisplayBar,
+    last_cmd: &Rc<Cell<Instant>>,
     up: bool,
 ) {
     let step_idx = step_dropdown.selected() as usize;
     let step_hz = STEPS.get(step_idx).map(|&(_, hz)| hz).unwrap_or(1000);
-    let text = freq_entry.text();
-    let current: u64 = text
+    let current: u64 = freq_entry
+        .text()
         .replace(['.', ',', ' '], "")
         .parse()
         .unwrap_or(0);
@@ -449,6 +363,7 @@ fn tune_by_step(
     };
     freq_entry.set_text(&format!("{new_freq}"));
     display_bar.set_freq_immediate(new_freq);
+    last_cmd.set(Instant::now());
     let _ = ws_tx.send(ClientMsg::CatCommand(cat_commands::set_freq(new_freq)));
 }
 
