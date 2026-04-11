@@ -3,7 +3,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use efd_proto::{ClientMsg, Mode, Ptt, RadioState};
+use efd_proto::{AudioSource, ClientMsg, Mode, Ptt, RadioState};
 use gtk4::prelude::*;
 use gtk4::{
     Adjustment, Align, Box as GtkBox, Button, DropDown, Entry, Label, LevelBar, Orientation,
@@ -221,10 +221,18 @@ impl ControlBar {
         let mode_btn = ToggleButton::with_label("MON");
         mode_btn.set_valign(Align::Center);
         let sb = sdr_box.clone();
+        let tx = ws_tx.clone();
         mode_btn.connect_toggled(move |btn| {
             let is_sdr = btn.is_active();
             btn.set_label(if is_sdr { "SDR" } else { "MON" });
             sb.set_visible(is_sdr);
+            // MON = radio's USB audio, SDR = software demod from IQ
+            let source = if is_sdr {
+                AudioSource::SoftwareDemod
+            } else {
+                AudioSource::RadioUsb
+            };
+            let _ = tx.send(ClientMsg::SetAudioSource(source));
         });
         container.append(&mode_btn);
 

@@ -50,6 +50,8 @@ pub struct AudioConfig {
     pub alsa_device: String,
     /// ALSA device for TX audio output to FDM-DUO USB audio.
     pub tx_device: String,
+    /// ALSA device for RX audio capture from FDM-DUO USB audio.
+    pub rx_device: String,
     pub sample_rate: u32,
 }
 
@@ -109,6 +111,7 @@ impl Default for AudioConfig {
         Self {
             alsa_device: "default".into(),
             tx_device: "default".into(),
+            rx_device: "default".into(),
             sample_rate: 48_000,
         }
     }

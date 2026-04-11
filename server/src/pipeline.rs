@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use efd_proto::{AudioChunk, CatCommand, FftBins, RadioState, TxAudio};
-use tokio::sync::{broadcast, mpsc};
+use efd_proto::{AudioChunk, AudioSource, CatCommand, FftBins, RadioState, TxAudio};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -22,7 +22,10 @@ pub struct Pipeline {
     pub tx_audio_tx: mpsc::Sender<TxAudio>,
 
     /// Client demod mode override — None = use radio's mode, Some = SDR override.
-    pub demod_mode_tx: tokio::sync::watch::Sender<Option<efd_proto::Mode>>,
+    pub demod_mode_tx: watch::Sender<Option<efd_proto::Mode>>,
+
+    /// Audio source selection: SoftwareDemod or RadioUsb.
+    pub audio_source_tx: watch::Sender<AudioSource>,
 
     pub(crate) cancel: CancellationToken,
     tasks: Vec<(&'static str, JoinHandle<()>)>,
@@ -117,12 +120,32 @@ impl Pipeline {
             tasks.push(("demod", handle));
         }
 
-        // --- Opus encoder bridge: demod AudioBlock → Opus → broadcast<AudioChunk> ---
+        // --- USB RX audio capture (radio's hardware demod output) ---
+        let (usb_rx_tx, usb_rx_rx) = mpsc::channel::<efd_audio::PcmBlock>(64);
+        {
+            let usb_rx_cfg = efd_audio::UsbRxConfig {
+                device: config.audio.rx_device.clone(),
+                sample_rate: config.audio.sample_rate,
+            };
+            let c = cancel.clone();
+            let handle = efd_audio::spawn_usb_rx_task(usb_rx_cfg, usb_rx_tx, c);
+            let handle = tokio::spawn(async move {
+                match handle.await {
+                    Ok(Ok(())) => info!("USB RX capture exited cleanly"),
+                    Ok(Err(e)) => error!("USB RX capture error: {e}"),
+                    Err(e) => error!("USB RX capture panicked: {e}"),
+                }
+            });
+            tasks.push(("usb_rx", handle));
+        }
+
+        // --- Audio source mux → Opus encoder → broadcast<AudioChunk> ---
+        let (audio_source_tx, audio_source_rx) = watch::channel(AudioSource::SoftwareDemod);
         {
             let atx = audio_tx.clone();
             let c = cancel.clone();
             let handle = tokio::spawn(async move {
-                encode_audio_to_opus(demod_audio_rx, atx, c).await;
+                encode_audio_mux(demod_audio_rx, usb_rx_rx, audio_source_rx, atx, c).await;
             });
             tasks.push(("opus_encoder", handle));
         }
@@ -254,6 +277,7 @@ impl Pipeline {
             cat_tx,
             tx_audio_tx,
             demod_mode_tx,
+            audio_source_tx,
             cancel,
             tasks,
         }
@@ -272,9 +296,14 @@ impl Pipeline {
     }
 }
 
-/// Encode demod AudioBlocks to Opus AudioChunks for WS broadcast.
-async fn encode_audio_to_opus(
-    mut rx: mpsc::Receiver<efd_dsp::AudioBlock>,
+/// Mux between demod and USB RX audio, encode to Opus, broadcast.
+///
+/// Both sources are always drained to prevent backpressure on the idle one.
+/// Only the active source (selected by `source_rx`) feeds the Opus encoder.
+async fn encode_audio_mux(
+    mut demod_rx: mpsc::Receiver<efd_dsp::AudioBlock>,
+    mut usb_rx: mpsc::Receiver<efd_audio::PcmBlock>,
+    mut source_rx: watch::Receiver<AudioSource>,
     tx: broadcast::Sender<AudioChunk>,
     cancel: CancellationToken,
 ) {
@@ -289,28 +318,54 @@ async fn encode_audio_to_opus(
     let mut frame_buf: Vec<f32> = Vec::with_capacity(efd_audio::OPUS_FRAME_SIZE);
 
     loop {
+        let source = *source_rx.borrow();
         tokio::select! {
             _ = cancel.cancelled() => break,
-            block = rx.recv() => {
+            _ = source_rx.changed() => {
+                // Source changed — flush partial frame to avoid mixing audio.
+                frame_buf.clear();
+                continue;
+            }
+            block = demod_rx.recv() => {
                 let Some(block) = block else { break };
+                if source != AudioSource::SoftwareDemod {
+                    continue; // drain without encoding
+                }
+                encode_samples(&block.samples, &mut frame_buf, &mut encoder, &mut seq, &tx);
+            }
+            block = usb_rx.recv() => {
+                let Some(block) = block else { break };
+                if source != AudioSource::RadioUsb {
+                    continue; // drain without encoding
+                }
+                encode_samples(&block.samples, &mut frame_buf, &mut encoder, &mut seq, &tx);
+            }
+        }
+    }
+}
 
-                for &sample in &block.samples {
-                    frame_buf.push(sample);
-                    if frame_buf.len() == efd_audio::OPUS_FRAME_SIZE {
-                        match encoder.encode_float(&frame_buf) {
-                            Ok(opus_data) => {
-                                let chunk = AudioChunk { opus_data, seq };
-                                seq = seq.wrapping_add(1);
-                                let _ = tx.send(chunk);
-                            }
-                            Err(e) => {
-                                tracing::warn!("Opus encode error: {e}");
-                            }
-                        }
-                        frame_buf.clear();
-                    }
+/// Accumulate samples into Opus frames and broadcast encoded chunks.
+fn encode_samples(
+    samples: &[f32],
+    frame_buf: &mut Vec<f32>,
+    encoder: &mut efd_audio::OpusEncoder,
+    seq: &mut u32,
+    tx: &broadcast::Sender<AudioChunk>,
+) {
+    for &sample in samples {
+        frame_buf.push(sample);
+        if frame_buf.len() == efd_audio::OPUS_FRAME_SIZE {
+            match encoder.encode_float(frame_buf) {
+                Ok(opus_data) => {
+                    let chunk = AudioChunk { opus_data, seq: *seq };
+                    *seq = seq.wrapping_add(1);
+                    let _ = tx.send(chunk);
+                }
+                Err(e) => {
+                    tracing::warn!("Opus encode error: {e}");
                 }
             }
+            frame_buf.clear();
         }
     }
 }
