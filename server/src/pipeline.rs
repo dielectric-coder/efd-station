@@ -316,6 +316,8 @@ async fn encode_audio_mux(
     };
     let mut seq: u32 = 0;
     let mut frame_buf: Vec<f32> = Vec::with_capacity(efd_audio::OPUS_FRAME_SIZE);
+    let mut demod_alive = true;
+    let mut usb_alive = true;
 
     loop {
         let source = *source_rx.borrow();
@@ -326,17 +328,25 @@ async fn encode_audio_mux(
                 frame_buf.clear();
                 continue;
             }
-            block = demod_rx.recv() => {
-                let Some(block) = block else { break };
+            block = demod_rx.recv(), if demod_alive => {
+                let Some(block) = block else {
+                    demod_alive = false;
+                    tracing::warn!("demod audio channel closed");
+                    continue;
+                };
                 if source != AudioSource::SoftwareDemod {
-                    continue; // drain without encoding
+                    continue;
                 }
                 encode_samples(&block.samples, &mut frame_buf, &mut encoder, &mut seq, &tx);
             }
-            block = usb_rx.recv() => {
-                let Some(block) = block else { break };
+            block = usb_rx.recv(), if usb_alive => {
+                let Some(block) = block else {
+                    usb_alive = false;
+                    tracing::warn!("USB RX audio channel closed");
+                    continue;
+                };
                 if source != AudioSource::RadioUsb {
-                    continue; // drain without encoding
+                    continue;
                 }
                 encode_samples(&block.samples, &mut frame_buf, &mut encoder, &mut seq, &tx);
             }
