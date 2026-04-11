@@ -74,6 +74,8 @@ fn run_usb_rx(
         "USB RX audio capture opened"
     );
 
+    let mut block_count: u64 = 0;
+
     loop {
         if cancel.is_cancelled() {
             break;
@@ -99,6 +101,14 @@ fn run_usb_rx(
         for frame in buf[..frame_size * channels as usize].chunks_exact(channels as usize) {
             let sum = frame.iter().map(|&s| s as f32).sum::<f32>();
             mono.push(sum / (channels as f32 * 32768.0));
+        }
+
+        // Log RMS every ~1 second (50 blocks × 20ms) to verify capture.
+        block_count += 1;
+        if block_count % 50 == 1 {
+            let rms = (mono.iter().map(|s| s * s).sum::<f32>() / mono.len() as f32).sqrt();
+            let peak = mono.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+            info!(block_count, rms, peak, "USB RX audio level");
         }
 
         let block = PcmBlock { samples: mono.clone() };
