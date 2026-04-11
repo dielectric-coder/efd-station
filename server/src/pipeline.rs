@@ -123,6 +123,7 @@ impl Pipeline {
         // --- USB RX audio capture (radio's hardware demod output) ---
         let (usb_rx_tx, usb_rx_rx) = mpsc::channel::<efd_audio::PcmBlock>(64);
         if let Some(rx_dev) = efd_audio::resolve_device(&config.audio.rx_device, true) {
+            info!(device = %rx_dev, "USB RX audio capture device");
             let usb_rx_cfg = efd_audio::UsbRxConfig {
                 device: rx_dev,
                 sample_rate: config.audio.sample_rate,
@@ -182,6 +183,7 @@ impl Pipeline {
 
         // --- USB TX audio task ---
         if let Some(tx_dev) = efd_audio::resolve_device(&config.audio.tx_device, false) {
+            info!(device = %tx_dev, "USB TX audio playback device");
             let usb_tx_cfg = efd_audio::UsbTxConfig {
                 device: tx_dev,
                 sample_rate: config.audio.sample_rate,
