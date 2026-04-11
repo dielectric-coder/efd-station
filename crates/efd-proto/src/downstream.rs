@@ -33,6 +33,7 @@ pub struct RadioState {
     pub att: bool,
     pub lp: bool,
     pub agc: AgcMode,
+    pub agc_threshold: u8,
     pub nr: bool,
     pub nb: bool,
     pub s_meter_db: f32,

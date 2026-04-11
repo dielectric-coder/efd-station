@@ -118,6 +118,18 @@ pub fn parse_ri_response(response: &str) -> Option<f32> {
     }
 }
 
+/// Parse a TH; (AGC threshold) response. Returns threshold value (0–10).
+///
+/// TH response format: `TH` + P1P1(2 digits, 00–10) + `;`
+pub fn parse_th_response(response: &str) -> Option<u8> {
+    let s = response.trim();
+    if s.len() < 5 || !s.starts_with("TH") {
+        return None;
+    }
+    let value: u8 = s[2..4].parse().ok()?;
+    if value <= 10 { Some(value) } else { None }
+}
+
 // ---------- filter bandwidth tables (per ELAD FDM-DUO manual) ----------
 
 const FILTER_LSB_USB: &[&str] = &[

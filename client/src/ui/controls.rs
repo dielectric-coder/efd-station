@@ -195,8 +195,11 @@ pub struct ControlBar {
     container: GtkBox,
     sdr_box: GtkBox,
     freq_entry: Entry,
+    audio_btn: ToggleButton,
     /// Timestamp of last user command — suppress sync briefly after.
     last_cmd: Rc<Cell<Instant>>,
+    /// Saved AGC threshold — restored when leaving USB audio mode.
+    saved_agc_th: Rc<Cell<u8>>,
 }
 
 impl ControlBar {
@@ -220,16 +223,29 @@ impl ControlBar {
 
         // --- Audio source toggle (MON mode only) ---
         // Switches between radio's USB audio and software demod output.
+        // When USB audio is selected, set AGC threshold to 0 (required for
+        // FDM-DUO USB audio output). Restore previous threshold on switch away.
+        let saved_agc_th = Rc::new(Cell::new(5u8)); // default threshold
+
         let audio_btn = ToggleButton::with_label("USB");
         audio_btn.set_valign(Align::Center);
         audio_btn.set_tooltip_text(Some("Audio source: USB = radio hardware demod, SW = software demod"));
         let tx = ws_tx.clone();
+        let th = saved_agc_th.clone();
         audio_btn.connect_toggled(move |btn| {
             let source = if btn.is_active() {
                 btn.set_label("SW");
+                // Restore previous AGC threshold
+                let _ = tx.send(ClientMsg::CatCommand(
+                    cat_commands::set_agc_threshold(th.get()),
+                ));
                 AudioSource::SoftwareDemod
             } else {
                 btn.set_label("USB");
+                // Set AGC threshold to 0 for USB audio
+                let _ = tx.send(ClientMsg::CatCommand(
+                    cat_commands::set_agc_threshold(0),
+                ));
                 AudioSource::RadioUsb
             };
             let _ = tx.send(ClientMsg::SetAudioSource(source));
@@ -240,19 +256,27 @@ impl ControlBar {
         let sb = sdr_box.clone();
         let ab = audio_btn.clone();
         let tx = ws_tx.clone();
+        let th = saved_agc_th.clone();
         mode_btn.connect_toggled(move |btn| {
             let is_sdr = btn.is_active();
             btn.set_label(if is_sdr { "SDR" } else { "MON" });
             sb.set_visible(is_sdr);
             ab.set_visible(!is_sdr);
             if is_sdr {
-                // SDR mode: always software demod
+                // SDR mode: always software demod, restore AGC threshold
+                let _ = tx.send(ClientMsg::CatCommand(
+                    cat_commands::set_agc_threshold(th.get()),
+                ));
                 let _ = tx.send(ClientMsg::SetAudioSource(AudioSource::SoftwareDemod));
             } else {
                 // MON mode: restore audio toggle state
                 let source = if ab.is_active() {
                     AudioSource::SoftwareDemod
                 } else {
+                    // USB audio — set AGC threshold to 0
+                    let _ = tx.send(ClientMsg::CatCommand(
+                        cat_commands::set_agc_threshold(0),
+                    ));
                     AudioSource::RadioUsb
                 };
                 let _ = tx.send(ClientMsg::SetAudioSource(source));
@@ -261,7 +285,8 @@ impl ControlBar {
         container.append(&mode_btn);
         container.append(&audio_btn);
 
-        // Sync initial audio source with server (starts as MON + USB).
+        // Sync initial state: MON + USB audio + AGC threshold 0
+        let _ = ws_tx.send(ClientMsg::CatCommand(cat_commands::set_agc_threshold(0)));
         let _ = ws_tx.send(ClientMsg::SetAudioSource(AudioSource::RadioUsb));
 
         // --- SDR controls: frequency only ---
@@ -375,7 +400,9 @@ impl ControlBar {
             container,
             sdr_box,
             freq_entry,
+            audio_btn,
             last_cmd,
+            saved_agc_th,
         }
     }
 
@@ -384,10 +411,12 @@ impl ControlBar {
     }
 
     /// Sync control bar from RadioState (display bar handles freq display).
-    pub fn sync_from_radio(&self, _state: &RadioState) {
-        // freq_entry is input-only — the display bar shows the current
-        // frequency. Overwriting the entry from RadioState would fight
-        // with user input.
+    pub fn sync_from_radio(&self, state: &RadioState) {
+        // Save the radio's AGC threshold only when we're NOT in USB audio
+        // mode (where we forced it to 0).
+        if self.audio_btn.is_active() || state.agc_threshold > 0 {
+            self.saved_agc_th.set(state.agc_threshold);
+        }
     }
 }
 

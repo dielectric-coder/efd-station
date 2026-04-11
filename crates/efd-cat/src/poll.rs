@@ -189,6 +189,17 @@ fn poll_radio_state(
     })
     .unwrap_or(-127.0);
 
+    if cancel.is_cancelled() {
+        return Err(CatError::Cancelled);
+    }
+
+    // AGC threshold
+    let agc_threshold = port
+        .command("TH;")
+        .ok()
+        .and_then(|resp| parse::parse_th_response(&resp))
+        .unwrap_or(0);
+
     Ok(RadioState {
         vfo: parsed.vfo,
         freq_hz: parsed.freq_hz,
@@ -197,6 +208,7 @@ fn poll_radio_state(
         att: false,   // TODO: query AT; command when available
         lp: false,    // TODO: query LP; command when available
         agc: AgcMode::Slow, // TODO: query GT; command when available
+        agc_threshold,
         nr: false,    // TODO: query NR; command when available
         nb: false,    // TODO: query NB; command when available
         s_meter_db,
