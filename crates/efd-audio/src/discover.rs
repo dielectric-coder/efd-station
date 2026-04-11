@@ -167,7 +167,7 @@ fn resolve_pcm_devices(card: u32) -> FdmDuoAlsa {
             let is_playback = suffix.ends_with('p');
             let dev_str = &suffix[..suffix.len() - 1];
             if let Ok(dev) = dev_str.parse::<u32>() {
-                let hw = format!("plughw:{card},{dev}");
+                let hw = format!("hw:{card},{dev}");
                 if is_capture && capture.is_none() {
                     debug!(device = %hw, "found FDM-DUO capture PCM");
                     capture = Some(hw);

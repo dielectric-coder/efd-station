@@ -45,11 +45,15 @@ fn run_usb_rx(
 
     let pcm = PCM::new(&config.device, Direction::Capture, false)?;
 
+    // The FDM-DUO USB audio is stereo S16_LE or S24_3LE natively.
+    // Capture stereo S16_LE and downmix to mono f32 ourselves — more
+    // reliable than relying on plughw channel conversion.
+    let channels: u32 = 2;
     {
         let hwp = HwParams::any(&pcm)?;
         hwp.set_access(Access::RWInterleaved)?;
-        hwp.set_format(Format::FloatLE)?;
-        hwp.set_channels(1)?;
+        hwp.set_format(Format::s16())?;
+        hwp.set_channels(channels)?;
         hwp.set_rate(config.sample_rate, alsa::ValueOr::Nearest)?;
         let buffer_frames = (config.sample_rate / 10) as i64; // 100ms buffer
         hwp.set_buffer_size_near(buffer_frames)?;
@@ -58,21 +62,27 @@ fn run_usb_rx(
 
     pcm.prepare()?;
 
-    // Read in 960-sample chunks (20ms at 48kHz) — matches Opus frame size.
+    // Read in 960-frame chunks (20ms at 48kHz) — matches Opus frame size.
+    // Each frame = 2 samples (stereo interleaved).
     let frame_size = 960;
-    let mut buf = vec![0.0f32; frame_size];
+    let mut buf = vec![0i16; frame_size * channels as usize];
+    let mut mono = Vec::with_capacity(frame_size);
 
-    info!(device = %config.device, "USB RX audio capture opened");
+    info!(
+        device = %config.device,
+        channels = channels,
+        "USB RX audio capture opened"
+    );
 
     loop {
         if cancel.is_cancelled() {
             break;
         }
 
-        let io = pcm.io_f32()?;
+        let io = pcm.io_i16()?;
         let mut offset = 0;
         while offset < frame_size {
-            match io.readi(&mut buf[offset..]) {
+            match io.readi(&mut buf[offset * channels as usize..]) {
                 Ok(n) => offset += n,
                 Err(e) => {
                     warn!("USB RX read error: {e}, recovering");
@@ -84,9 +94,14 @@ fn run_usb_rx(
             }
         }
 
-        let block = PcmBlock {
-            samples: buf.clone(),
-        };
+        // Downmix stereo interleaved S16_LE to mono f32.
+        mono.clear();
+        for frame in buf[..frame_size * channels as usize].chunks_exact(channels as usize) {
+            let sum = frame.iter().map(|&s| s as f32).sum::<f32>();
+            mono.push(sum / (channels as f32 * 32768.0));
+        }
+
+        let block = PcmBlock { samples: mono.clone() };
 
         if audio_tx.blocking_send(block).is_err() {
             debug!("USB RX audio channel closed");

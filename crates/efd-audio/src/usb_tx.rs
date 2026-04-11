@@ -47,11 +47,14 @@ fn run_usb_tx(
 
     let pcm = PCM::new(&config.device, Direction::Playback, false)?;
 
+    // FDM-DUO USB audio is natively stereo S16_LE at 48 kHz.
+    // Decode Opus mono f32 → upmix to stereo S16_LE for the hardware.
+    let channels: u32 = 2;
     {
         let hwp = HwParams::any(&pcm)?;
         hwp.set_access(Access::RWInterleaved)?;
-        hwp.set_format(Format::FloatLE)?;
-        hwp.set_channels(1)?;
+        hwp.set_format(Format::s16())?;
+        hwp.set_channels(channels)?;
         hwp.set_rate(config.sample_rate, alsa::ValueOr::Nearest)?;
         let buffer_frames = (config.sample_rate / 10) as i64; // 100ms buffer
         hwp.set_buffer_size_near(buffer_frames)?;
@@ -60,8 +63,9 @@ fn run_usb_tx(
 
     pcm.prepare()?;
     let mut decoder = OpusDecoder::new()?;
+    let mut stereo_buf: Vec<i16> = Vec::new();
 
-    info!(device = %config.device, "USB TX audio opened");
+    info!(device = %config.device, channels = channels, "USB TX audio opened");
 
     loop {
         if cancel.is_cancelled() {
@@ -84,10 +88,21 @@ fn run_usb_tx(
             }
         };
 
-        let io = pcm.io_f32()?;
+        // Convert mono f32 → stereo interleaved S16_LE.
+        stereo_buf.clear();
+        stereo_buf.reserve(pcm_data.len() * channels as usize);
+        for &sample in &pcm_data {
+            let s = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
+            for _ in 0..channels {
+                stereo_buf.push(s);
+            }
+        }
+
+        let io = pcm.io_i16()?;
         let mut offset = 0;
-        while offset < pcm_data.len() {
-            match io.writei(&pcm_data[offset..]) {
+        let frame_count = pcm_data.len(); // frames, not samples
+        while offset < frame_count {
+            match io.writei(&stereo_buf[offset * channels as usize..]) {
                 Ok(n) => offset += n,
                 Err(e) => {
                     warn!("USB TX write error: {e}, recovering");
