@@ -52,11 +52,12 @@ async fn main() {
     cancel.cancel();
 
     // Give tasks time to notice cancellation and exit.
-    // spawn_blocking tasks (IQ, FFT, demod, ALSA, serial) check cancel
-    // on each loop iteration; USB reads have a 2s timeout max.
+    // spawn_blocking tasks (IQ, ALSA, serial) may be stuck in system calls
+    // that don't check cancellation — force exit after grace period.
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     info!("efd-backend stopped");
+    std::process::exit(0);
 }
 
 async fn shutdown_signal(cancel: CancellationToken) {

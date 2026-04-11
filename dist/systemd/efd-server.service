@@ -17,6 +17,9 @@ Group=efd
 # USB and audio access
 SupplementaryGroups=dialout audio plugdev
 
+# Shutdown: cancel tasks + 3s grace, then exit. Don't wait for stuck USB/ALSA reads.
+TimeoutStopSec=8
+
 # Hardening
 ProtectSystem=strict
 ProtectHome=read-only

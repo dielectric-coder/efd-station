@@ -24,8 +24,19 @@ post_install() {
     echo ""
 }
 
+pre_upgrade() {
+    echo "==> Stopping old server..."
+    systemctl stop efd-server 2>/dev/null || true
+}
+
 post_upgrade() {
-    post_install
+    # Ensure config dir + permissions — skip udevadm (rules unchanged)
+    mkdir -p /home/efd/.config/efd-backend
+    chown -R efd:efd /home/efd/.config/efd-backend
+
+    echo "==> Starting server..."
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl restart efd-server 2>/dev/null || true
 }
 
 pre_remove() {
