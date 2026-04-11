@@ -236,6 +236,9 @@ impl ControlBar {
         });
         container.append(&mode_btn);
 
+        // Sync initial audio source with server (button starts as MON).
+        let _ = ws_tx.send(ClientMsg::SetAudioSource(AudioSource::RadioUsb));
+
         // --- SDR controls: frequency only ---
         // Mode/BW/filter are software DSP parameters, not radio commands.
 

@@ -144,7 +144,7 @@ impl Pipeline {
         }
 
         // --- Audio source mux → Opus encoder → broadcast<AudioChunk> ---
-        let (audio_source_tx, audio_source_rx) = watch::channel(AudioSource::SoftwareDemod);
+        let (audio_source_tx, audio_source_rx) = watch::channel(AudioSource::RadioUsb);
         {
             let atx = audio_tx.clone();
             let c = cancel.clone();
@@ -325,21 +325,36 @@ async fn encode_audio_mux(
     let mut frame_buf: Vec<f32> = Vec::with_capacity(efd_audio::OPUS_FRAME_SIZE);
     let mut demod_alive = true;
     let mut usb_alive = true;
+    let mut logged_fallback = false;
 
     loop {
         // Resolve effective source: fall back to the other if the selected one
         // is unavailable (channel closed / not configured).
         let requested = *source_rx.borrow();
         let source = match requested {
-            AudioSource::RadioUsb if !usb_alive => AudioSource::SoftwareDemod,
-            AudioSource::SoftwareDemod if !demod_alive => AudioSource::RadioUsb,
+            AudioSource::RadioUsb if !usb_alive => {
+                if !logged_fallback {
+                    tracing::warn!("USB RX unavailable, falling back to software demod");
+                    logged_fallback = true;
+                }
+                AudioSource::SoftwareDemod
+            }
+            AudioSource::SoftwareDemod if !demod_alive => {
+                if !logged_fallback {
+                    tracing::warn!("software demod unavailable, falling back to USB RX");
+                    logged_fallback = true;
+                }
+                AudioSource::RadioUsb
+            }
             other => other,
         };
         tokio::select! {
             _ = cancel.cancelled() => break,
             _ = source_rx.changed() => {
-                // Source changed — flush partial frame to avoid mixing audio.
+                let new_src = *source_rx.borrow();
+                info!(?new_src, "audio source changed");
                 frame_buf.clear();
+                logged_fallback = false;
                 continue;
             }
             block = demod_rx.recv(), if demod_alive => {
