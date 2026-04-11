@@ -110,8 +110,8 @@ impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             alsa_device: "default".into(),
-            tx_device: "default".into(),
-            rx_device: String::new(),
+            tx_device: "auto".into(),
+            rx_device: "auto".into(),
             sample_rate: 48_000,
         }
     }

@@ -121,12 +121,10 @@ impl Pipeline {
         }
 
         // --- USB RX audio capture (radio's hardware demod output) ---
-        // Only spawn if rx_device is configured — an unconfigured device would
-        // block on ALSA open/read and prevent clean shutdown.
         let (usb_rx_tx, usb_rx_rx) = mpsc::channel::<efd_audio::PcmBlock>(64);
-        if !config.audio.rx_device.is_empty() {
+        if let Some(rx_dev) = efd_audio::resolve_device(&config.audio.rx_device, true) {
             let usb_rx_cfg = efd_audio::UsbRxConfig {
-                device: config.audio.rx_device.clone(),
+                device: rx_dev,
                 sample_rate: config.audio.sample_rate,
             };
             let c = cancel.clone();
@@ -141,7 +139,7 @@ impl Pipeline {
             tasks.push(("usb_rx", handle));
         } else {
             drop(usb_rx_tx); // no producer — mux will see closed channel immediately
-            info!("USB RX audio disabled (rx_device not configured)");
+            info!("USB RX audio disabled (device not found)");
         }
 
         // --- Audio source mux → Opus encoder → broadcast<AudioChunk> ---
@@ -183,9 +181,9 @@ impl Pipeline {
         }
 
         // --- USB TX audio task ---
-        {
+        if let Some(tx_dev) = efd_audio::resolve_device(&config.audio.tx_device, false) {
             let usb_tx_cfg = efd_audio::UsbTxConfig {
-                device: config.audio.tx_device.clone(),
+                device: tx_dev,
                 sample_rate: config.audio.sample_rate,
             };
             let c = cancel.clone();
@@ -198,6 +196,8 @@ impl Pipeline {
                 }
             });
             tasks.push(("usb_tx", handle));
+        } else {
+            info!("USB TX audio disabled (device not found)");
         }
 
         // --- CAT tasks (direct serial, no rigctld) ---
@@ -325,7 +325,14 @@ async fn encode_audio_mux(
     let mut usb_alive = true;
 
     loop {
-        let source = *source_rx.borrow();
+        // Resolve effective source: fall back to the other if the selected one
+        // is unavailable (channel closed / not configured).
+        let requested = *source_rx.borrow();
+        let source = match requested {
+            AudioSource::RadioUsb if !usb_alive => AudioSource::SoftwareDemod,
+            AudioSource::SoftwareDemod if !demod_alive => AudioSource::RadioUsb,
+            other => other,
+        };
         tokio::select! {
             _ = cancel.cancelled() => break,
             _ = source_rx.changed() => {
