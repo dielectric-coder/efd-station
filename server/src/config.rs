@@ -111,7 +111,7 @@ impl Default for AudioConfig {
         Self {
             alsa_device: "default".into(),
             tx_device: "default".into(),
-            rx_device: "default".into(),
+            rx_device: String::new(),
             sample_rate: 48_000,
         }
     }

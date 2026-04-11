@@ -121,8 +121,10 @@ impl Pipeline {
         }
 
         // --- USB RX audio capture (radio's hardware demod output) ---
+        // Only spawn if rx_device is configured — an unconfigured device would
+        // block on ALSA open/read and prevent clean shutdown.
         let (usb_rx_tx, usb_rx_rx) = mpsc::channel::<efd_audio::PcmBlock>(64);
-        {
+        if !config.audio.rx_device.is_empty() {
             let usb_rx_cfg = efd_audio::UsbRxConfig {
                 device: config.audio.rx_device.clone(),
                 sample_rate: config.audio.sample_rate,
@@ -137,6 +139,9 @@ impl Pipeline {
                 }
             });
             tasks.push(("usb_rx", handle));
+        } else {
+            drop(usb_rx_tx); // no producer — mux will see closed channel immediately
+            info!("USB RX audio disabled (rx_device not configured)");
         }
 
         // --- Audio source mux → Opus encoder → broadcast<AudioChunk> ---
