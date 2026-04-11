@@ -218,25 +218,50 @@ impl ControlBar {
         let sdr_box = GtkBox::new(Orientation::Horizontal, 8);
         sdr_box.set_visible(false);
 
+        // --- Audio source toggle (MON mode only) ---
+        // Switches between radio's USB audio and software demod output.
+        let audio_btn = ToggleButton::with_label("USB");
+        audio_btn.set_valign(Align::Center);
+        audio_btn.set_tooltip_text(Some("Audio source: USB = radio hardware demod, SW = software demod"));
+        let tx = ws_tx.clone();
+        audio_btn.connect_toggled(move |btn| {
+            let source = if btn.is_active() {
+                btn.set_label("SW");
+                AudioSource::SoftwareDemod
+            } else {
+                btn.set_label("USB");
+                AudioSource::RadioUsb
+            };
+            let _ = tx.send(ClientMsg::SetAudioSource(source));
+        });
+
         let mode_btn = ToggleButton::with_label("MON");
         mode_btn.set_valign(Align::Center);
         let sb = sdr_box.clone();
+        let ab = audio_btn.clone();
         let tx = ws_tx.clone();
         mode_btn.connect_toggled(move |btn| {
             let is_sdr = btn.is_active();
             btn.set_label(if is_sdr { "SDR" } else { "MON" });
             sb.set_visible(is_sdr);
-            // MON = radio's USB audio, SDR = software demod from IQ
-            let source = if is_sdr {
-                AudioSource::SoftwareDemod
+            ab.set_visible(!is_sdr);
+            if is_sdr {
+                // SDR mode: always software demod
+                let _ = tx.send(ClientMsg::SetAudioSource(AudioSource::SoftwareDemod));
             } else {
-                AudioSource::RadioUsb
-            };
-            let _ = tx.send(ClientMsg::SetAudioSource(source));
+                // MON mode: restore audio toggle state
+                let source = if ab.is_active() {
+                    AudioSource::SoftwareDemod
+                } else {
+                    AudioSource::RadioUsb
+                };
+                let _ = tx.send(ClientMsg::SetAudioSource(source));
+            }
         });
         container.append(&mode_btn);
+        container.append(&audio_btn);
 
-        // Sync initial audio source with server (button starts as MON).
+        // Sync initial audio source with server (starts as MON + USB).
         let _ = ws_tx.send(ClientMsg::SetAudioSource(AudioSource::RadioUsb));
 
         // --- SDR controls: frequency only ---
