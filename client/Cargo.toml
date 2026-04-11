@@ -18,6 +18,9 @@ gl = "0.14"
 libc = "0.2"
 cpal = "0.15"
 audiopus = "0.3.0-rc.0"
+serde = { workspace = true }
+toml = "0.8"
+directories = "6"
 
 [[example]]
 name = "ws_test"

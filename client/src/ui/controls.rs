@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 
 use crate::audio::AudioPlayer;
 use crate::cat_commands;
+use crate::sdr_params::{self, SdrParams};
 
 // ---------------------------------------------------------------------------
 // Display bar (top) — read-only status: VFO, freq, mode, BW, S-meter, RX/TX
@@ -195,11 +196,17 @@ pub struct ControlBar {
     container: GtkBox,
     sdr_box: GtkBox,
     freq_entry: Entry,
+    mode_dropdown: DropDown,
     audio_btn: ToggleButton,
+    mode_btn: ToggleButton,
+    /// Last-known radio state from CAT polling.
+    last_radio: Rc<RefCell<Option<RadioState>>>,
+    /// Persisted SDR operating parameters.
+    sdr_params: Rc<RefCell<SdrParams>>,
+    /// WS sender for commands.
+    ws_tx: mpsc::UnboundedSender<ClientMsg>,
     /// Timestamp of last user command — suppress sync briefly after.
     last_cmd: Rc<Cell<Instant>>,
-    /// Saved AGC threshold — restored when leaving USB audio mode.
-    saved_agc_th: Rc<Cell<u8>>,
 }
 
 impl ControlBar {
@@ -216,113 +223,152 @@ impl ControlBar {
         container.set_halign(Align::Center);
 
         let last_cmd = Rc::new(Cell::new(Instant::now() - std::time::Duration::from_secs(10)));
+        let last_radio: Rc<RefCell<Option<RadioState>>> = Rc::new(RefCell::new(None));
+        let sdr_params = Rc::new(RefCell::new(sdr_params::load()));
 
-        // --- Mode toggle ---
+        // --- SDR controls box (visible in SDR mode only) ---
         let sdr_box = GtkBox::new(Orientation::Horizontal, 8);
         sdr_box.set_visible(false);
 
-        // --- Audio source toggle (MON mode only) ---
-        // Switches between radio's USB audio and software demod output.
-        // When USB audio is selected, set AGC threshold to 0 (required for
-        // FDM-DUO USB audio output). Restore previous threshold on switch away.
-        let saved_agc_th = Rc::new(Cell::new(5u8)); // default threshold
+        // Create SDR widgets first so mode toggle handler can reference them.
+        let freq_entry = Entry::new();
+        freq_entry.set_width_chars(14);
+        freq_entry.set_placeholder_text(Some("Freq Hz"));
+        freq_entry.add_css_class("monospace");
+        {
+            let tx = ws_tx.clone();
+            let lc = last_cmd.clone();
+            let db = display_bar.clone();
+            let sp = sdr_params.clone();
+            freq_entry.connect_activate(move |entry| {
+                let text = entry.text();
+                if let Ok(hz) = text.replace(['.', ',', ' '], "").parse::<u64>() {
+                    lc.set(Instant::now());
+                    db.set_freq_immediate(hz);
+                    let _ = tx.send(ClientMsg::CatCommand(cat_commands::set_freq(hz)));
+                    sp.borrow_mut().freq_hz = hz;
+                }
+            });
+        }
+        sdr_box.append(&freq_entry);
 
+        let mode_list = StringList::new(&MODES.iter().map(|(s, _)| *s).collect::<Vec<_>>());
+        let mode_dropdown = DropDown::new(Some(mode_list), gtk4::Expression::NONE);
+        mode_dropdown.set_selected(1); // default USB
+        mode_dropdown.set_valign(Align::Center);
+        {
+            let tx = ws_tx.clone();
+            let sp = sdr_params.clone();
+            mode_dropdown.connect_selected_notify(move |dd| {
+                let idx = dd.selected() as usize;
+                if let Some(&(_, mode)) = MODES.get(idx) {
+                    let _ = tx.send(ClientMsg::SetDemodMode(Some(mode)));
+                    if let Some(cmd) = cat_commands::set_mode(mode) {
+                        let _ = tx.send(ClientMsg::CatCommand(cmd));
+                    }
+                    sp.borrow_mut().set_mode(mode);
+                }
+            });
+        }
+        sdr_box.append(&mode_dropdown);
+
+        // --- Audio source toggle (MON mode only) ---
         let audio_btn = ToggleButton::with_label("USB");
         audio_btn.set_valign(Align::Center);
-        audio_btn.set_tooltip_text(Some("Audio source: USB = radio hardware demod, SW = software demod"));
-        let tx = ws_tx.clone();
-        let th = saved_agc_th.clone();
-        audio_btn.connect_toggled(move |btn| {
-            let source = if btn.is_active() {
-                btn.set_label("SW");
-                // Restore previous AGC threshold
-                let _ = tx.send(ClientMsg::CatCommand(
-                    cat_commands::set_agc_threshold(th.get()),
-                ));
-                AudioSource::SoftwareDemod
-            } else {
-                btn.set_label("USB");
-                // Set AGC threshold to 0 for USB audio
-                let _ = tx.send(ClientMsg::CatCommand(
-                    cat_commands::set_agc_threshold(0),
-                ));
-                AudioSource::RadioUsb
-            };
-            let _ = tx.send(ClientMsg::SetAudioSource(source));
-        });
-
-        let mode_btn = ToggleButton::with_label("MON");
-        mode_btn.set_valign(Align::Center);
-        let sb = sdr_box.clone();
-        let ab = audio_btn.clone();
-        let tx = ws_tx.clone();
-        let th = saved_agc_th.clone();
-        mode_btn.connect_toggled(move |btn| {
-            let is_sdr = btn.is_active();
-            btn.set_label(if is_sdr { "SDR" } else { "MON" });
-            sb.set_visible(is_sdr);
-            ab.set_visible(!is_sdr);
-            if is_sdr {
-                // SDR mode: always software demod, restore AGC threshold
-                let _ = tx.send(ClientMsg::CatCommand(
-                    cat_commands::set_agc_threshold(th.get()),
-                ));
-                let _ = tx.send(ClientMsg::SetAudioSource(AudioSource::SoftwareDemod));
-            } else {
-                // MON mode: restore audio toggle state
-                let source = if ab.is_active() {
-                    AudioSource::SoftwareDemod
+        audio_btn.set_tooltip_text(Some("USB = radio hardware demod, SW = software demod"));
+        {
+            let tx = ws_tx.clone();
+            let lr = last_radio.clone();
+            audio_btn.connect_toggled(move |btn| {
+                if btn.is_active() {
+                    // MON+USB → MON+SW: demod mirrors radio params
+                    btn.set_label("SW");
+                    let _ = tx.send(ClientMsg::SetDemodMode(None));
+                    if let Some(ref state) = *lr.borrow() {
+                        let _ = tx.send(ClientMsg::CatCommand(
+                            cat_commands::set_agc_threshold(state.agc_threshold),
+                        ));
+                    }
+                    let _ = tx.send(ClientMsg::SetAudioSource(AudioSource::SoftwareDemod));
                 } else {
-                    // USB audio — set AGC threshold to 0
+                    // MON+SW → MON+USB
+                    btn.set_label("USB");
                     let _ = tx.send(ClientMsg::CatCommand(
                         cat_commands::set_agc_threshold(0),
                     ));
-                    AudioSource::RadioUsb
-                };
-                let _ = tx.send(ClientMsg::SetAudioSource(source));
-            }
-        });
+                    let _ = tx.send(ClientMsg::SetAudioSource(AudioSource::RadioUsb));
+                }
+            });
+        }
+
+        // --- MON/SDR mode toggle ---
+        let mode_btn = ToggleButton::with_label("MON");
+        mode_btn.set_valign(Align::Center);
+        {
+            let sb = sdr_box.clone();
+            let ab = audio_btn.clone();
+            let tx = ws_tx.clone();
+            let lr = last_radio.clone();
+            let sp = sdr_params.clone();
+            let fe = freq_entry.clone();
+            let md = mode_dropdown.clone();
+            mode_btn.connect_toggled(move |btn| {
+                let is_sdr = btn.is_active();
+                btn.set_label(if is_sdr { "SDR" } else { "MON" });
+                sb.set_visible(is_sdr);
+                ab.set_visible(!is_sdr);
+
+                if is_sdr {
+                    // --- MON → SDR ---
+                    let params = sp.borrow();
+                    let _ = tx.send(ClientMsg::CatCommand(
+                        cat_commands::set_freq(params.freq_hz),
+                    ));
+                    if let Some(cmd) = cat_commands::set_mode(params.mode()) {
+                        let _ = tx.send(ClientMsg::CatCommand(cmd));
+                    }
+                    let _ = tx.send(ClientMsg::SetDemodMode(Some(params.mode())));
+                    let _ = tx.send(ClientMsg::CatCommand(
+                        cat_commands::set_agc_threshold(params.agc_threshold),
+                    ));
+                    let _ = tx.send(ClientMsg::SetAudioSource(AudioSource::SoftwareDemod));
+
+                    // Update SDR UI controls
+                    fe.set_text(&format!("{}", params.freq_hz));
+                    let idx = MODES.iter().position(|&(_, m)| m == params.mode()).unwrap_or(1);
+                    md.set_selected(idx as u32);
+                } else {
+                    // --- SDR → MON ---
+                    {
+                        let mut params = sp.borrow_mut();
+                        if let Some(ref state) = *lr.borrow() {
+                            params.freq_hz = state.freq_hz;
+                            params.set_mode(state.mode);
+                            params.agc_threshold = state.agc_threshold;
+                        }
+                        sdr_params::save(&params);
+                    }
+
+                    let _ = tx.send(ClientMsg::SetDemodMode(None));
+
+                    if ab.is_active() {
+                        let _ = tx.send(ClientMsg::SetAudioSource(AudioSource::SoftwareDemod));
+                    } else {
+                        let _ = tx.send(ClientMsg::CatCommand(
+                            cat_commands::set_agc_threshold(0),
+                        ));
+                        let _ = tx.send(ClientMsg::SetAudioSource(AudioSource::RadioUsb));
+                    }
+                }
+            });
+        }
+
         container.append(&mode_btn);
         container.append(&audio_btn);
 
         // Sync initial state: MON + USB audio + AGC threshold 0
         let _ = ws_tx.send(ClientMsg::CatCommand(cat_commands::set_agc_threshold(0)));
         let _ = ws_tx.send(ClientMsg::SetAudioSource(AudioSource::RadioUsb));
-
-        // --- SDR controls: frequency only ---
-        // Mode/BW/filter are software DSP parameters, not radio commands.
-
-        // Frequency entry
-        let freq_entry = Entry::new();
-        freq_entry.set_width_chars(14);
-        freq_entry.set_placeholder_text(Some("Freq Hz"));
-        freq_entry.add_css_class("monospace");
-        let tx = ws_tx.clone();
-        let lc = last_cmd.clone();
-        let db = display_bar.clone();
-        freq_entry.connect_activate(move |entry| {
-            let text = entry.text();
-            if let Ok(hz) = text.replace(['.', ',', ' '], "").parse::<u64>() {
-                lc.set(Instant::now());
-                db.set_freq_immediate(hz);
-                let _ = tx.send(ClientMsg::CatCommand(cat_commands::set_freq(hz)));
-            }
-        });
-        sdr_box.append(&freq_entry);
-
-        // Mode dropdown — controls software demod, not the radio
-        let mode_list = StringList::new(&MODES.iter().map(|(s, _)| *s).collect::<Vec<_>>());
-        let mode_dropdown = DropDown::new(Some(mode_list), gtk4::Expression::NONE);
-        mode_dropdown.set_selected(1); // default USB
-        mode_dropdown.set_valign(Align::Center);
-        let tx = ws_tx.clone();
-        mode_dropdown.connect_selected_notify(move |dd| {
-            let idx = dd.selected() as usize;
-            if let Some(&(_, mode)) = MODES.get(idx) {
-                let _ = tx.send(ClientMsg::SetDemodMode(mode));
-            }
-        });
-        sdr_box.append(&mode_dropdown);
 
         // Step size dropdown
         let step_list = StringList::new(&STEPS.iter().map(|(s, _)| *s).collect::<Vec<_>>());
@@ -332,29 +378,34 @@ impl ControlBar {
         sdr_box.append(&step_dropdown);
 
         // Tune up/down
-        let tune_down = Button::with_label("\u{25BC}"); // ▼
-        tune_down.set_valign(Align::Center);
-        let fe = freq_entry.clone();
-        let sd = step_dropdown.clone();
-        let tx = ws_tx.clone();
-        let lc = last_cmd.clone();
-        let db = display_bar.clone();
-        tune_down.connect_clicked(move |_| {
-            tune_by_step(&fe, &sd, &tx, &db, &lc, false);
-        });
-        sdr_box.append(&tune_down);
-
-        let tune_up = Button::with_label("\u{25B2}"); // ▲
-        tune_up.set_valign(Align::Center);
-        let fe = freq_entry.clone();
-        let sd = step_dropdown.clone();
-        let tx = ws_tx.clone();
-        let lc = last_cmd.clone();
-        let db = display_bar.clone();
-        tune_up.connect_clicked(move |_| {
-            tune_by_step(&fe, &sd, &tx, &db, &lc, true);
-        });
-        sdr_box.append(&tune_up);
+        {
+            let tune_down = Button::with_label("\u{25BC}"); // ▼
+            tune_down.set_valign(Align::Center);
+            let fe = freq_entry.clone();
+            let sd = step_dropdown.clone();
+            let tx = ws_tx.clone();
+            let lc = last_cmd.clone();
+            let db = display_bar.clone();
+            let sp = sdr_params.clone();
+            tune_down.connect_clicked(move |_| {
+                tune_by_step(&fe, &sd, &tx, &db, &lc, &sp, false);
+            });
+            sdr_box.append(&tune_down);
+        }
+        {
+            let tune_up = Button::with_label("\u{25B2}"); // ▲
+            tune_up.set_valign(Align::Center);
+            let fe = freq_entry.clone();
+            let sd = step_dropdown.clone();
+            let tx = ws_tx.clone();
+            let lc = last_cmd.clone();
+            let db = display_bar.clone();
+            let sp = sdr_params.clone();
+            tune_up.connect_clicked(move |_| {
+                tune_by_step(&fe, &sd, &tx, &db, &lc, &sp, true);
+            });
+            sdr_box.append(&tune_up);
+        }
 
         container.append(&sdr_box);
 
@@ -400,9 +451,13 @@ impl ControlBar {
             container,
             sdr_box,
             freq_entry,
+            mode_dropdown,
             audio_btn,
+            mode_btn,
+            last_radio,
+            sdr_params,
+            ws_tx,
             last_cmd,
-            saved_agc_th,
         }
     }
 
@@ -410,12 +465,22 @@ impl ControlBar {
         &self.container
     }
 
-    /// Sync control bar from RadioState (display bar handles freq display).
+    /// Sync control bar from RadioState.
     pub fn sync_from_radio(&self, state: &RadioState) {
-        // Save the radio's AGC threshold only when we're NOT in USB audio
-        // mode (where we forced it to 0).
-        if self.audio_btn.is_active() || state.agc_threshold > 0 {
-            self.saved_agc_th.set(state.agc_threshold);
+        *self.last_radio.borrow_mut() = Some(state.clone());
+    }
+
+    /// Save SDR params if currently in SDR mode (call on app quit).
+    pub fn save_on_quit(&self) {
+        if self.mode_btn.is_active() {
+            // In SDR mode — save current params
+            let mut params = self.sdr_params.borrow_mut();
+            if let Some(ref state) = *self.last_radio.borrow() {
+                params.freq_hz = state.freq_hz;
+                params.set_mode(state.mode);
+                params.agc_threshold = state.agc_threshold;
+            }
+            sdr_params::save(&params);
         }
     }
 }
@@ -428,6 +493,7 @@ fn tune_by_step(
     ws_tx: &mpsc::UnboundedSender<ClientMsg>,
     display_bar: &DisplayBar,
     last_cmd: &Rc<Cell<Instant>>,
+    sdr_params: &Rc<RefCell<SdrParams>>,
     up: bool,
 ) {
     let step_idx = step_dropdown.selected() as usize;
@@ -445,6 +511,7 @@ fn tune_by_step(
     freq_entry.set_text(&format!("{new_freq}"));
     display_bar.set_freq_immediate(new_freq);
     last_cmd.set(Instant::now());
+    sdr_params.borrow_mut().freq_hz = new_freq;
     let _ = ws_tx.send(ClientMsg::CatCommand(cat_commands::set_freq(new_freq)));
 }
 

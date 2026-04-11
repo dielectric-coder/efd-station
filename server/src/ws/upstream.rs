@@ -110,7 +110,7 @@ pub async fn run(
             }
             ClientMsg::SetDemodMode(mode) => {
                 debug!(?mode, "upstream: demod mode override");
-                let _ = demod_mode_tx.send(Some(mode));
+                let _ = demod_mode_tx.send(mode);
             }
         }
     }

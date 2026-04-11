@@ -21,5 +21,7 @@ pub enum ClientMsg {
     TxAudio(TxAudio),
     Ptt(Ptt),
     SetAudioSource(AudioSource),
-    SetDemodMode(Mode),
+    /// Set or clear the demod mode override. `Some(mode)` overrides (SDR),
+    /// `None` clears the override so demod follows the radio's mode (MON).
+    SetDemodMode(Option<Mode>),
 }

@@ -1,5 +1,6 @@
 mod audio;
 mod cat_commands;
+pub mod sdr_params;
 mod ws;
 mod ui;
 
@@ -172,6 +173,13 @@ fn build_ui(app: &Application, url: &str) {
         }
 
         glib::ControlFlow::Continue
+    });
+
+    // Save SDR params on window close
+    let cb = control_bar.clone();
+    window.connect_close_request(move |_| {
+        cb.save_on_quit();
+        glib::Propagation::Proceed
     });
 
     window.present();
