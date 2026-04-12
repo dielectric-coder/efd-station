@@ -2,6 +2,25 @@
 
 All notable changes to efd-station are documented in this file.
 
+## [0.4.3] - 2026-04-12
+
+### Fixed
+- DRM bridge: run efd-server under the login user (`mikel`) instead of the
+  dedicated `efd` system user so the bridge can reach the per-user PipeWire
+  socket at `/run/user/1000/pulse/native`. The old setup caused
+  `pactl load-module: No such file or directory` (no pactl) and, after
+  installing `pulseaudio-utils`, would still have failed to connect to a
+  PipeWire daemon — PipeWire is a per-user session and the `efd` system user
+  had none.
+- `dist/systemd/efd-server.service`: `User=mikel`, `XDG_RUNTIME_DIR` set
+  explicitly, `ReadWritePaths` updated to `/home/mikel/.config/efd-backend`.
+
+### Added
+- `scripts/migrate-service-to-mikel.sh` — idempotent one-shot migration on
+  the CM5: enables linger for mikel, adds the dialout/audio/plugdev groups,
+  copies the config from `/home/efd` to `/home/mikel`, installs the new unit,
+  sanity-checks `pactl info` as the target user, restarts the service.
+
 ## [0.4.2] - 2026-04-12
 
 ### Changed

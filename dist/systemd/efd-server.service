@@ -9,10 +9,15 @@ ExecStart=/usr/bin/efd-server
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
+# Point the PulseAudio client libs (used by pactl/pacat/parec) at mikel's
+# PipeWire session so the DRM bridge can create the null sinks. Requires
+# `loginctl enable-linger mikel` so /run/user/1000 persists without login.
+Environment=XDG_RUNTIME_DIR=/run/user/1000
 
-# Run as dedicated user
-User=efd
-Group=efd
+# Run as the login user so the DRM bridge can reach the per-user
+# PipeWire socket at /run/user/1000/pulse/native.
+User=mikel
+Group=mikel
 
 # USB and audio access
 SupplementaryGroups=dialout audio plugdev
@@ -23,7 +28,7 @@ TimeoutStopSec=8
 # Hardening
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/efd/.config/efd-backend
+ReadWritePaths=/home/mikel/.config/efd-backend
 NoNewPrivileges=true
 PrivateTmp=true
 
