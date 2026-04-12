@@ -8,7 +8,8 @@
 
 use efd_proto::{Mode, SourceKind};
 
-use crate::device::{ELAD_PRODUCT_ID, ELAD_VENDOR_ID};
+pub const ELAD_VENDOR_ID: u16 = 0x1721;
+pub const ELAD_PRODUCT_ID: u16 = 0x061a;
 
 #[derive(Debug, Clone)]
 pub struct FdmDuoConfig {

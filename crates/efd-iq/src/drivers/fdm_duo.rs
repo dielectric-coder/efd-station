@@ -1,12 +1,23 @@
-use std::time::Duration;
+//! FDM-DUO IQ driver: USB control/bulk transport + capture task.
+//!
+//! Ported from the EladSpectrum reference. Owns the rusb handle for the
+//! 0x1721:0x061a device and streams normalized [I, Q] f32 samples onto a
+//! broadcast channel. Also reports the FPGA LO centre frequency via a
+//! `watch` channel so the FFT task can label its axis correctly.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use rusb::{DeviceHandle, GlobalContext};
-use tracing::{debug, info, warn};
+use tokio::sync::{broadcast, watch};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, warn};
 
 use crate::error::IqError;
+use crate::source::FdmDuoConfig;
+use crate::types::IqBlock;
 
-pub const ELAD_VENDOR_ID: u16 = 0x1721;
-pub const ELAD_PRODUCT_ID: u16 = 0x061a;
 pub const ELAD_RF_ENDPOINT: u8 = 0x86;
 pub const USB_BUFFER_SIZE: usize = 512 * 24; // 12288 bytes
 pub const DEFAULT_SAMPLE_RATE: u32 = 192_000;
@@ -33,7 +44,10 @@ impl FdmDuo {
     /// Open and initialize the FDM-DUO. Detaches kernel driver, claims
     /// interface, reads device info, initializes FIFO.
     pub fn open() -> Result<Self, IqError> {
-        Self::open_with_ids(ELAD_VENDOR_ID, ELAD_PRODUCT_ID)
+        Self::open_with_ids(
+            crate::source::ELAD_VENDOR_ID,
+            crate::source::ELAD_PRODUCT_ID,
+        )
     }
 
     pub fn open_with_ids(vid: u16, pid: u16) -> Result<Self, IqError> {
@@ -232,6 +246,91 @@ pub fn convert_samples(usb_data: &[u8]) -> Vec<[f32; 2]> {
     }
 
     out
+}
+
+/// Spawn the FDM-DUO capture task. Runs the rusb blocking loop on a dedicated
+/// `spawn_blocking` worker.
+pub fn spawn(
+    cfg: FdmDuoConfig,
+    tx: broadcast::Sender<Arc<IqBlock>>,
+    center_freq_tx: watch::Sender<u64>,
+    cancel: CancellationToken,
+) -> JoinHandle<Result<(), IqError>> {
+    tokio::task::spawn_blocking(move || run(cfg, tx, center_freq_tx, cancel))
+}
+
+fn run(
+    cfg: FdmDuoConfig,
+    tx: broadcast::Sender<Arc<IqBlock>>,
+    center_freq_tx: watch::Sender<u64>,
+    cancel: CancellationToken,
+) -> Result<(), IqError> {
+    let dev = FdmDuo::open_with_ids(cfg.vendor_id, cfg.product_id)?;
+    dev.start_streaming()?;
+
+    // Read initial FPGA center frequency
+    match dev.read_frequency() {
+        Ok(freq) => {
+            info!("IQ center frequency: {freq} Hz");
+            let _ = center_freq_tx.send(freq);
+        }
+        Err(e) => warn!("could not read FPGA frequency: {e}"),
+    }
+
+    info!("IQ capture started (clock={})", dev.effective_clock());
+
+    let start = Instant::now();
+    let mut buf = vec![0u8; USB_BUFFER_SIZE];
+    let mut block_count: u64 = 0;
+
+    loop {
+        if cancel.is_cancelled() {
+            info!("IQ capture cancelled after {block_count} blocks");
+            return Err(IqError::Cancelled);
+        }
+
+        match dev.bulk_read(&mut buf) {
+            Ok(n) if n > 0 => {
+                let samples = convert_samples(&buf[..n]);
+                let timestamp_us = start.elapsed().as_micros() as u64;
+
+                let block = Arc::new(IqBlock {
+                    samples,
+                    timestamp_us,
+                });
+
+                // If no receivers, silently drop the block
+                let _ = tx.send(block);
+
+                block_count += 1;
+                if block_count % 1000 == 0 {
+                    debug!(block_count, "IQ blocks captured");
+                }
+                // Periodically re-read FPGA center frequency (LO may change)
+                if block_count % 500 == 0 {
+                    if let Ok(freq) = dev.read_frequency() {
+                        let _ = center_freq_tx.send(freq);
+                    }
+                }
+            }
+            Ok(_) => {
+                // Zero-length read — unusual but not fatal
+                warn!("zero-length USB read");
+            }
+            Err(rusb::Error::Timeout) => {
+                // Timeout — retry
+                continue;
+            }
+            Err(rusb::Error::NoDevice) => {
+                error!("FDM-DUO disconnected");
+                return Err(IqError::Usb(rusb::Error::NoDevice));
+            }
+            Err(e) => {
+                error!("USB read error: {e}");
+                return Err(IqError::Usb(e));
+            }
+        }
+    }
 }
 
 #[cfg(test)]

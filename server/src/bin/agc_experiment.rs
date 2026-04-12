@@ -13,7 +13,7 @@
 use std::time::{Duration, Instant};
 
 use efd_cat::{discover_serial_device, SerialPort};
-use efd_iq::device::{convert_samples, FdmDuo, DEFAULT_SAMPLE_RATE, USB_BUFFER_SIZE};
+use efd_iq::drivers::fdm_duo::{convert_samples, FdmDuo, DEFAULT_SAMPLE_RATE, USB_BUFFER_SIZE};
 
 const AGC_VALUES: [u8; 2] = [0, 10];
 const CAPTURE_SECS: u64 = 10;

@@ -2,6 +2,23 @@
 
 All notable changes to efd-station are documented in this file.
 
+## [0.4.2] - 2026-04-12
+
+### Changed
+- efd-iq reshaped into the driver-per-device layout prescribed by CLAUDE.md:
+  flat `backend.rs`/`device.rs`/`stream.rs` replaced by `source.rs` + `types.rs`
+  + `drivers/fdm_duo.rs`. Public surface preserved (`IqBlock`, `SourceConfig`,
+  `FdmDuoConfig`, `spawn_source` all re-exported from the crate root).
+- `rusb` is now an optional dependency behind a new `fdm-duo` cargo feature
+  (default-on). Building `efd-iq` with `--no-default-features` produces a
+  driver-less crate — the scaffolding for HackRF/RSPdx/RTL drivers to slot in
+  behind their own feature flags.
+- `IqError::Usb` is gated behind `feature = "fdm-duo"`.
+- `efd_iq::device::*` → `efd_iq::drivers::fdm_duo::*` (one consumer updated:
+  `server/src/bin/agc_experiment.rs`).
+
+No runtime behaviour change; no API change for server or `efd-dsp`.
+
 ## [0.4.1] - 2026-04-10
 
 ### Fixed

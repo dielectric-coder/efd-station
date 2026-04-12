@@ -3,9 +3,15 @@ name = "efd-iq"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["fdm-duo"]
+# One feature per IQ driver. Adding a new device = one driver file under
+# src/drivers/ plus one feature here.
+fdm-duo = ["dep:rusb"]
+
 [dependencies]
 efd-proto = { workspace = true }
-rusb = "0.9"
+rusb = { version = "0.9", optional = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }

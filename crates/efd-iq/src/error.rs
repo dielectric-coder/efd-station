@@ -3,6 +3,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum IqError {
+    #[cfg(feature = "fdm-duo")]
     #[error("USB error: {0}")]
     Usb(#[from] rusb::Error),
 
