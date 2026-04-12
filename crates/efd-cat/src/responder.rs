@@ -10,7 +10,7 @@
 use std::net::SocketAddr;
 
 use efd_proto::{CatCommand, Mode, RadioState};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -97,6 +97,12 @@ pub(crate) async fn run_with_listener(
     }
 }
 
+/// Cap per-line input from a rigctld client. A well-formed command is
+/// a handful of bytes; real-world ones top out around 64 bytes. 4 KiB
+/// is generous and prevents an abusive client from forcing unbounded
+/// allocation through `BufReader`'s growing internal buffer.
+const MAX_LINE_BYTES: usize = 4096;
+
 async fn handle_conn(
     stream: TcpStream,
     backend: Backend,
@@ -104,17 +110,23 @@ async fn handle_conn(
     cancel: CancellationToken,
 ) -> Result<(), CatError> {
     let (r, mut w) = stream.into_split();
-    let mut lines = BufReader::new(r).lines();
+    let mut reader = BufReader::new(r);
+    let mut line_buf = Vec::with_capacity(128);
 
     loop {
         tokio::select! {
             biased;
             _ = cancel.cancelled() => return Ok(()),
-            line = lines.next_line() => {
-                let line = match line? {
-                    Some(l) => l,
-                    None => return Ok(()),
-                };
+            res = read_line_bounded(&mut reader, &mut line_buf, MAX_LINE_BYTES) => {
+                match res? {
+                    None => return Ok(()),                // EOF
+                    Some(true) => {}                      // got a line
+                    Some(false) => {
+                        // Oversized line — discard and disconnect.
+                        return Ok(());
+                    }
+                }
+                let line = std::str::from_utf8(&line_buf).unwrap_or("");
                 let trimmed = line.trim();
                 if trimmed.is_empty() { continue; }
 
@@ -124,6 +136,41 @@ async fn handle_conn(
                 }
             }
         }
+    }
+}
+
+/// Read one `\n`-terminated line into `buf` with a hard byte cap.
+/// Returns:
+/// - `None` on clean EOF (no bytes read)
+/// - `Some(true)` when a line was read (terminator consumed, not included in `buf`)
+/// - `Some(false)` when the line exceeded `max_bytes` — remaining bytes on
+///   the stream are not drained; the caller should close the connection.
+async fn read_line_bounded<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    max_bytes: usize,
+) -> Result<Option<bool>, CatError> {
+    buf.clear();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(if buf.is_empty() { None } else { Some(true) });
+        }
+        if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+            if buf.len() + pos > max_bytes {
+                return Ok(Some(false));
+            }
+            buf.extend_from_slice(&available[..pos]);
+            let consumed = pos + 1;
+            reader.consume(consumed);
+            return Ok(Some(true));
+        }
+        if buf.len() + available.len() > max_bytes {
+            return Ok(Some(false));
+        }
+        buf.extend_from_slice(available);
+        let n = available.len();
+        reader.consume(n);
     }
 }
 
@@ -537,6 +584,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn oversized_line_disconnects_no_oom() {
+        let h = spawn_hw(None).await;
+        let mut s = TcpStream::connect(h.addr).await.unwrap();
+        // Send a line much larger than MAX_LINE_BYTES without a newline.
+        let junk = vec![b'A'; MAX_LINE_BYTES * 2];
+        // Writes may succeed (small kernel buffer) or fail once the server
+        // closes the socket; either is acceptable — what matters is no OOM
+        // and clean close.
+        let _ = s.write_all(&junk).await;
+        let mut buf = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), s.read_to_end(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        // Server should have closed without replying to the (unparseable) input.
+        assert!(buf.is_empty());
     }
 
     #[tokio::test]
