@@ -114,19 +114,20 @@ impl DisplayBar {
         tx_label.set_xalign(0.5);
         status_row.append(&tx_label);
 
-        // Two DRM info lines. Hidden until the server publishes DrmStatus
-        // and re-hidden after a few seconds of staleness (see `update_drm`
-        // / `expire_drm_if_stale`).
+        // Two always-visible extra info lines. Today they carry DRM
+        // decoder status when Mode::DRM is selected; future modes will
+        // reuse them for RIT/XIT/DNR/DNF/NB readouts, etc. The Display-
+        // Bar exposes mode-agnostic setters (`update_drm`, `clear_extras`,
+        // plus whatever we add next) so the rows can be repurposed
+        // without widget-tree changes.
         let drm_line1 = Label::new(None);
         drm_line1.add_css_class("monospace");
         drm_line1.set_xalign(0.5);
-        drm_line1.set_visible(false);
         container.append(&drm_line1);
 
         let drm_line2 = Label::new(None);
         drm_line2.add_css_class("monospace");
         drm_line2.set_xalign(0.5);
-        drm_line2.set_visible(false);
         container.append(&drm_line2);
 
         Self {
@@ -196,8 +197,10 @@ impl DisplayBar {
         }
     }
 
-    /// Update the two DRM info lines with the latest decoder status.
-    /// Does NOT affect visibility — pair with `set_drm_visible`.
+    /// Fill the two extra rows with the latest DRM decoder status.
+    /// Leaves rows untouched otherwise — callers should set the
+    /// mode-appropriate content and invoke `clear_extras` when leaving
+    /// that mode.
     pub fn update_drm(&self, s: &DrmStatus) {
         let mode = s.robustness_mode.as_deref().unwrap_or("---");
         let bw = s
@@ -228,24 +231,24 @@ impl DisplayBar {
         ));
     }
 
-    /// Show or hide the two DRM info lines. Driven by the client's
-    /// mode selection (DRM ↔ not-DRM), not by DrmStatus arrival — the
-    /// lines stay on while in DRM mode even between status frames, and
-    /// carry "---" placeholders until the decoder locks.
-    pub fn set_drm_visible(&self, visible: bool) {
-        self.drm_line1.set_visible(visible);
-        self.drm_line2.set_visible(visible);
-        if !visible {
-            // Reset text so stale info doesn't flash on re-show.
-            self.drm_line1.set_text("");
-            self.drm_line2.set_text("");
-        } else if self.drm_line1.text().is_empty() {
-            // First entry to DRM before any status — show placeholders.
-            self.drm_line1
-                .set_text("DRM Mode --- · --- · --- · Audio:0 Data:0");
-            self.drm_line2
-                .set_text("SNR --- · WMER --- · FAC ✗ · SDC ✗ · MSC ✗");
-        }
+    /// Prime the two rows with mode-appropriate placeholders when the
+    /// client enters DRM mode before any DrmStatus has arrived. Future
+    /// modes (RIT/XIT/DNR/DNF/NB readouts, etc.) should add their own
+    /// `prime_*` method that writes a similar placeholder header.
+    pub fn prime_drm_placeholders(&self) {
+        self.drm_line1
+            .set_text("DRM Mode --- · --- · --- · Audio:0 Data:0");
+        self.drm_line2
+            .set_text("SNR --- · WMER --- · FAC ✗ · SDC ✗ · MSC ✗");
+    }
+
+    /// Blank the two extra rows. Called on mode changes that leave the
+    /// rows without content — the rows themselves stay visible so the
+    /// layout doesn't shift, they just go blank until the next mode
+    /// claims them.
+    pub fn clear_extras(&self) {
+        self.drm_line1.set_text("");
+        self.drm_line2.set_text("");
     }
 }
 
@@ -366,11 +369,12 @@ impl ControlBar {
                         let _ = tx.send(ClientMsg::CatCommand(cmd));
                     }
                     sp.borrow_mut().set_mode(mode);
-                    // Reveal/hide the two DRM display lines based on user
-                    // mode intent, independent of whether the bridge has
-                    // produced a frame yet. Placeholder "---" values are
-                    // fine until the first real status arrives.
-                    db.set_drm_visible(mode == Mode::DRM);
+                    // Repurpose the two extra rows for the new mode.
+                    if mode == Mode::DRM {
+                        db.prime_drm_placeholders();
+                    } else {
+                        db.clear_extras();
+                    }
                 }
             });
         }
@@ -433,10 +437,14 @@ impl ControlBar {
                     if let Some(idx) = am.borrow().iter().position(|&(_, m)| m == mode) {
                         md.set_selected(idx as u32);
                     }
-                    db.set_drm_visible(mode == Mode::DRM);
+                    if mode == Mode::DRM {
+                        db.prime_drm_placeholders();
+                    } else {
+                        db.clear_extras();
+                    }
                 } else {
                     // --- SDR → MON ---
-                    db.set_drm_visible(false);
+                    db.clear_extras();
                     {
                         let mut params = sp.borrow_mut();
                         if let Some(ref state) = *lr.borrow() {
