@@ -197,8 +197,7 @@ impl DisplayBar {
     }
 
     /// Update the two DRM info lines with the latest decoder status.
-    /// The lines are revealed on first call and stay visible until
-    /// `hide_drm()` is called.
+    /// Does NOT affect visibility — pair with `set_drm_visible`.
     pub fn update_drm(&self, s: &DrmStatus) {
         let mode = s.robustness_mode.as_deref().unwrap_or("---");
         let bw = s
@@ -227,15 +226,26 @@ impl DisplayBar {
             mark(s.sdc_ok),
             mark(s.msc_ok),
         ));
-
-        self.drm_line1.set_visible(true);
-        self.drm_line2.set_visible(true);
     }
 
-    /// Hide the two DRM info lines (e.g., on mode change or staleness).
-    pub fn hide_drm(&self) {
-        self.drm_line1.set_visible(false);
-        self.drm_line2.set_visible(false);
+    /// Show or hide the two DRM info lines. Driven by the client's
+    /// mode selection (DRM ↔ not-DRM), not by DrmStatus arrival — the
+    /// lines stay on while in DRM mode even between status frames, and
+    /// carry "---" placeholders until the decoder locks.
+    pub fn set_drm_visible(&self, visible: bool) {
+        self.drm_line1.set_visible(visible);
+        self.drm_line2.set_visible(visible);
+        if !visible {
+            // Reset text so stale info doesn't flash on re-show.
+            self.drm_line1.set_text("");
+            self.drm_line2.set_text("");
+        } else if self.drm_line1.text().is_empty() {
+            // First entry to DRM before any status — show placeholders.
+            self.drm_line1
+                .set_text("DRM Mode --- · --- · --- · Audio:0 Data:0");
+            self.drm_line2
+                .set_text("SNR --- · WMER --- · FAC ✗ · SDC ✗ · MSC ✗");
+        }
     }
 }
 
@@ -344,6 +354,7 @@ impl ControlBar {
             let sp = sdr_params.clone();
             let am = active_modes.clone();
             let suppress = suppress_mode_notify.clone();
+            let db = display_bar.clone();
             mode_dropdown.connect_selected_notify(move |dd| {
                 if suppress.get() {
                     return;
@@ -355,6 +366,11 @@ impl ControlBar {
                         let _ = tx.send(ClientMsg::CatCommand(cmd));
                     }
                     sp.borrow_mut().set_mode(mode);
+                    // Reveal/hide the two DRM display lines based on user
+                    // mode intent, independent of whether the bridge has
+                    // produced a frame yet. Placeholder "---" values are
+                    // fine until the first real status arrives.
+                    db.set_drm_visible(mode == Mode::DRM);
                 }
             });
         }
@@ -392,6 +408,7 @@ impl ControlBar {
             let fe = freq_entry.clone();
             let md = mode_dropdown.clone();
             let am = active_modes.clone();
+            let db = display_bar.clone();
             mode_btn.connect_toggled(move |btn| {
                 let is_sdr = btn.is_active();
                 btn.set_label(if is_sdr { "SDR" } else { "MON" });
@@ -416,8 +433,10 @@ impl ControlBar {
                     if let Some(idx) = am.borrow().iter().position(|&(_, m)| m == mode) {
                         md.set_selected(idx as u32);
                     }
+                    db.set_drm_visible(mode == Mode::DRM);
                 } else {
                     // --- SDR → MON ---
+                    db.set_drm_visible(false);
                     {
                         let mut params = sp.borrow_mut();
                         if let Some(ref state) = *lr.borrow() {

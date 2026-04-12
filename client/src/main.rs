@@ -136,12 +136,6 @@ fn build_ui(app: &Application, url: &str) {
     let audio2 = audio_player.clone();
     let queue = msg_queue.clone();
 
-    // DRM status staleness: hide the two DRM info lines if no DrmStatus
-    // message has arrived within this window (signals DRM mode exit or
-    // bridge trouble). The server rate-limits to ~2 Hz, so 5s is generous.
-    let drm_stale_after = std::time::Duration::from_secs(5);
-    let last_drm_at: std::cell::Cell<Option<std::time::Instant>> = std::cell::Cell::new(None);
-
     glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
         let msgs: Vec<ServerMsg> = {
             let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
@@ -180,19 +174,10 @@ fn build_ui(app: &Application, url: &str) {
                 }
                 ServerMsg::DrmStatus(status) => {
                     display_bar2.update_drm(&status);
-                    last_drm_at.set(Some(std::time::Instant::now()));
                 }
                 ServerMsg::Error(err) => {
                     eprintln!("server error: [{}] {}", err.code, err.message);
                 }
-            }
-        }
-
-        // Hide DRM info when no status has been seen for a while.
-        if let Some(t) = last_drm_at.get() {
-            if t.elapsed() > drm_stale_after {
-                display_bar2.hide_drm();
-                last_drm_at.set(None);
             }
         }
 
