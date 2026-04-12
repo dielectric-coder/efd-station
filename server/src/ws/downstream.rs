@@ -3,15 +3,20 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use bytes::Bytes;
-use efd_proto::{AudioChunk, Capabilities, FftBins, RadioState, ServerMsg};
+use efd_proto::{AudioChunk, Capabilities, DrmStatus, FftBins, RadioState, ServerMsg};
 use futures_util::SinkExt;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
 /// Timeout for sending a single WS message. If a client can't receive
 /// within this time, disconnect it to avoid blocking broadcasts.
 const SEND_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Minimum interval between DRM status frames forwarded to a client.
+/// The DREAM TUI fires roughly every 400 ms; this caps WS spam when
+/// multiple clients connect and keeps the UI smooth without being chatty.
+const DRM_STATUS_MIN_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Downstream task: subscribe to broadcasts, serialize to bincode, send over WS.
 pub async fn run(
@@ -20,11 +25,13 @@ pub async fn run(
     fft_rx: broadcast::Receiver<Arc<FftBins>>,
     state_rx: broadcast::Receiver<RadioState>,
     audio_rx: broadcast::Receiver<AudioChunk>,
+    mut drm_status_rx: watch::Receiver<Option<DrmStatus>>,
     cancel: CancellationToken,
 ) {
     let mut fft_rx = fft_rx;
     let mut state_rx = state_rx;
     let mut audio_rx = audio_rx;
+    let mut last_drm_sent = tokio::time::Instant::now() - DRM_STATUS_MIN_INTERVAL;
 
     let cfg = bincode::config::standard();
 
@@ -82,6 +89,24 @@ pub async fn run(
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            result = drm_status_rx.changed() => {
+                if result.is_err() {
+                    // supervisor dropped — pipeline shutting down
+                    break;
+                }
+                // Snapshot and rate-limit to avoid WS spam.
+                let snap = drm_status_rx.borrow_and_update().clone();
+                if last_drm_sent.elapsed() < DRM_STATUS_MIN_INTERVAL {
+                    continue;
+                }
+                last_drm_sent = tokio::time::Instant::now();
+                match snap {
+                    Some(status) => Some(ServerMsg::DrmStatus(status)),
+                    // Intentionally skip None: client holds its last-known
+                    // status and hides it itself after a staleness timeout.
+                    None => continue,
                 }
             }
         };

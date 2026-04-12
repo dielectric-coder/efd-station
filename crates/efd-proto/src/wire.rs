@@ -1,7 +1,7 @@
 use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
-use crate::downstream::{AudioChunk, Capabilities, ErrorMsg, FftBins, RadioState};
+use crate::downstream::{AudioChunk, Capabilities, DrmStatus, ErrorMsg, FftBins, RadioState};
 use crate::radio::Mode;
 use crate::upstream::{AudioSource, CatCommand, Ptt, TxAudio};
 
@@ -12,6 +12,7 @@ pub enum ServerMsg {
     Audio(AudioChunk),
     RadioState(RadioState),
     Capabilities(Capabilities),
+    DrmStatus(DrmStatus),
     Error(ErrorMsg),
 }
 

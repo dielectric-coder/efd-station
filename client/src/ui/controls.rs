@@ -3,7 +3,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use efd_proto::{AudioSource, Capabilities, ClientMsg, Mode, Ptt, RadioState};
+use efd_proto::{AudioSource, Capabilities, ClientMsg, DrmStatus, Mode, Ptt, RadioState};
 use gtk4::prelude::*;
 use gtk4::{
     Adjustment, Align, Box as GtkBox, Button, DropDown, Entry, Label, LevelBar, Orientation,
@@ -29,6 +29,10 @@ pub struct DisplayBar {
     smeter: LevelBar,
     smeter_label: Label,
     tx_label: Label,
+    /// First DRM info line — mode/bandwidth/modulation/services.
+    drm_line1: Label,
+    /// Second DRM info line — SNR/WMER/lock flags.
+    drm_line2: Label,
     prev: RefCell<Option<CachedState>>,
 }
 
@@ -44,37 +48,43 @@ struct CachedState {
 
 impl DisplayBar {
     pub fn new() -> Self {
-        let container = GtkBox::new(Orientation::Horizontal, 12);
+        // Outer vertical container: the existing status row on top, plus
+        // two optional DRM info lines underneath.
+        let container = GtkBox::new(Orientation::Vertical, 2);
         container.set_margin_start(8);
         container.set_margin_end(8);
         container.set_margin_top(4);
         container.set_margin_bottom(4);
         container.set_halign(Align::Center);
 
+        let status_row = GtkBox::new(Orientation::Horizontal, 12);
+        status_row.set_halign(Align::Center);
+        container.append(&status_row);
+
         let vfo_label = Label::new(Some("VFO A"));
         vfo_label.add_css_class("monospace");
         vfo_label.set_width_chars(5);
         vfo_label.set_xalign(0.0);
-        container.append(&vfo_label);
+        status_row.append(&vfo_label);
 
         let freq_label = Label::new(Some("--- Hz"));
         freq_label.add_css_class("monospace");
         freq_label.set_width_chars(16);
         freq_label.set_xalign(1.0);
         freq_label.set_markup("<span font='18' weight='bold'>--- Hz</span>");
-        container.append(&freq_label);
+        status_row.append(&freq_label);
 
         let mode_label = Label::new(Some("---"));
         mode_label.add_css_class("monospace");
         mode_label.set_width_chars(5);
         mode_label.set_xalign(0.0);
-        container.append(&mode_label);
+        status_row.append(&mode_label);
 
         let bw_label = Label::new(Some("BW: ---"));
         bw_label.add_css_class("monospace");
         bw_label.set_width_chars(10);
         bw_label.set_xalign(0.0);
-        container.append(&bw_label);
+        status_row.append(&bw_label);
 
         let smeter_box = GtkBox::new(Orientation::Horizontal, 4);
         smeter_box.set_valign(Align::Center);
@@ -95,14 +105,29 @@ impl DisplayBar {
         smeter_label.set_width_chars(6);
         smeter_label.set_xalign(0.0);
         smeter_box.append(&smeter_label);
-        container.append(&smeter_box);
+        status_row.append(&smeter_box);
 
         let tx_label = Label::new(Some("RX"));
         tx_label.add_css_class("monospace");
         tx_label.add_css_class("tx-rx-rx");
         tx_label.set_width_chars(2);
         tx_label.set_xalign(0.5);
-        container.append(&tx_label);
+        status_row.append(&tx_label);
+
+        // Two DRM info lines. Hidden until the server publishes DrmStatus
+        // and re-hidden after a few seconds of staleness (see `update_drm`
+        // / `expire_drm_if_stale`).
+        let drm_line1 = Label::new(None);
+        drm_line1.add_css_class("monospace");
+        drm_line1.set_xalign(0.5);
+        drm_line1.set_visible(false);
+        container.append(&drm_line1);
+
+        let drm_line2 = Label::new(None);
+        drm_line2.add_css_class("monospace");
+        drm_line2.set_xalign(0.5);
+        drm_line2.set_visible(false);
+        container.append(&drm_line2);
 
         Self {
             container,
@@ -113,6 +138,8 @@ impl DisplayBar {
             smeter,
             smeter_label,
             tx_label,
+            drm_line1,
+            drm_line2,
             prev: RefCell::new(None),
         }
     }
@@ -167,6 +194,48 @@ impl DisplayBar {
             self.tx_label.add_css_class("tx-rx-rx");
             self.tx_label.set_text("RX");
         }
+    }
+
+    /// Update the two DRM info lines with the latest decoder status.
+    /// The lines are revealed on first call and stay visible until
+    /// `hide_drm()` is called.
+    pub fn update_drm(&self, s: &DrmStatus) {
+        let mode = s.robustness_mode.as_deref().unwrap_or("---");
+        let bw = s
+            .bandwidth_khz
+            .map(|v| format!("{v} kHz"))
+            .unwrap_or_else(|| "---".into());
+        let msc_mod = s.msc_mode.as_deref().unwrap_or("---");
+        let audio = s.num_audio_services;
+        let data = s.num_data_services;
+        self.drm_line1.set_text(&format!(
+            "DRM Mode {mode} · {bw} · {msc_mod} · Audio:{audio} Data:{data}"
+        ));
+
+        let snr = s
+            .snr_db
+            .map(|v| format!("{v:.1} dB"))
+            .unwrap_or_else(|| "---".into());
+        let wmer = s
+            .wmer_db
+            .map(|v| format!("{v:.1} dB"))
+            .unwrap_or_else(|| "---".into());
+        let mark = |ok: bool| if ok { "✓" } else { "✗" };
+        self.drm_line2.set_text(&format!(
+            "SNR {snr} · WMER {wmer} · FAC {} · SDC {} · MSC {}",
+            mark(s.fac_ok),
+            mark(s.sdc_ok),
+            mark(s.msc_ok),
+        ));
+
+        self.drm_line1.set_visible(true);
+        self.drm_line2.set_visible(true);
+    }
+
+    /// Hide the two DRM info lines (e.g., on mode change or staleness).
+    pub fn hide_drm(&self) {
+        self.drm_line1.set_visible(false);
+        self.drm_line2.set_visible(false);
     }
 }
 

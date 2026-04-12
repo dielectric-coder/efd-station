@@ -104,7 +104,8 @@ async fn drm_bridge_decodes_vor_sample() {
     let (audio_tx, mut audio_rx) = mpsc::channel::<AudioBlock>(256);
     let cancel = CancellationToken::new();
 
-    let bridge = spawn_drm_bridge(cfg.clone(), iq_rx, audio_tx, cancel.clone());
+    let handles = spawn_drm_bridge(cfg.clone(), iq_rx, audio_tx, cancel.clone());
+    let bridge = handles.join;
 
     // Give the bridge a moment to load sinks and start subprocesses.
     tokio::time::sleep(Duration::from_millis(500)).await;

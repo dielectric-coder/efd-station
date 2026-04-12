@@ -3,7 +3,7 @@ pub mod radio;
 pub mod upstream;
 pub mod wire;
 
-pub use downstream::{AudioChunk, Capabilities, ErrorMsg, FftBins, RadioState};
+pub use downstream::{AudioChunk, Capabilities, DrmStatus, ErrorMsg, FftBins, RadioState};
 pub use radio::{AgcMode, Mode, SourceKind, Vfo};
 pub use upstream::{AudioSource, CatCommand, Ptt, TxAudio};
 pub use wire::{ClientMsg, ServerMsg};
@@ -95,6 +95,35 @@ mod tests {
         let off = Ptt { on: false };
         assert_eq!(on, round_trip(&on));
         assert_eq!(off, round_trip(&off));
+    }
+
+    #[test]
+    fn drm_status_round_trip() {
+        let orig = DrmStatus {
+            io_ok: true,
+            time_ok: true,
+            frame_ok: true,
+            fac_ok: true,
+            sdc_ok: true,
+            msc_ok: true,
+            if_level_db: Some(-17.8),
+            snr_db: Some(25.6),
+            wmer_db: Some(23.6),
+            mer_db: Some(23.6),
+            dc_freq_hz: Some(11_965.99),
+            sample_offset_hz: Some(-5.45),
+            doppler_hz: Some(1.11),
+            delay_ms: Some(0.62),
+            robustness_mode: Some("B".into()),
+            bandwidth_khz: Some(10),
+            sdc_mode: Some("16-QAM".into()),
+            msc_mode: Some("SM 64-QAM".into()),
+            interleaver_s: Some(2),
+            num_audio_services: 1,
+            num_data_services: 0,
+            timestamp_us: 987_654_321,
+        };
+        assert_eq!(orig, round_trip(&orig));
     }
 
     #[test]

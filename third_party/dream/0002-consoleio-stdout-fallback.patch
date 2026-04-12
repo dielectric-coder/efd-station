@@ -1,0 +1,55 @@
+From: efd-station maintainer <efd@dielectric-coder.local>
+Subject: [PATCH] ConsoleIO: fall back to STDOUT_FILENO when /dev/tty is unavailable
+
+When dream runs as a subprocess without a controlling terminal
+(e.g. spawned from efd-dsp::drm), open("/dev/tty") returns -1 and the
+TUI silently goes nowhere. Falling back to stdout lets the parent
+process capture TUI updates for structured parsing. Behavior with a
+real TTY is unchanged.
+
+--- a/dream/src/linux/ConsoleIO.cpp
++++ b/dream/src/linux/ConsoleIO.cpp
+@@ -122,20 +122,21 @@
+ 	sigaddset(&sigset, SIGQUIT);
+ 	pthread_sigmask(SIG_SETMASK, &sigset, NULL);
+ 
+-	/* TTY opening */
++	/* TTY opening. If no controlling terminal is available (e.g. when
++	   dream is spawned as a subprocess by efd-dsp::drm), fall back to
++	   STDOUT_FILENO so a parent process can still capture the TUI. */
+ 	tty = open(TTY_DEVICE, O_RDWR | O_NONBLOCK);
+-	if (tty != -1)
++	if (tty == -1)
++		tty = STDOUT_FILENO;
++	if (!tcgetattr(tty, &old_tio))
+ 	{
+-		if (!tcgetattr(tty, &old_tio))
+-		{
+-			struct termios tio = old_tio;
+-			tio.c_lflag &= ~(ECHO|ICANON);
+-			tty_setup = tcsetattr(tty, TCSANOW, &tio);
+-		}
+-		else
+-			tty_setup = -1;
+-		cwrite(HIDECUR CLEAR HOME);
++		struct termios tio = old_tio;
++		tio.c_lflag &= ~(ECHO|ICANON);
++		tty_setup = tcsetattr(tty, TCSANOW, &tio);
+ 	}
++	else
++		tty_setup = -1;
++	cwrite(HIDECUR CLEAR HOME);
+ }
+ 
+ void
+@@ -146,7 +147,9 @@
+ 		cwrite(CLEAR HOME SHOWCUR);
+ 		if (!tty_setup)
+ 			tcsetattr(tty, TCSANOW, &old_tio);
+-		close(tty);
++		/* Don't close STDOUT_FILENO — we only own it in the fallback case. */
++		if (tty != STDOUT_FILENO)
++			close(tty);
+ 		tty = -1;
+ 	}
+ }

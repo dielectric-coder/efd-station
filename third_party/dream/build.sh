@@ -22,7 +22,10 @@ set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 TARBALL="$HERE/dream-2.1.1-svn808.tar.gz"
-PATCH="$HERE/0001-hamlib-cast-rig_model_t-to-int.patch"
+PATCHES=(
+    "$HERE/0001-hamlib-cast-rig_model_t-to-int.patch"
+    "$HERE/0002-consoleio-stdout-fallback.patch"
+)
 BUILD_DIR="$HERE/build"
 PREFIX="$BUILD_DIR/install"
 
@@ -34,7 +37,9 @@ for arg in "$@"; do
 done
 
 [[ -f "$TARBALL" ]] || { echo "missing $TARBALL" >&2; exit 1; }
-[[ -f "$PATCH" ]]   || { echo "missing $PATCH" >&2; exit 1; }
+for p in "${PATCHES[@]}"; do
+    [[ -f "$p" ]] || { echo "missing $p" >&2; exit 1; }
+done
 
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
@@ -44,8 +49,13 @@ rm -rf dream
 tar -xzf "$TARBALL"
 
 cd dream
-patch -p2 < "$PATCH"
-qmake CONFIG+=console
+for p in "${PATCHES[@]}"; do
+    patch -p2 < "$p"
+done
+# CONFIG+=tui enables ConsoleIO's structured TUI output; combined with
+# the stdout-fallback patch above, the efd-dsp::drm bridge parses it
+# to surface live decoding info to the client.
+qmake CONFIG+=console CONFIG+=tui
 make -j"$(nproc)"
 
 mkdir -p "$PREFIX/bin"

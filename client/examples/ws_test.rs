@@ -144,6 +144,12 @@ async fn main() {
                     caps.supported_demod_modes,
                 );
             }
+            ServerMsg::DrmStatus(s) => {
+                println!(
+                    "DrmStatus: mode={:?} bw={:?} snr={:?} wmer={:?}",
+                    s.robustness_mode, s.bandwidth_khz, s.snr_db, s.wmer_db
+                );
+            }
             ServerMsg::Error(err) => {
                 error_count += 1;
                 println!("server error: [{}] {}", err.code, err.message);

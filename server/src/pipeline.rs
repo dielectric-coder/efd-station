@@ -30,6 +30,10 @@ pub struct Pipeline {
     /// What the active source supports; sent to every client on connect.
     pub capabilities: Capabilities,
 
+    /// Latest DRM decoder status. `None` when no DRM bridge is running
+    /// (mode isn't DRM) or the bridge hasn't produced a frame yet.
+    pub drm_status_rx: watch::Receiver<Option<efd_proto::DrmStatus>>,
+
     pub(crate) cancel: CancellationToken,
     tasks: Vec<(&'static str, JoinHandle<()>)>,
 }
@@ -132,10 +136,16 @@ impl Pipeline {
         // --- DRM supervisor ---
         // Brings the DREAM subprocess bridge up/down as the client switches
         // in and out of Mode::DRM. Only runs when the source can supply IQ.
+        // A pipeline-scope `drm_status` watch is always present; the
+        // supervisor forwards the active bridge's status into it when DRM
+        // is running, and resets it to None when the bridge stops.
+        let (drm_status_tx, drm_status_rx) =
+            watch::channel::<Option<efd_proto::DrmStatus>>(None);
         if source_caps.has_iq {
             let iq_tx_for_drm = iq_tx.clone();
             let audio_tx_for_drm = demod_audio_tx.clone();
             let mode_rx = demod_mode_tx.subscribe();
+            let status_tx = drm_status_tx.clone();
             let c = cancel.clone();
             let drm_cfg = efd_dsp::DrmConfig {
                 dream_binary: config.drm.dream_binary.clone(),
@@ -146,7 +156,15 @@ impl Pipeline {
                 ..Default::default()
             };
             let handle = tokio::spawn(async move {
-                run_drm_supervisor(drm_cfg, iq_tx_for_drm, audio_tx_for_drm, mode_rx, c).await;
+                run_drm_supervisor(
+                    drm_cfg,
+                    iq_tx_for_drm,
+                    audio_tx_for_drm,
+                    mode_rx,
+                    status_tx,
+                    c,
+                )
+                .await;
             });
             tasks.push(("drm_supervisor", handle));
         }
@@ -391,6 +409,7 @@ impl Pipeline {
             demod_mode_tx,
             audio_source_tx,
             capabilities,
+            drm_status_rx,
             cancel,
             tasks,
         }
@@ -581,17 +600,24 @@ async fn decode_audio_for_alsa(
 /// When the client selects Mode::DRM, spawn the bridge (which loads its
 /// own PipeWire null sinks and launches dream). When the client changes
 /// away, cancel the bridge and await it. One bridge instance at a time.
+///
+/// While a bridge is active, a forwarder task copies its per-bridge
+/// status watch into the pipeline-scope `status_tx` so WS handlers
+/// don't have to re-subscribe on every mode change.
 async fn run_drm_supervisor(
     cfg: efd_dsp::DrmConfig,
     iq_tx: broadcast::Sender<Arc<efd_iq::IqBlock>>,
     audio_tx: mpsc::Sender<efd_dsp::AudioBlock>,
     mut mode_rx: watch::Receiver<Option<efd_proto::Mode>>,
+    status_tx: watch::Sender<Option<efd_proto::DrmStatus>>,
     cancel: CancellationToken,
 ) {
-    let mut active: Option<(
-        CancellationToken,
-        tokio::task::JoinHandle<Result<(), efd_dsp::DspError>>,
-    )> = None;
+    struct Active {
+        cancel: CancellationToken,
+        join: JoinHandle<Result<(), efd_dsp::DspError>>,
+        forwarder: JoinHandle<()>,
+    }
+    let mut active: Option<Active> = None;
 
     loop {
         let want_drm = matches!(*mode_rx.borrow(), Some(efd_proto::Mode::DRM));
@@ -599,41 +625,61 @@ async fn run_drm_supervisor(
         match (&active, want_drm) {
             (None, true) => {
                 info!("DRM supervisor: starting bridge");
-                let bridge_cancel = CancellationToken::new();
-                let handle = efd_dsp::spawn_drm_bridge(
+                let bc = CancellationToken::new();
+                let handles = efd_dsp::spawn_drm_bridge(
                     cfg.clone(),
                     iq_tx.subscribe(),
                     audio_tx.clone(),
-                    bridge_cancel.clone(),
+                    bc.clone(),
                 );
-                active = Some((bridge_cancel, handle));
+                let mut brs = handles.status_rx;
+                let pipe_status = status_tx.clone();
+                let fwd_cancel = bc.clone();
+                let forwarder = tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = fwd_cancel.cancelled() => break,
+                            r = brs.changed() => {
+                                if r.is_err() { break; }
+                                let _ = pipe_status.send(brs.borrow().clone());
+                            }
+                        }
+                    }
+                });
+                active = Some(Active { cancel: bc, join: handles.join, forwarder });
             }
             (Some(_), false) => {
                 info!("DRM supervisor: stopping bridge");
-                let (bridge_cancel, handle) = active.take().expect("active checked");
-                bridge_cancel.cancel();
-                match handle.await {
+                let a = active.take().expect("active checked");
+                a.cancel.cancel();
+                let _ = a.forwarder.await;
+                match a.join.await {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => tracing::warn!("DRM bridge exited with error: {e}"),
                     Err(e) => tracing::warn!("DRM bridge panicked: {e}"),
                 }
+                let _ = status_tx.send(None);
             }
             _ => {}
         }
 
         tokio::select! {
             _ = cancel.cancelled() => {
-                if let Some((bc, h)) = active.take() {
-                    bc.cancel();
-                    let _ = h.await;
+                if let Some(a) = active.take() {
+                    a.cancel.cancel();
+                    let _ = a.forwarder.await;
+                    let _ = a.join.await;
+                    let _ = status_tx.send(None);
                 }
                 return;
             }
             r = mode_rx.changed() => {
                 if r.is_err() {
-                    if let Some((bc, h)) = active.take() {
-                        bc.cancel();
-                        let _ = h.await;
+                    if let Some(a) = active.take() {
+                        a.cancel.cancel();
+                        let _ = a.forwarder.await;
+                        let _ = a.join.await;
+                        let _ = status_tx.send(None);
                     }
                     return;
                 }

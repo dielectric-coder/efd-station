@@ -35,13 +35,23 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
     let demod_mode_tx = state.pipeline.demod_mode_tx.clone();
     let audio_source_tx = state.pipeline.audio_source_tx.clone();
     let capabilities = state.pipeline.capabilities.clone();
+    let drm_status_rx = state.pipeline.drm_status_rx.clone();
     let cancel = state.cancel.clone();
 
     info!("WS client connected");
 
     let cancel2 = cancel.clone();
     let mut down = tokio::spawn(async move {
-        super::downstream::run(sink, capabilities, fft_rx, state_rx, audio_rx, cancel2).await;
+        super::downstream::run(
+            sink,
+            capabilities,
+            fft_rx,
+            state_rx,
+            audio_rx,
+            drm_status_rx,
+            cancel2,
+        )
+        .await;
     });
 
     let mut up = tokio::spawn(async move {
