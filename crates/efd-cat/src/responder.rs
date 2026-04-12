@@ -8,14 +8,21 @@
 //! minimum vocabulary. Grow on demand as other apps need more.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
-use efd_proto::{CatCommand, Mode, RadioState};
+use efd_proto::{CatCommand, Mode, RadioState, Vfo};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+
+/// Hard cap on concurrent clients per responder instance. Real rigctld
+/// clients (WSJT-X, FLDIGI) use one connection each and there are usually
+/// 1–2 of them total; this caps the fd/memory blast radius if something
+/// local starts opening connections in a loop.
+const MAX_CONCURRENT_CONNS: usize = 16;
 
 use crate::error::CatError;
 
@@ -68,6 +75,7 @@ pub(crate) async fn run_with_listener(
     state_rx: watch::Receiver<Option<RadioState>>,
     cancel: CancellationToken,
 ) -> Result<(), CatError> {
+    let conn_sem = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNS));
     loop {
         tokio::select! {
             biased;
@@ -83,11 +91,20 @@ pub(crate) async fn run_with_listener(
                         continue;
                     }
                 };
+                let permit = match conn_sem.clone().try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        warn!(label, %peer, "connection cap reached, rejecting");
+                        drop(stream);
+                        continue;
+                    }
+                };
                 debug!(label, %peer, "rigctld client connected");
                 let backend = backend.clone();
                 let state_rx = state_rx.clone();
                 let conn_cancel = cancel.clone();
                 tokio::spawn(async move {
+                    let _permit = permit; // released when the task exits
                     if let Err(e) = handle_conn(stream, backend, state_rx, conn_cancel).await {
                         debug!(label, %peer, "rigctld client: {e}");
                     }
@@ -199,7 +216,14 @@ async fn handle_command(
             let Some(hz) = parts.next().and_then(|s| s.parse::<u64>().ok()) else {
                 return Reply::Response("RPRT -1\n".into());
             };
-            backend.set_freq(hz).await;
+            let vfo = state_rx
+                .borrow()
+                .as_ref()
+                .map(|s| s.vfo)
+                .unwrap_or(Vfo::A);
+            if !backend.set_freq(hz, vfo).await {
+                return Reply::Response("RPRT -6\n".into());
+            }
             Reply::Response("RPRT 0\n".into())
         }
         "m" => {
@@ -217,7 +241,9 @@ async fn handle_command(
             // Passband argument parsed but not applied (no per-mode passband
             // control surface today).
             let _passband_hz = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
-            backend.set_mode(mode).await;
+            if !backend.set_mode(mode).await {
+                return Reply::Response("RPRT -6\n".into());
+            }
             Reply::Response("RPRT 0\n".into())
         }
         "t" => {
@@ -229,10 +255,11 @@ async fn handle_command(
                 return Reply::Response("RPRT -1\n".into());
             };
             let on = arg == "1";
-            if !backend.set_ptt(on).await {
-                return Reply::Response("RPRT -11\n".into());
+            match backend.set_ptt(on).await {
+                PttResult::Ok => Reply::Response("RPRT 0\n".into()),
+                PttResult::Unsupported => Reply::Response("RPRT -11\n".into()),
+                PttResult::IoFailure => Reply::Response("RPRT -6\n".into()),
             }
-            Reply::Response("RPRT 0\n".into())
         }
         "q" | "Q" => Reply::Close,
         _ => Reply::Response("RPRT -11\n".into()),
@@ -259,40 +286,61 @@ fn current_mode(
     }
 }
 
+enum PttResult {
+    Ok,
+    Unsupported,
+    IoFailure,
+}
+
 impl Backend {
-    async fn set_freq(&self, hz: u64) {
+    /// Tune the active VFO on the radio. Both Hardware and Demod backends
+    /// route through the native CAT channel — only the radio owns the LO.
+    /// Returns false if the CAT channel is closed.
+    async fn set_freq(&self, hz: u64, vfo: Vfo) -> bool {
         let cat = match self {
             Backend::Hardware { cat_tx } | Backend::Demod { cat_tx, .. } => cat_tx,
         };
-        let _ = cat
-            .send(CatCommand {
-                raw: format!("FA{:011};", hz),
-            })
-            .await;
+        let prefix = match vfo {
+            Vfo::A => "FA",
+            Vfo::B => "FB",
+        };
+        cat.send(CatCommand {
+            raw: format!("{prefix}{:011};", hz),
+        })
+        .await
+        .is_ok()
     }
 
-    async fn set_mode(&self, mode: Mode) {
+    /// Returns false if the underlying send failed (CAT channel closed,
+    /// or an internally unreachable invalid mode).
+    async fn set_mode(&self, mode: Mode) -> bool {
         match self {
-            Backend::Hardware { cat_tx } => {
-                if let Some(raw) = mode_to_cat(mode) {
-                    let _ = cat_tx.send(CatCommand { raw }).await;
-                }
-            }
+            Backend::Hardware { cat_tx } => match mode_to_cat(mode) {
+                Some(raw) => cat_tx.send(CatCommand { raw }).await.is_ok(),
+                None => false,
+            },
             Backend::Demod { demod_mode, .. } => {
-                let _ = demod_mode.send(Some(mode));
+                // Skip the send if the demod is already in this mode to avoid
+                // waking every downstream watch consumer for a no-op.
+                if demod_mode.borrow().as_ref() != Some(&mode) {
+                    let _ = demod_mode.send(Some(mode));
+                }
+                true
             }
         }
     }
 
-    /// Returns false when the backend does not support PTT (demod front).
-    async fn set_ptt(&self, on: bool) -> bool {
+    async fn set_ptt(&self, on: bool) -> PttResult {
         match self {
             Backend::Hardware { cat_tx } => {
                 let raw = if on { "TX;".to_string() } else { "RX;".to_string() };
-                let _ = cat_tx.send(CatCommand { raw }).await;
-                true
+                if cat_tx.send(CatCommand { raw }).await.is_ok() {
+                    PttResult::Ok
+                } else {
+                    PttResult::IoFailure
+                }
             }
-            Backend::Demod { .. } => false,
+            Backend::Demod { .. } => PttResult::Unsupported,
         }
     }
 }
@@ -461,6 +509,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_freq_uses_vfo_b_when_state_says_b() {
+        let mut state = fake_state(0, Mode::USB, false);
+        state.vfo = Vfo::B;
+        let mut h = spawn_hw(Some(state)).await;
+        assert_eq!(send_recv(h.addr, "F 7074000\n").await, "RPRT 0\n");
+        let cmd = h.cat_rx.recv().await.unwrap();
+        assert_eq!(cmd.raw, "FB00007074000;");
+    }
+
+    #[tokio::test]
+    async fn set_freq_returns_rprt_minus_6_when_cat_closed() {
+        // Drop cat_rx before issuing the command so cat_tx.send fails.
+        let (cat_tx, cat_rx) = mpsc::channel::<CatCommand>(16);
+        let (_state_tx, state_rx) = watch::channel::<Option<RadioState>>(None);
+        let cancel = CancellationToken::new();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let backend = Backend::Hardware { cat_tx };
+        tokio::spawn(async move {
+            let _ = run_with_listener(listener, "test-hw", backend, state_rx, cancel).await;
+        });
+        drop(cat_rx);
+        assert_eq!(send_recv(addr, "F 14074000\n").await, "RPRT -6\n");
+    }
+
+    #[tokio::test]
     async fn set_freq_missing_arg_reports_error() {
         let h = spawn_hw(None).await;
         assert_eq!(send_recv(h.addr, "F\n").await, "RPRT -1\n");
@@ -540,6 +614,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn demod_set_mode_skips_watch_when_unchanged() {
+        // Pre-seed the demod watch at CW. Setting CW again should not fire.
+        let (cat_tx, _cat_rx) = mpsc::channel::<CatCommand>(16);
+        let (_state_tx, state_rx) = watch::channel::<Option<RadioState>>(None);
+        let (demod_mode_tx, mut demod_mode_rx) = watch::channel(Some(Mode::CW));
+        demod_mode_rx.mark_unchanged();
+        let cancel = CancellationToken::new();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let backend = Backend::Demod {
+            cat_tx,
+            demod_mode: demod_mode_tx,
+        };
+        tokio::spawn(async move {
+            let _ = run_with_listener(listener, "test-demod", backend, state_rx, cancel).await;
+        });
+        assert_eq!(send_recv(addr, "M CW 500\n").await, "RPRT 0\n");
+        // demod_mode_rx.changed() should NOT fire within a small window.
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(50), demod_mode_rx.changed()).await,
+            Err(_)
+        ));
+    }
+
+    #[tokio::test]
     async fn demod_set_freq_still_retunes_hardware() {
         let mut h = spawn_demod(None).await;
         assert_eq!(send_recv(h.addr, "F 7074000\n").await, "RPRT 0\n");
@@ -584,6 +683,30 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn connection_cap_rejects_beyond_max() {
+        let h = spawn_hw(None).await;
+        // Open MAX_CONCURRENT_CONNS idle connections and hold them.
+        let mut held = Vec::new();
+        for _ in 0..MAX_CONCURRENT_CONNS {
+            let s = TcpStream::connect(h.addr).await.unwrap();
+            held.push(s);
+        }
+        // Give the server a moment to register the connections.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // The next connection should be accepted at the TCP layer but immediately
+        // dropped by the responder with no response.
+        let mut extra = TcpStream::connect(h.addr).await.unwrap();
+        extra.write_all(b"f\n").await.ok();
+        let mut buf = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), extra.read_to_end(&mut buf))
+            .await
+            .unwrap()
+            .ok();
+        assert!(buf.is_empty(), "rejected client should get no bytes");
     }
 
     #[tokio::test]

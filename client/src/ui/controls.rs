@@ -203,6 +203,12 @@ pub struct ControlBar {
     mode_list: StringList,
     /// Modes currently offered in the dropdown — filtered to server capabilities.
     active_modes: Rc<RefCell<Vec<(&'static str, Mode)>>>,
+    /// Set to true while `apply_capabilities` rewires the mode list so its
+    /// transient `set_selected` calls don't fire the user-intent handler.
+    suppress_mode_notify: Rc<Cell<bool>>,
+    /// WS sender — retained so `apply_capabilities` can send the initial
+    /// AGC-threshold command after the server advertises `has_hardware_cat`.
+    ws_tx: mpsc::UnboundedSender<ClientMsg>,
     /// Last-known radio state from CAT polling.
     last_radio: Rc<RefCell<Option<RadioState>>>,
     /// Persisted SDR operating parameters.
@@ -258,6 +264,7 @@ impl ControlBar {
         // and is re-filtered when server `Capabilities` arrive.
         let active_modes: Rc<RefCell<Vec<(&'static str, Mode)>>> =
             Rc::new(RefCell::new(MODES.to_vec()));
+        let suppress_mode_notify = Rc::new(Cell::new(false));
         let mode_list = StringList::new(&MODES.iter().map(|(s, _)| *s).collect::<Vec<_>>());
         let mode_dropdown = DropDown::new(Some(mode_list.clone()), gtk4::Expression::NONE);
         mode_dropdown.set_selected(1); // default USB
@@ -266,7 +273,11 @@ impl ControlBar {
             let tx = ws_tx.clone();
             let sp = sdr_params.clone();
             let am = active_modes.clone();
+            let suppress = suppress_mode_notify.clone();
             mode_dropdown.connect_selected_notify(move |dd| {
+                if suppress.get() {
+                    return;
+                }
                 let idx = dd.selected() as usize;
                 if let Some(&(_, mode)) = am.borrow().get(idx) {
                     let _ = tx.send(ClientMsg::SetDemodMode(Some(mode)));
@@ -390,10 +401,9 @@ impl ControlBar {
         }
         container.append(&agc_scale);
 
-        // Sync initial state: MON + USB audio + AGC threshold from persisted params
-        let _ = ws_tx.send(ClientMsg::CatCommand(
-            cat_commands::set_agc_threshold(initial_threshold),
-        ));
+        // Audio-source initial sync is always safe; the AGC-threshold initial
+        // sync is deferred to `apply_capabilities` so it's gated on
+        // has_hardware_cat and not emitted to sources that can't accept it.
         let _ = ws_tx.send(ClientMsg::SetAudioSource(AudioSource::RadioUsb));
 
         // Step size dropdown
@@ -483,6 +493,8 @@ impl ControlBar {
             mode_dropdown,
             mode_list,
             active_modes,
+            suppress_mode_notify,
+            ws_tx,
             last_radio,
             sdr_params,
             last_cmd,
@@ -508,6 +520,17 @@ impl ControlBar {
         self.agc_label.set_visible(caps.has_hardware_cat);
         self.agc_scale.set_visible(caps.has_hardware_cat);
 
+        // Initial AGC-threshold sync, deferred from construction so we only
+        // emit it to sources that can accept the CAT command.
+        if caps.has_hardware_cat {
+            let threshold = self.sdr_params.borrow().agc_threshold;
+            let _ = self
+                .ws_tx
+                .send(ClientMsg::CatCommand(cat_commands::set_agc_threshold(
+                    threshold,
+                )));
+        }
+
         let filtered: Vec<(&'static str, Mode)> = MODES
             .iter()
             .copied()
@@ -525,15 +548,20 @@ impl ControlBar {
 
         let new_strs: Vec<&str> = filtered.iter().map(|&(s, _)| s).collect();
         let n_current = self.mode_list.n_items();
-        self.mode_list.splice(0, n_current, &new_strs);
-
         let new_idx = prev_mode
             .and_then(|m| filtered.iter().position(|&(_, fm)| fm == m))
             .or_else(|| filtered.iter().position(|&(_, m)| m == Mode::USB))
             .unwrap_or(0);
 
+        // Suppress the mode-dropdown user-intent handler while we rewire the
+        // model — otherwise the transient set_selected calls would issue
+        // spurious SetDemodMode + MD; CAT commands on every capabilities
+        // advertisement.
+        self.suppress_mode_notify.set(true);
+        self.mode_list.splice(0, n_current, &new_strs);
         *self.active_modes.borrow_mut() = filtered;
         self.mode_dropdown.set_selected(new_idx as u32);
+        self.suppress_mode_notify.set(false);
     }
 
     /// Save SDR params if currently in SDR mode (call on app quit).
