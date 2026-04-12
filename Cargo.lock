@@ -474,6 +474,7 @@ dependencies = [
 name = "efd-iq"
 version = "0.1.0"
 dependencies = [
+ "efd-proto",
  "rusb",
  "thiserror 2.0.18",
  "tokio",

@@ -1,7 +1,7 @@
 use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
-/// Raw Kenwood-style CAT command forwarded to rigctld.
+/// Raw Kenwood-style CAT command forwarded to the radio over USB serial.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Encode, Decode)]
 pub struct CatCommand {
     pub raw: String,

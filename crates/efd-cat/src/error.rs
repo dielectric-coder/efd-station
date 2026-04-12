@@ -2,13 +2,13 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CatError {
-    #[error("TCP I/O error: {0}")]
+    #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("connection to rigctld lost")]
+    #[error("CAT connection lost")]
     Disconnected,
 
-    #[error("invalid response from rigctld: {0}")]
+    #[error("invalid CAT response: {0}")]
     BadResponse(String),
 
     #[error("CAT task cancelled")]

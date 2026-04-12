@@ -284,6 +284,72 @@ impl Pipeline {
             tasks.push(("tuning_fwd", handle));
         }
 
+        // --- RadioState bridge: broadcast → watch (latest-value cache) ---
+        // Consumers like the rigctld-compatible responder want the latest
+        // known RadioState without having to drain a broadcast channel.
+        let (state_watch_tx, state_watch_rx) =
+            tokio::sync::watch::channel::<Option<RadioState>>(None);
+        {
+            let mut rx = state_tx.subscribe();
+            let c = cancel.clone();
+            let handle = tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = c.cancelled() => break,
+                        r = rx.recv() => match r {
+                            Ok(s) => { let _ = state_watch_tx.send(Some(s)); }
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                }
+            });
+            tasks.push(("state_watch_bridge", handle));
+        }
+
+        // --- rigctld-compatible TCP responders (WSJT-X / FLDIGI / etc.) ---
+        // Port A fronts the FDM-DUO; bound whenever hardware CAT is present.
+        // Port B fronts the software demod; bound whenever IQ is available.
+        if source_caps.has_hardware_cat {
+            let cfg = efd_cat::ResponderConfig {
+                bind_addr: "127.0.0.1:4532".parse().expect("valid bind addr"),
+                label: "fdmduo-front",
+            };
+            let backend = efd_cat::Backend::Hardware {
+                cat_tx: cat_tx.clone(),
+            };
+            let c = cancel.clone();
+            let handle = efd_cat::spawn_responder(cfg, backend, state_watch_rx.clone(), c);
+            let handle = tokio::spawn(async move {
+                match handle.await {
+                    Ok(Ok(())) => info!("rigctld fdmduo-front exited cleanly"),
+                    Ok(Err(e)) => error!("rigctld fdmduo-front error: {e}"),
+                    Err(e) => error!("rigctld fdmduo-front panicked: {e}"),
+                }
+            });
+            tasks.push(("rigctld_hw", handle));
+        }
+        if source_caps.has_iq {
+            let cfg = efd_cat::ResponderConfig {
+                bind_addr: "127.0.0.1:4533".parse().expect("valid bind addr"),
+                label: "demod-front",
+            };
+            let backend = efd_cat::Backend::Demod {
+                cat_tx: cat_tx.clone(),
+                demod_mode: demod_mode_tx.clone(),
+            };
+            let c = cancel.clone();
+            let handle = efd_cat::spawn_responder(cfg, backend, state_watch_rx.clone(), c);
+            let handle = tokio::spawn(async move {
+                match handle.await {
+                    Ok(Ok(())) => info!("rigctld demod-front exited cleanly"),
+                    Ok(Err(e)) => error!("rigctld demod-front error: {e}"),
+                    Err(e) => error!("rigctld demod-front panicked: {e}"),
+                }
+            });
+            tasks.push(("rigctld_demod", handle));
+        }
+
         info!(tasks = tasks.len(), "pipeline started");
 
         let capabilities = Capabilities {
