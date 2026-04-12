@@ -58,27 +58,35 @@ async fn run(
 ) -> Result<(), CatError> {
     let listener = TcpListener::bind(cfg.bind_addr).await?;
     info!(bind = %cfg.bind_addr, label = cfg.label, "rigctld responder listening");
+    run_with_listener(listener, cfg.label, backend, state_rx, cancel).await
+}
 
+pub(crate) async fn run_with_listener(
+    listener: TcpListener,
+    label: &'static str,
+    backend: Backend,
+    state_rx: watch::Receiver<Option<RadioState>>,
+    cancel: CancellationToken,
+) -> Result<(), CatError> {
     loop {
         tokio::select! {
             biased;
             _ = cancel.cancelled() => {
-                debug!(label = cfg.label, "responder cancelled");
+                debug!(label, "responder cancelled");
                 return Err(CatError::Cancelled);
             }
             accept = listener.accept() => {
                 let (stream, peer) = match accept {
                     Ok(pair) => pair,
                     Err(e) => {
-                        warn!(label = cfg.label, "accept error: {e}");
+                        warn!(label, "accept error: {e}");
                         continue;
                     }
                 };
-                debug!(label = cfg.label, %peer, "rigctld client connected");
+                debug!(label, %peer, "rigctld client connected");
                 let backend = backend.clone();
                 let state_rx = state_rx.clone();
                 let conn_cancel = cancel.clone();
-                let label = cfg.label;
                 tokio::spawn(async move {
                     if let Err(e) = handle_conn(stream, backend, state_rx, conn_cancel).await {
                         debug!(label, %peer, "rigctld client: {e}");
@@ -282,6 +290,10 @@ fn mode_to_cat(mode: Mode) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use efd_proto::{AgcMode, Vfo};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
 
     #[test]
     fn mode_roundtrip() {
@@ -301,5 +313,242 @@ mod tests {
     #[test]
     fn unknown_mode_rejected() {
         assert_eq!(str_to_mode("FOO"), None);
+    }
+
+    fn fake_state(freq_hz: u64, mode: Mode, tx: bool) -> RadioState {
+        RadioState {
+            vfo: Vfo::A,
+            freq_hz,
+            mode,
+            filter_bw: String::new(),
+            att: false,
+            lp: false,
+            agc: AgcMode::Slow,
+            agc_threshold: 0,
+            nr: false,
+            nb: false,
+            s_meter_db: -73.0,
+            tx,
+        }
+    }
+
+    struct Harness {
+        _cancel: CancellationToken,
+        addr: std::net::SocketAddr,
+        cat_rx: mpsc::Receiver<CatCommand>,
+        demod_mode_rx: Option<watch::Receiver<Option<Mode>>>,
+    }
+
+    async fn spawn_hw(state: Option<RadioState>) -> Harness {
+        let (cat_tx, cat_rx) = mpsc::channel::<CatCommand>(16);
+        let (_state_tx, state_rx) = watch::channel(state);
+        let cancel = CancellationToken::new();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let backend = Backend::Hardware { cat_tx };
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            let _ = run_with_listener(listener, "test-hw", backend, state_rx, c).await;
+        });
+        Harness {
+            _cancel: cancel,
+            addr,
+            cat_rx,
+            demod_mode_rx: None,
+        }
+    }
+
+    async fn spawn_demod(state: Option<RadioState>) -> Harness {
+        let (cat_tx, cat_rx) = mpsc::channel::<CatCommand>(16);
+        let (_state_tx, state_rx) = watch::channel(state);
+        let (demod_mode_tx, demod_mode_rx) = watch::channel::<Option<Mode>>(None);
+        let cancel = CancellationToken::new();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let backend = Backend::Demod {
+            cat_tx,
+            demod_mode: demod_mode_tx,
+        };
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            let _ = run_with_listener(listener, "test-demod", backend, state_rx, c).await;
+        });
+        Harness {
+            _cancel: cancel,
+            addr,
+            cat_rx,
+            demod_mode_rx: Some(demod_mode_rx),
+        }
+    }
+
+    async fn send_recv(addr: std::net::SocketAddr, req: &str) -> String {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(req.as_bytes()).await.unwrap();
+        s.write_all(b"q\n").await.unwrap();
+        let mut buf = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), s.read_to_end(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[tokio::test]
+    async fn get_freq_reports_state() {
+        let h = spawn_hw(Some(fake_state(14_074_000, Mode::USB, false))).await;
+        assert_eq!(send_recv(h.addr, "f\n").await, "14074000\n");
+    }
+
+    #[tokio::test]
+    async fn get_freq_zero_when_no_state() {
+        let h = spawn_hw(None).await;
+        assert_eq!(send_recv(h.addr, "f\n").await, "0\n");
+    }
+
+    #[tokio::test]
+    async fn set_freq_emits_cat_command() {
+        let mut h = spawn_hw(None).await;
+        assert_eq!(send_recv(h.addr, "F 14074000\n").await, "RPRT 0\n");
+        let cmd = h.cat_rx.recv().await.unwrap();
+        assert_eq!(cmd.raw, "FA00014074000;");
+    }
+
+    #[tokio::test]
+    async fn set_freq_missing_arg_reports_error() {
+        let h = spawn_hw(None).await;
+        assert_eq!(send_recv(h.addr, "F\n").await, "RPRT -1\n");
+    }
+
+    #[tokio::test]
+    async fn get_mode_reports_state() {
+        let h = spawn_hw(Some(fake_state(0, Mode::LSB, false))).await;
+        assert_eq!(send_recv(h.addr, "m\n").await, "LSB\n0\n");
+    }
+
+    #[tokio::test]
+    async fn set_mode_on_hardware_emits_cat_command() {
+        let mut h = spawn_hw(None).await;
+        assert_eq!(send_recv(h.addr, "M CW 500\n").await, "RPRT 0\n");
+        let cmd = h.cat_rx.recv().await.unwrap();
+        assert_eq!(cmd.raw, "MD3;");
+    }
+
+    #[tokio::test]
+    async fn set_mode_pktusb_maps_to_usb() {
+        let mut h = spawn_hw(None).await;
+        assert_eq!(send_recv(h.addr, "M PKTUSB 3000\n").await, "RPRT 0\n");
+        let cmd = h.cat_rx.recv().await.unwrap();
+        assert_eq!(cmd.raw, "MD2;");
+    }
+
+    #[tokio::test]
+    async fn set_mode_unknown_reports_error() {
+        let h = spawn_hw(None).await;
+        assert_eq!(send_recv(h.addr, "M BOGUS 0\n").await, "RPRT -11\n");
+    }
+
+    #[tokio::test]
+    async fn get_ptt_reports_state() {
+        let h_rx = spawn_hw(Some(fake_state(0, Mode::USB, false))).await;
+        assert_eq!(send_recv(h_rx.addr, "t\n").await, "0\n");
+        let h_tx = spawn_hw(Some(fake_state(0, Mode::USB, true))).await;
+        assert_eq!(send_recv(h_tx.addr, "t\n").await, "1\n");
+    }
+
+    #[tokio::test]
+    async fn set_ptt_on_hardware_emits_tx_command() {
+        let mut h = spawn_hw(None).await;
+        assert_eq!(send_recv(h.addr, "T 1\n").await, "RPRT 0\n");
+        let cmd = h.cat_rx.recv().await.unwrap();
+        assert_eq!(cmd.raw, "TX;");
+    }
+
+    #[tokio::test]
+    async fn set_ptt_off_hardware_emits_rx_command() {
+        let mut h = spawn_hw(None).await;
+        assert_eq!(send_recv(h.addr, "T 0\n").await, "RPRT 0\n");
+        let cmd = h.cat_rx.recv().await.unwrap();
+        assert_eq!(cmd.raw, "RX;");
+    }
+
+    #[tokio::test]
+    async fn set_ptt_on_demod_backend_rejected() {
+        let h = spawn_demod(None).await;
+        assert_eq!(send_recv(h.addr, "T 1\n").await, "RPRT -11\n");
+    }
+
+    #[tokio::test]
+    async fn demod_set_mode_updates_watch_not_cat() {
+        let mut h = spawn_demod(None).await;
+        assert_eq!(send_recv(h.addr, "M CW 500\n").await, "RPRT 0\n");
+        // cat_rx should stay empty
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(50), h.cat_rx.recv()).await,
+            Err(_)
+        ));
+        // watch should have the new mode
+        let rx = h.demod_mode_rx.as_mut().unwrap();
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), Some(Mode::CW));
+    }
+
+    #[tokio::test]
+    async fn demod_set_freq_still_retunes_hardware() {
+        let mut h = spawn_demod(None).await;
+        assert_eq!(send_recv(h.addr, "F 7074000\n").await, "RPRT 0\n");
+        let cmd = h.cat_rx.recv().await.unwrap();
+        assert_eq!(cmd.raw, "FA00007074000;");
+    }
+
+    #[tokio::test]
+    async fn demod_get_mode_prefers_demod_watch() {
+        // State says USB, but demod watch overrides to CW.
+        let (cat_tx, _cat_rx) = mpsc::channel::<CatCommand>(16);
+        let (_state_tx, state_rx) =
+            watch::channel(Some(fake_state(0, Mode::USB, false)));
+        let (demod_mode_tx, _demod_mode_rx) = watch::channel(Some(Mode::CW));
+        let cancel = CancellationToken::new();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let backend = Backend::Demod {
+            cat_tx,
+            demod_mode: demod_mode_tx,
+        };
+        tokio::spawn(async move {
+            let _ = run_with_listener(listener, "test-demod", backend, state_rx, cancel).await;
+        });
+        assert_eq!(send_recv(addr, "m\n").await, "CW\n0\n");
+    }
+
+    #[tokio::test]
+    async fn unknown_command_returns_rprt_minus_11() {
+        let h = spawn_hw(None).await;
+        assert_eq!(send_recv(h.addr, "dump_state\n").await, "RPRT -11\n");
+    }
+
+    #[tokio::test]
+    async fn quit_closes_connection_cleanly() {
+        let h = spawn_hw(None).await;
+        let mut s = TcpStream::connect(h.addr).await.unwrap();
+        s.write_all(b"q\n").await.unwrap();
+        let mut buf = Vec::new();
+        let n = tokio::time::timeout(Duration::from_secs(1), s.read_to_end(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn multiple_commands_one_connection() {
+        let h = spawn_hw(Some(fake_state(14_074_000, Mode::USB, false))).await;
+        let mut s = TcpStream::connect(h.addr).await.unwrap();
+        s.write_all(b"f\nt\nq\n").await.unwrap();
+        let mut buf = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), s.read_to_end(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), "14074000\n0\n");
     }
 }

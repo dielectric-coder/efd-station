@@ -134,6 +134,16 @@ async fn main() {
                     );
                 }
             }
+            ServerMsg::Capabilities(caps) => {
+                println!(
+                    "Capabilities: source={:?} iq={} tx={} hw_cat={} modes={:?}",
+                    caps.source,
+                    caps.has_iq,
+                    caps.has_tx,
+                    caps.has_hardware_cat,
+                    caps.supported_demod_modes,
+                );
+            }
             ServerMsg::Error(err) => {
                 error_count += 1;
                 println!("server error: [{}] {}", err.code, err.message);
