@@ -71,9 +71,11 @@ Both consumption modes can run simultaneously.
 │       ├── main.rs
 │       ├── ui/                 # GTK4 widgets (dashboard, spectrum, waterfall, controls)
 │       └── ws.rs               # WebSocket connection to server
+├── third_party/
+│   └── dream/                  # vendored DREAM 2.1.1 + hamlib cast patch + build script
 └── crates/
     ├── efd-iq/                 # Multi-backend IQ capture (vendor-native APIs)
-    ├── efd-dsp/                # FFT (FFTW3 + volk), demod, audio-domain decoders
+    ├── efd-dsp/                # FFT (FFTW3 + volk), demod, DRM (DREAM bridge), audio-domain decoders
     ├── efd-audio/              # ALSA HAT / USB dongle output + USB audio TX
     ├── efd-cat/                # direct USB serial CAT (FDM-DUO) + rigctld-compatible responder for external apps
     └── efd-proto/              # shared WS message types — used by server AND client
@@ -103,9 +105,13 @@ message type fails to compile both binaries simultaneously.
   - Applies window function, computes magnitude spectrum
   - Publishes `FftBins` to WS downstream
 - **IQ demod task**: consumes `broadcast<IqBlock>`, produces `AudioSamples`
-  - Modes: SSB, AM, FM, DRM (via DREAM), FreeDV
-  - DREAM and FreeDV run on CM5 — decoded audio feeds the same audio path
+  - In-process modes: SSB, AM, FM, FreeDV
   - Publishes `broadcast<AudioSamples>` for fan-out to ALSA and WS
+- **DRM decoder** (`drm.rs`): a separate task that bridges the in-process IQ stream to the DREAM subprocess via PipeWire null sinks:
+  - Decimates IQ to 48 kHz, packs as interleaved s16 L=I/R=Q, writes to `drm_in` sink
+  - Spawns DREAM (`-I drm_in.monitor -O drm_out -c 6 --sigsrate 48000`)
+  - Reads decoded stereo PCM from `drm_out.monitor`, publishes to the same `broadcast<AudioSamples>` used by other demod modes
+  - Active only when the current `Mode` is `DRM`; torn down on mode change
 - **Audio-domain decoders**: consume `broadcast<AudioSamples>` (from the IQ demod *or* from incoming audio in MON/portable configs), produce decoded content (WEFAX, RTTY, CW, PSK, etc.). Runs identically regardless of audio origin.
 - In MON mode the FFT task can optionally operate on the audio stream (audio spectrum) instead of IQ, since there is no IQ path.
 
@@ -169,10 +175,17 @@ Exact port numbers and defaults TBD in config.
         │
         └─ broadcast<IqBlock>
                ├──→ [FFT / efd-dsp]    → FftBins  → [WS downstream] → clients
-               └──→ [demod / efd-dsp]  → broadcast<AudioSamples>
-                                               ├──→ [ALSA / efd-audio] → HAT/dongle → amp
-                                               ├──→ [audio decoders / efd-dsp] → DecodedText
-                                               └──→ [WS downstream]    → clients
+               ├──→ [demod / efd-dsp]  → broadcast<AudioSamples>      (SSB/AM/FM/FreeDV, in-process)
+               │                               ├──→ [ALSA / efd-audio] → HAT/dongle → amp
+               │                               ├──→ [audio decoders / efd-dsp] → DecodedText
+               │                               └──→ [WS downstream]    → clients
+               └──→ [drm / efd-dsp] ─→ PipeWire null-sink(drm_in)
+                                            │
+                                       dream -I drm_in.monitor -O drm_out -c 6 --sigsrate 48000
+                                            │
+                                       PipeWire null-sink(drm_out).monitor
+                                            └──→ same broadcast<AudioSamples>
+                                                  (ALSA + WS + audio decoders, as above)
 ```
 
 ## Tokio pipeline (RX path, MON + portable-radio modes)
@@ -213,9 +226,9 @@ Channel type summary:
 - **Our rigctld-compatible responder** (inside `efd-cat`, not an external dep): one instance per bound port. Port A fronts the FDM-DUO (translating rigctld to native CAT); port B fronts the software demod in SDR mode. WSJT-X and other hamlib apps connect to these the same way they would connect to hamlib's rigctld.
 - **Vendor SDR libraries**: `libhackrf`, `SDRplay API`, `librtlsdr` — linked in per the active device.
 - **ALSA**: HAT and/or USB-dongle audio output.
-- **PipeWire**: required on *client* machines for the virtual audio device that feeds digital-mode apps. Not required on CM5.
-- **DREAM**: DRM decoder, runs on CM5. Audio output fed into demod audio path.
-- **FreeDV**: codec, runs on CM5. Same audio path as DREAM.
+- **PipeWire**: present on the CM5 (Trixie ships it) — used for the two virtual null sinks that bridge the `efd-dsp` DRM task to the DREAM subprocess. Also required on *client* machines for the virtual audio device that feeds digital-mode apps.
+- **DREAM (2.1.1 console build)**: DRM decoder subprocess. Vendored under `third_party/dream/` because the in-distro `dream-drm` (2.2) has known decoding regressions and the build needs `qmake CONFIG+=console` plus a one-line `rig_model_t` cast patch to compile against modern hamlib. The subprocess reads IQ from one PipeWire null sink and writes decoded audio to another; the Rust pipeline feeds/consumes the monitors.
+- **FreeDV**: codec, runs on CM5. Same audio path as DREAM (virtual sink bridge pattern is the template).
 
 ---
 
@@ -233,7 +246,9 @@ Channel type summary:
 | Audio-domain decoders | WEFAX/RTTY/CW/PSK operate on `AudioSamples` regardless of origin (IQ demod, FDM-DUO audio passthrough, or analog audio via dongle). |
 | TX scope | RX-first. TX supported only on FDM-DUO and HackRF. Other configs advertise `has_tx=false`. |
 | TX audio source | From client over WebSocket (mic, WSJT-X, FLDIGI, FreeDV via PipeWire). |
-| Audio fan-out | In-process tokio broadcast channels. No PipeWire on CM5 backend. |
+| Audio fan-out | In-process tokio broadcast channels for everything except DRM. PipeWire null sinks bridge IQ↔DREAM and DREAM audio↔pipeline; everything else stays in-process. |
+| DRM decoder | Vendored DREAM 2.1.1 (`third_party/dream/`) built console-only with a hamlib cast patch. Spawned as a subprocess on DRM mode selection; IQ fed via PipeWire null sink (`drm_in`) at 48 kHz stereo L=I R=Q (`-c 6`, I/Q zero IF); decoded audio read from the monitor of a second null sink (`drm_out`). DREAM stays unpatched beyond the hamlib fix. |
+| DRM-in-MON | Not supported — the radio's built-in AM demod destroys the OFDM signal. DRM requires SDR mode so the raw IQ reaches DREAM. |
 | Audio output hardware | HAT *or* USB dongle — exactly one per config. |
 | GPIO scope | Status indicators + reset/lock only. No tuning/CAT control via GPIO. Future use. |
 | Language / framework | Rust, Axum, tokio async runtime. |

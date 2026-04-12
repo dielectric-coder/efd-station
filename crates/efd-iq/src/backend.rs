@@ -64,35 +64,47 @@ impl SourceConfig {
     }
 
     pub fn capabilities(&self) -> SourceCapabilities {
-        let all_demod_modes = vec![Mode::USB, Mode::LSB, Mode::CW, Mode::CWR, Mode::AM, Mode::FM];
+        // DRM requires IQ access (the OFDM signal must reach the decoder
+        // before any hardware AM demod). Any has_iq source gets it.
+        let iq_modes = || {
+            vec![
+                Mode::USB,
+                Mode::LSB,
+                Mode::CW,
+                Mode::CWR,
+                Mode::AM,
+                Mode::FM,
+                Mode::DRM,
+            ]
+        };
         match self {
             SourceConfig::FdmDuo(_) => SourceCapabilities {
                 kind: SourceKind::FdmDuo,
                 has_iq: true,
                 has_tx: true,
                 has_hardware_cat: true,
-                supported_demod_modes: all_demod_modes,
+                supported_demod_modes: iq_modes(),
             },
             SourceConfig::HackRf(_) => SourceCapabilities {
                 kind: SourceKind::HackRf,
                 has_iq: true,
                 has_tx: true,
                 has_hardware_cat: false,
-                supported_demod_modes: all_demod_modes,
+                supported_demod_modes: iq_modes(),
             },
             SourceConfig::RspDx(_) => SourceCapabilities {
                 kind: SourceKind::RspDx,
                 has_iq: true,
                 has_tx: false,
                 has_hardware_cat: false,
-                supported_demod_modes: all_demod_modes,
+                supported_demod_modes: iq_modes(),
             },
             SourceConfig::RtlSdr(_) => SourceCapabilities {
                 kind: SourceKind::RtlSdr,
                 has_iq: true,
                 has_tx: false,
                 has_hardware_cat: false,
-                supported_demod_modes: all_demod_modes,
+                supported_demod_modes: iq_modes(),
             },
             SourceConfig::PortableRadio(_) => SourceCapabilities {
                 kind: SourceKind::PortableRadio,

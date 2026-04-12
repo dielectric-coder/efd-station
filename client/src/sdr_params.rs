@@ -29,6 +29,7 @@ impl SdrParams {
             "CWR" => Mode::CWR,
             "AM" => Mode::AM,
             "FM" => Mode::FM,
+            "DRM" => Mode::DRM,
             _ => Mode::USB,
         }
     }
@@ -46,6 +47,7 @@ pub fn mode_str(mode: Mode) -> &'static str {
         Mode::CWR => "CWR",
         Mode::AM => "AM",
         Mode::FM => "FM",
+        Mode::DRM => "DRM",
         Mode::Unknown => "USB",
     }
 }

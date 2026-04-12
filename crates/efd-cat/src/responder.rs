@@ -353,6 +353,9 @@ fn mode_to_str(mode: Mode) -> &'static str {
         Mode::CWR => "CWR",
         Mode::AM => "AM",
         Mode::FM => "FM",
+        // DRM isn't a rigctld standard mode; report as AM so clients that
+        // poll mode while decoding DRM don't see an unknown string.
+        Mode::DRM => "AM",
         Mode::Unknown => "USB",
     }
 }
@@ -375,7 +378,9 @@ fn mode_to_cat(mode: Mode) -> Option<String> {
         Mode::USB => '2',
         Mode::CW => '3',
         Mode::FM => '4',
-        Mode::AM => '5',
+        // DRM leaves the radio in AM; the demod decision is handled
+        // elsewhere via demod_mode_tx.
+        Mode::AM | Mode::DRM => '5',
         Mode::CWR => '7',
         Mode::Unknown => return None,
     };

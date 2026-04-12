@@ -181,6 +181,7 @@ const MODES: &[(&str, Mode)] = &[
     ("CWR", Mode::CWR),
     ("AM", Mode::AM),
     ("FM", Mode::FM),
+    ("DRM", Mode::DRM),
 ];
 
 const STEPS: &[(&str, u64)] = &[

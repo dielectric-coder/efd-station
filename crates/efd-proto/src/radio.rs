@@ -9,6 +9,10 @@ pub enum Mode {
     CW,
     CWR,
     FM,
+    /// Digital Radio Mondiale — decoded via the DREAM subprocess bridge
+    /// (see `efd-dsp::drm` and `third_party/dream/`). Requires IQ input,
+    /// so only available when `Capabilities::has_iq` is true.
+    DRM,
     Unknown,
 }
 

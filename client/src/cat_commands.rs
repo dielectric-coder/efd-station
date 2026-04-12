@@ -14,7 +14,8 @@ pub fn set_mode(mode: efd_proto::Mode) -> Option<CatCommand> {
         efd_proto::Mode::USB => '2',
         efd_proto::Mode::CW => '3',
         efd_proto::Mode::FM => '4',
-        efd_proto::Mode::AM => '5',
+        // DRM uses the radio's AM mode; the software-demod side handles DRM decoding.
+        efd_proto::Mode::AM | efd_proto::Mode::DRM => '5',
         efd_proto::Mode::CWR => '7',
         efd_proto::Mode::Unknown => return None,
     };

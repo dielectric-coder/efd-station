@@ -445,6 +445,11 @@ fn demodulate(iq: &[[f32; 2]], mode: Mode) -> Vec<f32> {
         Mode::LSB => demod_lsb(iq),
         Mode::FM => demod_fm(iq),
         Mode::CW | Mode::CWR => demod_usb(iq),
+        // DRM audio comes from the DREAM bridge, not this in-process demod.
+        // The caller switches to the DRM task; if DRM still reaches here
+        // (mode mismatch during a transition), emit silence rather than
+        // garbage so speakers don't pop.
+        Mode::DRM => vec![0.0; iq.len()],
         Mode::Unknown => demod_usb(iq),
     }
 }

@@ -22,6 +22,8 @@ pub fn mode_char(mode: Mode) -> Option<char> {
         Mode::FM => Some('4'),
         Mode::AM => Some('5'),
         Mode::CWR => Some('7'),
+        // DRM: the radio stays in AM (wide) while DREAM decodes OFDM from IQ.
+        Mode::DRM => Some('5'),
         Mode::Unknown => None,
     }
 }
@@ -165,7 +167,8 @@ pub fn parse_rf_response(response: &str, mode: Mode) -> Option<String> {
     let filter: Option<&str> = match mode {
         Mode::LSB | Mode::USB => FILTER_LSB_USB.get(p2).copied(),
         Mode::CW | Mode::CWR => FILTER_CW.get(p2).and_then(|o| *o),
-        Mode::AM => FILTER_AM.get(p2).copied(),
+        // DRM borrows the radio's AM filter table since the hardware stays on AM.
+        Mode::AM | Mode::DRM => FILTER_AM.get(p2).copied(),
         Mode::FM => FILTER_FM.get(p2).copied(),
         Mode::Unknown => None,
     };

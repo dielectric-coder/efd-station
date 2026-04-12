@@ -116,7 +116,7 @@ impl Pipeline {
                 output_rate: config.audio.sample_rate,
                 mode: efd_proto::Mode::USB,
             };
-            let dtx = demod_audio_tx;
+            let dtx = demod_audio_tx.clone();
             let c = cancel.clone();
             let handle = efd_dsp::spawn_demod_task(iq_rx, dtx, demod_cfg, demod_tuning_rx, c);
             let handle = tokio::spawn(async move {
@@ -127,6 +127,28 @@ impl Pipeline {
                 }
             });
             tasks.push(("demod", handle));
+        }
+
+        // --- DRM supervisor ---
+        // Brings the DREAM subprocess bridge up/down as the client switches
+        // in and out of Mode::DRM. Only runs when the source can supply IQ.
+        if source_caps.has_iq {
+            let iq_tx_for_drm = iq_tx.clone();
+            let audio_tx_for_drm = demod_audio_tx.clone();
+            let mode_rx = demod_mode_tx.subscribe();
+            let c = cancel.clone();
+            let drm_cfg = efd_dsp::DrmConfig {
+                dream_binary: config.drm.dream_binary.clone(),
+                input_sink: config.drm.input_sink.clone(),
+                output_sink: config.drm.output_sink.clone(),
+                iq_input_rate: config.dsp.sample_rate,
+                dream_rate: config.audio.sample_rate,
+                ..Default::default()
+            };
+            let handle = tokio::spawn(async move {
+                run_drm_supervisor(drm_cfg, iq_tx_for_drm, audio_tx_for_drm, mode_rx, c).await;
+            });
+            tasks.push(("drm_supervisor", handle));
         }
 
         // --- USB RX audio capture (radio's hardware demod output) ---
@@ -548,6 +570,72 @@ async fn decode_audio_for_alsa(
                         tracing::warn!(skipped = n, "ALSA audio bridge lagged");
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+}
+
+/// Watches `mode_rx` and brings the DRM bridge subprocess up/down.
+///
+/// When the client selects Mode::DRM, spawn the bridge (which loads its
+/// own PipeWire null sinks and launches dream). When the client changes
+/// away, cancel the bridge and await it. One bridge instance at a time.
+async fn run_drm_supervisor(
+    cfg: efd_dsp::DrmConfig,
+    iq_tx: broadcast::Sender<Arc<efd_iq::IqBlock>>,
+    audio_tx: mpsc::Sender<efd_dsp::AudioBlock>,
+    mut mode_rx: watch::Receiver<Option<efd_proto::Mode>>,
+    cancel: CancellationToken,
+) {
+    let mut active: Option<(
+        CancellationToken,
+        tokio::task::JoinHandle<Result<(), efd_dsp::DspError>>,
+    )> = None;
+
+    loop {
+        let want_drm = matches!(*mode_rx.borrow(), Some(efd_proto::Mode::DRM));
+
+        match (&active, want_drm) {
+            (None, true) => {
+                info!("DRM supervisor: starting bridge");
+                let bridge_cancel = CancellationToken::new();
+                let handle = efd_dsp::spawn_drm_bridge(
+                    cfg.clone(),
+                    iq_tx.subscribe(),
+                    audio_tx.clone(),
+                    bridge_cancel.clone(),
+                );
+                active = Some((bridge_cancel, handle));
+            }
+            (Some(_), false) => {
+                info!("DRM supervisor: stopping bridge");
+                let (bridge_cancel, handle) = active.take().expect("active checked");
+                bridge_cancel.cancel();
+                match handle.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => tracing::warn!("DRM bridge exited with error: {e}"),
+                    Err(e) => tracing::warn!("DRM bridge panicked: {e}"),
+                }
+            }
+            _ => {}
+        }
+
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                if let Some((bc, h)) = active.take() {
+                    bc.cancel();
+                    let _ = h.await;
+                }
+                return;
+            }
+            r = mode_rx.changed() => {
+                if r.is_err() {
+                    if let Some((bc, h)) = active.take() {
+                        bc.cancel();
+                        let _ = h.await;
+                    }
+                    return;
                 }
             }
         }

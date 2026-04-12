@@ -10,4 +10,10 @@ pub enum DspError {
 
     #[error("FFT cancelled")]
     Cancelled,
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("DRM bridge failed: {0}")]
+    Drm(String),
 }

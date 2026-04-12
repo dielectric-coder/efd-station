@@ -1,0 +1,27 @@
+From: efd-station maintainer <efd@dielectric-coder.local>
+Subject: [PATCH] hamlib: cast rig_model_t to int for Settings::Put
+
+Modern hamlib's rig_model_t is an unsigned integer type that matches
+neither `int` nor `_REAL`, making CSettings::Put() overload resolution
+ambiguous. Cast explicitly to int to disambiguate.
+
+--- a/dream/src/util/Hamlib.cpp
++++ b/dream/src/util/Hamlib.cpp
+@@ -423,7 +423,7 @@ CHamlib::LoadSettings(CSettings & s)
+ 		SetHamlibModelID(model);
+ 	}
+ 
+-	s.Put("Hamlib", "hamlib-model", model);
++	s.Put("Hamlib", "hamlib-model", (int)model);
+ 	s.Put("Hamlib", "hamlib-config", strHamlibConf);
+ 	s.Put("Hamlib", "settings", strSettings);
+ 	s.Put("Hamlib", "freqoffset", iFreqOffset);
+@@ -433,7 +433,7 @@ void
+ CHamlib::SaveSettings(CSettings & s)
+ {
+ 	/* Hamlib Model ID */
+-	s.Put("Hamlib", "hamlib-model", iHamlibModelID);
++	s.Put("Hamlib", "hamlib-model", (int)iHamlibModelID);
+ 
+ 	/* Hamlib configuration string */
+ 	stringstream ss;

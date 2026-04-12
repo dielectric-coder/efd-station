@@ -10,6 +10,7 @@ pub struct Config {
     pub dsp: DspConfig,
     pub cat: CatConfig,
     pub audio: AudioConfig,
+    pub drm: DrmConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +46,28 @@ pub struct CatConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct DrmConfig {
+    /// Path to the dream binary. Defaults to "dream" on PATH; set to the
+    /// vendored build path (e.g. "/usr/lib/efd-station/dream") when packaged.
+    pub dream_binary: String,
+    /// PipeWire null-sink name for IQ fed to dream.
+    pub input_sink: String,
+    /// PipeWire null-sink name for dream's decoded audio output.
+    pub output_sink: String,
+}
+
+impl Default for DrmConfig {
+    fn default() -> Self {
+        Self {
+            dream_binary: "dream".into(),
+            input_sink: "efd_drm_in".into(),
+            output_sink: "efd_drm_out".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AudioConfig {
     /// ALSA device for RX audio playback (HAT sound card).
     pub alsa_device: String,
@@ -65,6 +88,7 @@ impl Default for Config {
             dsp: DspConfig::default(),
             cat: CatConfig::default(),
             audio: AudioConfig::default(),
+            drm: DrmConfig::default(),
         }
     }
 }
