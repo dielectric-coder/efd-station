@@ -2,6 +2,18 @@
 
 All notable changes to efd-station are documented in this file.
 
+## [Unreleased]
+
+### Docs
+- New `USER_GUIDE.md` — end-user walkthrough: hardware setup, install,
+  configuration, UI tour, operating modes (including DRM prerequisites on
+  the CM5), and troubleshooting.
+- New `DEV_GUIDE.md` — developer walkthrough: repo tour, build/test/run,
+  extension recipes (new IQ driver, analog demod mode, audio decoder,
+  rigctld command, proto field), deployment tooling, conventions.
+- `CLAUDE.md` remains the authoritative architectural reference; the two
+  guides point at it instead of duplicating.
+
 ## [0.4.3] - 2026-04-12
 
 ### Fixed
