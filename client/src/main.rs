@@ -161,6 +161,17 @@ fn build_ui(app: &Application, url: &str) {
                         player.push_audio(&chunk.opus_data);
                     }
                 }
+                ServerMsg::Capabilities(caps) => {
+                    eprintln!(
+                        "server capabilities: source={:?} iq={} tx={} hw_cat={} modes={:?}",
+                        caps.source,
+                        caps.has_iq,
+                        caps.has_tx,
+                        caps.has_hardware_cat,
+                        caps.supported_demod_modes,
+                    );
+                    control_bar2.apply_capabilities(&caps);
+                }
                 ServerMsg::Error(err) => {
                     eprintln!("server error: [{}] {}", err.code, err.message);
                 }

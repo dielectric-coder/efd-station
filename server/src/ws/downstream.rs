@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use bytes::Bytes;
-use efd_proto::{AudioChunk, FftBins, RadioState, ServerMsg};
+use efd_proto::{AudioChunk, Capabilities, FftBins, RadioState, ServerMsg};
 use futures_util::SinkExt;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -16,6 +16,7 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(2);
 /// Downstream task: subscribe to broadcasts, serialize to bincode, send over WS.
 pub async fn run(
     mut sink: futures_util::stream::SplitSink<WebSocket, Message>,
+    capabilities: Capabilities,
     fft_rx: broadcast::Receiver<Arc<FftBins>>,
     state_rx: broadcast::Receiver<RadioState>,
     audio_rx: broadcast::Receiver<AudioChunk>,
@@ -26,6 +27,28 @@ pub async fn run(
     let mut audio_rx = audio_rx;
 
     let cfg = bincode::config::standard();
+
+    // Send capabilities as the very first message so clients can gate UI
+    // before any state arrives.
+    match bincode::encode_to_vec(&ServerMsg::Capabilities(capabilities), cfg) {
+        Ok(bytes) => {
+            let send_fut = sink.send(Message::Binary(Bytes::from(bytes)));
+            match tokio::time::timeout(SEND_TIMEOUT, send_fut).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => {
+                    debug!("WS client disconnected before capabilities sent");
+                    let _ = sink.close().await;
+                    return;
+                }
+                Err(_) => {
+                    debug!("WS client timed out on capabilities send");
+                    let _ = sink.close().await;
+                    return;
+                }
+            }
+        }
+        Err(e) => warn!("bincode encode error (capabilities): {e}"),
+    }
 
     loop {
         // Select whichever broadcast fires first

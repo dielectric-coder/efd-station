@@ -3,8 +3,8 @@ pub mod radio;
 pub mod upstream;
 pub mod wire;
 
-pub use downstream::{AudioChunk, ErrorMsg, FftBins, RadioState};
-pub use radio::{AgcMode, Mode, Vfo};
+pub use downstream::{AudioChunk, Capabilities, ErrorMsg, FftBins, RadioState};
+pub use radio::{AgcMode, Mode, SourceKind, Vfo};
 pub use upstream::{AudioSource, CatCommand, Ptt, TxAudio};
 pub use wire::{ClientMsg, ServerMsg};
 
@@ -54,6 +54,7 @@ mod tests {
             att: false,
             lp: true,
             agc: AgcMode::Slow,
+            agc_threshold: 50,
             nr: false,
             nb: false,
             s_meter_db: -73.0,
@@ -97,6 +98,18 @@ mod tests {
     }
 
     #[test]
+    fn capabilities_round_trip() {
+        let orig = Capabilities {
+            source: SourceKind::FdmDuo,
+            has_iq: true,
+            has_tx: true,
+            has_hardware_cat: true,
+            supported_demod_modes: vec![Mode::USB, Mode::LSB, Mode::CW, Mode::AM, Mode::FM],
+        };
+        assert_eq!(orig, round_trip(&orig));
+    }
+
+    #[test]
     fn server_msg_round_trip() {
         let msgs = vec![
             ServerMsg::FftBins(FftBins {
@@ -118,6 +131,7 @@ mod tests {
                 att: true,
                 lp: false,
                 agc: AgcMode::Fast,
+                agc_threshold: 100,
                 nr: true,
                 nb: true,
                 s_meter_db: -60.0,

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use efd_proto::{AudioChunk, AudioSource, CatCommand, FftBins, RadioState, TxAudio};
+use efd_proto::{AudioChunk, AudioSource, Capabilities, CatCommand, FftBins, RadioState, TxAudio};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -27,6 +27,9 @@ pub struct Pipeline {
     /// Audio source selection: SoftwareDemod or RadioUsb.
     pub audio_source_tx: watch::Sender<AudioSource>,
 
+    /// What the active source supports; sent to every client on connect.
+    pub capabilities: Capabilities,
+
     pub(crate) cancel: CancellationToken,
     tasks: Vec<(&'static str, JoinHandle<()>)>,
 }
@@ -50,16 +53,22 @@ impl Pipeline {
 
         let mut tasks: Vec<(&'static str, JoinHandle<()>)> = Vec::new();
 
-        // --- IQ capture task ---
+        // --- Source backend + capabilities ---
+        // Only FDM-DUO is wired up today; wiring other backends is a matter
+        // of implementing their capture task in efd-iq and choosing the
+        // variant here from config.
+        let source_cfg = efd_iq::SourceConfig::FdmDuo(efd_iq::FdmDuoConfig {
+            vendor_id: config.usb.vendor_id,
+            product_id: config.usb.product_id,
+        });
+        let source_caps = source_cfg.capabilities();
+
+        // --- IQ capture task (skipped when the source has no IQ) ---
         let (iq_center_tx, iq_center_rx) = tokio::sync::watch::channel(0u64);
-        {
-            let iq_cfg = efd_iq::IqConfig {
-                vendor_id: config.usb.vendor_id,
-                product_id: config.usb.product_id,
-            };
+        if source_caps.has_iq {
             let tx = iq_tx.clone();
             let c = cancel.clone();
-            let handle = efd_iq::spawn_iq_capture(iq_cfg, tx, iq_center_tx, c);
+            let handle = efd_iq::spawn_source(source_cfg.clone(), tx, iq_center_tx, c);
             let handle = tokio::spawn(async move {
                 match handle.await {
                     Ok(Ok(())) => info!("IQ capture exited cleanly"),
@@ -277,6 +286,14 @@ impl Pipeline {
 
         info!(tasks = tasks.len(), "pipeline started");
 
+        let capabilities = Capabilities {
+            source: source_caps.kind,
+            has_iq: source_caps.has_iq,
+            has_tx: source_caps.has_tx,
+            has_hardware_cat: source_caps.has_hardware_cat,
+            supported_demod_modes: source_caps.supported_demod_modes,
+        };
+
         Self {
             fft_tx,
             state_tx,
@@ -285,6 +302,7 @@ impl Pipeline {
             tx_audio_tx,
             demod_mode_tx,
             audio_source_tx,
+            capabilities,
             cancel,
             tasks,
         }

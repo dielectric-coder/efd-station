@@ -25,3 +25,13 @@ pub enum AgcMode {
     Medium,
     Fast,
 }
+
+/// Identifier for the active RF source backing this connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+pub enum SourceKind {
+    FdmDuo,
+    HackRf,
+    RspDx,
+    RtlSdr,
+    PortableRadio,
+}

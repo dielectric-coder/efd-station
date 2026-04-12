@@ -6,49 +6,49 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use crate::backend::{FdmDuoConfig, SourceConfig};
 use crate::device::{convert_samples, FdmDuo, USB_BUFFER_SIZE};
 use crate::error::IqError;
 use crate::IqBlock;
 
-/// Configuration for the IQ capture task.
-#[derive(Debug, Clone)]
-pub struct IqConfig {
-    /// USB vendor ID (default: 0x1721).
-    pub vendor_id: u16,
-    /// USB product ID (default: 0x061a).
-    pub product_id: u16,
-}
-
-impl Default for IqConfig {
-    fn default() -> Self {
-        Self {
-            vendor_id: crate::device::ELAD_VENDOR_ID,
-            product_id: crate::device::ELAD_PRODUCT_ID,
-        }
-    }
-}
-
-/// Spawn a blocking task that opens the FDM-DUO, streams IQ data, and
-/// publishes `Arc<IqBlock>` on the broadcast channel.
+/// Spawn the IQ capture task for the configured source. Dispatches to the
+/// per-backend implementation. Returns a JoinHandle that resolves when the
+/// task exits. For sources that provide no IQ (portable-radio) or backends
+/// that aren't implemented yet, the handle resolves immediately with an
+/// error — the caller is expected to have checked `capabilities().has_iq`
+/// before calling.
 ///
-/// Also publishes the FPGA center frequency (LO) via `center_freq_tx`.
-/// The task runs until `cancel` is triggered or a fatal USB error occurs.
-pub fn spawn_iq_capture(
-    config: IqConfig,
+/// Publishes the LO center frequency via `center_freq_tx`. For backends
+/// where the LO is fixed or set elsewhere, `center_freq_tx` may remain at
+/// its initial value.
+pub fn spawn_source(
+    cfg: SourceConfig,
     tx: broadcast::Sender<Arc<IqBlock>>,
     center_freq_tx: watch::Sender<u64>,
     cancel: CancellationToken,
 ) -> JoinHandle<Result<(), IqError>> {
-    tokio::task::spawn_blocking(move || run_capture(config, tx, center_freq_tx, cancel))
+    match cfg {
+        SourceConfig::FdmDuo(c) => {
+            tokio::task::spawn_blocking(move || run_fdmduo(c, tx, center_freq_tx, cancel))
+        }
+        SourceConfig::PortableRadio(_) => {
+            let kind = efd_proto::SourceKind::PortableRadio;
+            tokio::spawn(async move { Err(IqError::SourceHasNoIq(kind)) })
+        }
+        other => {
+            let kind = other.kind();
+            tokio::spawn(async move { Err(IqError::BackendNotImplemented(kind)) })
+        }
+    }
 }
 
-fn run_capture(
-    config: IqConfig,
+fn run_fdmduo(
+    cfg: FdmDuoConfig,
     tx: broadcast::Sender<Arc<IqBlock>>,
     center_freq_tx: watch::Sender<u64>,
     cancel: CancellationToken,
 ) -> Result<(), IqError> {
-    let dev = FdmDuo::open_with_ids(config.vendor_id, config.product_id)?;
+    let dev = FdmDuo::open_with_ids(cfg.vendor_id, cfg.product_id)?;
     dev.start_streaming()?;
 
     // Read initial FPGA center frequency

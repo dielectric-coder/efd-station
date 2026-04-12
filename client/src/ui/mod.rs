@@ -6,15 +6,17 @@ pub mod waterfall;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
 
-/// Available zoom levels.
-pub const ZOOM_LEVELS: &[i32] = &[1, 2, 4, 6, 8, 10];
+/// Zoom range (inclusive) and step, stored internally as tenths.
+const ZOOM_MIN_TENTHS: i32 = 10; // 1.0x
+const ZOOM_MAX_TENTHS: i32 = 40; // 4.0x
+const ZOOM_STEP_TENTHS: i32 = 5; // 0.5x
 
 /// Shared display range for spectrum and waterfall.
 #[derive(Clone)]
 pub struct DisplayRange {
     ref_level: Arc<AtomicI32>, // top dBm
     range: Arc<AtomicI32>,     // dB span (positive)
-    zoom: Arc<AtomicI32>,      // zoom factor (1, 2, 4, 6, 8, 10)
+    zoom: Arc<AtomicI32>,      // zoom factor in tenths (10..=40, step 5)
     pan: Arc<AtomicI32>,       // pan offset in milli-fractions (-500 to 500)
 }
 
@@ -23,7 +25,7 @@ impl DisplayRange {
         Self {
             ref_level: Arc::new(AtomicI32::new(ref_level)),
             range: Arc::new(AtomicI32::new(range)),
-            zoom: Arc::new(AtomicI32::new(1)),
+            zoom: Arc::new(AtomicI32::new(ZOOM_MIN_TENTHS)),
             pan: Arc::new(AtomicI32::new(0)),
         }
     }
@@ -52,12 +54,17 @@ impl DisplayRange {
         self.range.store(v, Ordering::Relaxed);
     }
 
-    pub fn zoom(&self) -> i32 {
-        self.zoom.load(Ordering::Relaxed)
+    pub fn zoom(&self) -> f64 {
+        self.zoom.load(Ordering::Relaxed) as f64 / 10.0
     }
 
-    pub fn set_zoom(&self, z: i32) {
-        self.zoom.store(z, Ordering::Relaxed);
+    pub fn set_zoom(&self, z: f64) {
+        let tenths = ((z * 10.0).round() as i32).clamp(ZOOM_MIN_TENTHS, ZOOM_MAX_TENTHS);
+        // Snap to ZOOM_STEP_TENTHS grid (anchored at ZOOM_MIN_TENTHS).
+        let snapped = ZOOM_MIN_TENTHS
+            + ((tenths - ZOOM_MIN_TENTHS + ZOOM_STEP_TENTHS / 2) / ZOOM_STEP_TENTHS)
+                * ZOOM_STEP_TENTHS;
+        self.zoom.store(snapped, Ordering::Relaxed);
         self.clamp_pan();
     }
 
@@ -80,7 +87,7 @@ impl DisplayRange {
     /// Visible x-range in [0,1] normalized coordinates.
     /// Returns (start, end) where the full span is [0, 1].
     pub fn visible_range(&self) -> (f64, f64) {
-        let z = self.zoom() as f64;
+        let z = self.zoom();
         let half = 0.5 / z;
         let center = 0.5 + self.pan_frac();
         let lo = (center - half).clamp(0.0, 1.0);
@@ -89,7 +96,7 @@ impl DisplayRange {
     }
 
     fn clamp_pan(&self) {
-        let z = self.zoom() as f64;
+        let z = self.zoom();
         let half = 0.5 / z;
         let max_pan = 0.5 - half;
         let cur = self.pan_frac();
@@ -99,29 +106,22 @@ impl DisplayRange {
         }
     }
 
-    /// Cycle to next zoom level. Returns the new zoom.
-    pub fn zoom_in(&self) -> i32 {
-        let cur = self.zoom();
-        let next = ZOOM_LEVELS
-            .iter()
-            .find(|&&z| z > cur)
-            .copied()
-            .unwrap_or(cur);
-        self.set_zoom(next);
-        next
+    /// Step zoom up by ZOOM_STEP. Returns the new zoom.
+    pub fn zoom_in(&self) -> f64 {
+        let cur = self.zoom.load(Ordering::Relaxed);
+        let next = (cur + ZOOM_STEP_TENTHS).min(ZOOM_MAX_TENTHS);
+        self.zoom.store(next, Ordering::Relaxed);
+        self.clamp_pan();
+        next as f64 / 10.0
     }
 
-    /// Cycle to previous zoom level. Returns the new zoom.
-    pub fn zoom_out(&self) -> i32 {
-        let cur = self.zoom();
-        let prev = ZOOM_LEVELS
-            .iter()
-            .rev()
-            .find(|&&z| z < cur)
-            .copied()
-            .unwrap_or(cur);
-        self.set_zoom(prev);
-        prev
+    /// Step zoom down by ZOOM_STEP. Returns the new zoom.
+    pub fn zoom_out(&self) -> f64 {
+        let cur = self.zoom.load(Ordering::Relaxed);
+        let prev = (cur - ZOOM_STEP_TENTHS).max(ZOOM_MIN_TENTHS);
+        self.zoom.store(prev, Ordering::Relaxed);
+        self.clamp_pan();
+        prev as f64 / 10.0
     }
 }
 

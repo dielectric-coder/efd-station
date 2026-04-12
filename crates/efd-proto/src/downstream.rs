@@ -1,7 +1,7 @@
 use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
-use crate::radio::{AgcMode, Mode, Vfo};
+use crate::radio::{AgcMode, Mode, SourceKind, Vfo};
 
 /// FFT magnitude bins — server computes, client renders spectrum + waterfall.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Encode, Decode)]
@@ -45,4 +45,15 @@ pub struct RadioState {
 pub struct ErrorMsg {
     pub code: u16,
     pub message: String,
+}
+
+/// What the active source supports. Sent on WS connect and any time the
+/// active source changes. Clients gate UI based on these flags.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Encode, Decode)]
+pub struct Capabilities {
+    pub source: SourceKind,
+    pub has_iq: bool,
+    pub has_tx: bool,
+    pub has_hardware_cat: bool,
+    pub supported_demod_modes: Vec<Mode>,
 }

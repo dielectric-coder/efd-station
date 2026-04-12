@@ -443,9 +443,9 @@ impl Spectrum {
         zoom_label_widget.add_css_class("monospace");
         zoom_box.append(&zoom_label_widget);
 
-        let zoom_value = Label::new(Some("1x"));
+        let zoom_value = Label::new(Some("1.0x"));
         zoom_value.add_css_class("monospace");
-        zoom_value.set_width_chars(3);
+        zoom_value.set_width_chars(4);
 
         let zoom_out_btn = Button::with_label("\u{2212}");
         zoom_out_btn.set_valign(Align::Center);
@@ -453,7 +453,7 @@ impl Spectrum {
         let zv = zoom_value.clone();
         zoom_out_btn.connect_clicked(move |_| {
             let z = dr.zoom_out();
-            zv.set_text(&format!("{z}x"));
+            zv.set_text(&format!("{z:.1}x"));
         });
         zoom_box.append(&zoom_out_btn);
 
@@ -465,7 +465,7 @@ impl Spectrum {
         let zv = zoom_value.clone();
         zoom_in_btn.connect_clicked(move |_| {
             let z = dr.zoom_in();
-            zv.set_text(&format!("{z}x"));
+            zv.set_text(&format!("{z:.1}x"));
         });
         zoom_box.append(&zoom_in_btn);
 
@@ -473,7 +473,7 @@ impl Spectrum {
         pan_left_btn.set_valign(Align::Center);
         let dr = display_range.clone();
         pan_left_btn.connect_clicked(move |_| {
-            let z = dr.zoom() as f64;
+            let z = dr.zoom();
             dr.pan_by(-0.1 / z);
         });
         zoom_box.append(&pan_left_btn);
@@ -482,7 +482,7 @@ impl Spectrum {
         pan_right_btn.set_valign(Align::Center);
         let dr = display_range.clone();
         pan_right_btn.connect_clicked(move |_| {
-            let z = dr.zoom() as f64;
+            let z = dr.zoom();
             dr.pan_by(0.1 / z);
         });
         zoom_box.append(&pan_right_btn);

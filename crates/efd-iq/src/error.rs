@@ -1,3 +1,4 @@
+use efd_proto::SourceKind;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -16,4 +17,10 @@ pub enum IqError {
 
     #[error("broadcast channel closed")]
     ChannelClosed,
+
+    #[error("backend not implemented: {0:?}")]
+    BackendNotImplemented(SourceKind),
+
+    #[error("source {0:?} does not provide IQ")]
+    SourceHasNoIq(SourceKind),
 }
