@@ -38,7 +38,7 @@ use crate::filter::FirDecimator;
 /// Hard cap on how long any individual `pactl` / `pacat` / `parec` /
 /// `dream` subprocess setup step may block. If PipeWire is hung we want
 /// the whole bridge to fail loudly rather than wedge mode-switching.
-pub(crate) const SUBPROC_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+const SUBPROC_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Configuration for the DRM bridge.
 #[derive(Debug, Clone)]
@@ -414,7 +414,7 @@ async fn run_bridge(
 
 /// Helpers on the proto `DrmStatus` that live here because they're only
 /// used by the parser.
-pub(crate) trait DrmStatusExt {
+trait DrmStatusExt {
     fn empty() -> DrmStatus;
 }
 impl DrmStatusExt for DrmStatus {
@@ -447,7 +447,7 @@ impl DrmStatusExt for DrmStatus {
 }
 
 /// Strip ANSI CSI escape sequences (ESC [ params letter) from a string.
-pub(crate) fn strip_ansi(s: &str) -> String {
+fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -500,7 +500,7 @@ fn flag_ok(after_colon: &str) -> bool {
 /// Feed one line of stripped TUI text into the accumulator. Returns true
 /// when the line completes a frame (i.e., it's the final "Received time -
 /// date:" line), signaling the caller to publish and reset.
-pub(crate) fn parse_tui_line(line: &str, acc: &mut DrmStatus) -> bool {
+fn parse_tui_line(line: &str, acc: &mut DrmStatus) -> bool {
     let t = line.trim_start();
 
     // Status flags line: "IO:O  Time:O  Frame:O  FAC:O  SDC:O  MSC:O"
@@ -622,13 +622,13 @@ fn f32_to_s16(v: f32) -> i16 {
 }
 
 /// RAII guard for the two PipeWire null sinks.
-pub(crate) struct NullSinks {
+struct NullSinks {
     in_module: u32,
     out_module: u32,
 }
 
 impl NullSinks {
-    pub(crate) async fn create(in_name: &str, out_name: &str, rate: u32) -> Result<Self, DspError> {
+    async fn create(in_name: &str, out_name: &str, rate: u32) -> Result<Self, DspError> {
         let in_module = pactl_load_null_sink(in_name, rate).await?;
         let out_module = match pactl_load_null_sink(out_name, rate).await {
             Ok(idx) => idx,
@@ -719,7 +719,7 @@ async fn pactl_unload_module(idx: u32) -> Result<(), DspError> {
 /// `tokio::time::timeout` lets us bound the *whole* subprocess-setup phase
 /// — including the time we spend waiting on PipeWire tooling — and bail
 /// out cleanly instead of hanging the bridge.
-pub(crate) async fn spawn_with_timeout<F>(name: &'static str, f: F) -> Result<Child, DspError>
+async fn spawn_with_timeout<F>(name: &'static str, f: F) -> Result<Child, DspError>
 where
     F: FnOnce() -> std::io::Result<Child>,
 {
