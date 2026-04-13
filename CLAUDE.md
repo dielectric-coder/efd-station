@@ -141,14 +141,18 @@ Organized as **three tiers** plus an orthogonal FFT producer. Tiers 1 and 2 are 
 - Intra-tier mode switches (USB → AM → CW…) reconfigure the existing task — no teardown, no channel re-plumbing. Cheap.
 - Publishes to the shared `broadcast<AudioSamples>` consumed by ALSA, WS, and Tier 3.
 
-**Tier 2 — IQ-domain codecs (`codec/`)**
+**Tier 2 — codecs (`codec/`)**
 Each is its own subsystem with a full spawn/teardown lifecycle. Switching *into* or *out of* Tier 2 (e.g. USB → DRM, DRM → FreeDV) fully tears down the previous producer.
-- `codec/drm.rs` — bridges `broadcast<IqBlock>` to the DREAM subprocess via PipeWire null sinks:
-  - Decimates IQ to 48 kHz, packs as interleaved s16 L=I / R=Q, writes to `drm_in` sink
-  - Spawns DREAM: `-I drm_in.monitor -O drm_out -c 6 --sigsrate 48000`
-  - Reads decoded stereo PCM from `drm_out.monitor`, publishes to the shared `broadcast<AudioSamples>`
+- `codec/drm.rs` — bridges a **wideband SSB audio-IF stream** (produced by a dedicated Tier-1 demod configuration, see below) into the DREAM subprocess via PipeWire null sinks:
+  - Writes mono s16 audio-IF samples to the `drm_in` sink at 48 kHz
+  - Spawns DREAM in audio-IF mode (no `-c 6`): `-I drm_in.monitor -O drm_out --sigsrate 48000 --audsrate 48000`
+  - Reads decoded PCM from `drm_out.monitor`, publishes to the shared `broadcast<AudioSamples>`
   - Active only when current `Mode` is `DRM`; torn down on mode change
+  - **Does not consume raw IQ directly** — it expects a real-valued audio-IF signal, matching the format DREAM's own FLAC samples use. The Tier-1 demod does the IQ → audio-IF conversion; this keeps DREAM on the path it was designed for (sound-card I/O) instead of the less-tested `-c 6` I/Q mode.
 - `codec/freedv.rs` — FreeDV codec, same output fan-out. Implementation detail (in-process vs. DREAM-style subprocess bridge) is left open; the PipeWire null-sink pattern from `drm.rs` is available as a template if needed.
+
+**DRM-specific Tier-1 configuration**
+DRM is special among modes in that its Tier-1 demod does *not* produce listenable audio — it produces a 10 kHz-wide audio-IF stream (−5 kHz LSB + 5 kHz USB, optionally shifted up so the DRM block sits at ~12 kHz audio IF) that is consumed by Tier-2 `codec/drm.rs`. Tier-1 logic switches to this wideband-SSB configuration whenever `Mode::Drm` is selected, then back to normal passband widths for other modes.
 
 **Tier 3 — Audio-domain decoders (`decoder/`)**
 - Consume `broadcast<AudioSamples>` regardless of origin (Tier 1, Tier 2, *or* the MON/portable audio-in path from `efd-audio`).
@@ -221,18 +225,26 @@ Exact port numbers and defaults TBD in config.
         └─ broadcast<IqBlock>
                ├──→ [fft::iq / efd-dsp]              → FftBins → [WS downstream] → clients
                │
-               ├──→ [demod (Tier 1) / efd-dsp]       → broadcast<AudioSamples>
-               │        AM/SAM/USB/LSB/CW±/NFM/WFM — one task, mode param
-               │
-               └──→ [codec (Tier 2) / efd-dsp]       → broadcast<AudioSamples>
-                        codec::drm ─→ PipeWire null-sink(drm_in)
+               └──→ [demod (Tier 1) / efd-dsp]
+                        AM/SAM/USB/LSB/CW±/NFM/WFM  → broadcast<AudioSamples>   (listenable audio)
+                        DRM (wideband SSB, 10 kHz)  → audio-IF stream to codec::drm
+
+               Tier-1 DRM config: LSB(-5..0 kHz) + USB(0..+5 kHz), real-valued audio-IF
+               shifted so DRM block sits at ~12 kHz audio IF (matches DREAM's FLAC sample
+               format). Consumed directly by Tier-2 codec::drm, not the shared broadcast.
+
+               [codec (Tier 2) / efd-dsp]            → broadcast<AudioSamples>
+                        codec::drm ─→ PipeWire null-sink(drm_in)  ← 48 kHz mono s16 audio-IF
                                        │
-                                  dream -I drm_in.monitor -O drm_out -c 6 --sigsrate 48000
+                                  dream -I drm_in.monitor -O drm_out \
+                                        --sigsrate 48000 --audsrate 48000
                                        │
                                   PipeWire null-sink(drm_out).monitor ─→ shared AudioSamples
                         codec::freedv ─→ (in-process or subprocess bridge — TBD)
 
-  (Tiers 1 and 2 are mutually exclusive — exactly one producing AudioSamples at a time)
+  (Tiers 1 and 2 are mutually exclusive as producers of listenable audio — only one writes
+   to the shared broadcast<AudioSamples> at a time. Under DRM, Tier-1 runs only to feed
+   Tier-2; Tier-1's output does not go to the shared broadcast.)
 
   broadcast<AudioSamples>
          ├──→ [ALSA / efd-audio] → HAT/dongle → amp
@@ -282,7 +294,7 @@ Channel type summary:
 - **Vendor SDR libraries**: `libhackrf`, `SDRplay API`, `librtlsdr` — linked in per the active device.
 - **ALSA**: HAT and/or USB-dongle audio output.
 - **PipeWire**: present on the CM5 (Trixie ships it) — used for the two virtual null sinks that bridge the `efd-dsp` DRM task to the DREAM subprocess. Also required on *client* machines for the virtual audio device that feeds digital-mode apps.
-- **DREAM (2.1.1 console build)**: DRM decoder subprocess. Vendored under `third_party/dream/` because the in-distro `dream-drm` (2.2) has known decoding regressions and the build needs `qmake CONFIG+=console` plus a one-line `rig_model_t` cast patch to compile against modern hamlib. The subprocess reads IQ from one PipeWire null sink and writes decoded audio to another; the Rust pipeline feeds/consumes the monitors.
+- **DREAM (2.1.1 console build)**: DRM decoder subprocess. Vendored under `third_party/dream/` because the in-distro `dream-drm` (2.2) has known decoding regressions and the build needs `qmake CONFIG+=console` plus a one-line `rig_model_t` cast patch to compile against modern hamlib. The subprocess reads a mono real-valued audio-IF stream from one PipeWire null sink and writes decoded audio to another; the Rust pipeline feeds a wideband-SSB-demodulated IF signal in, and consumes decoded audio from the output monitor.
 - **FreeDV**: codec, runs on CM5. Same audio path as DREAM (virtual sink bridge pattern is the template).
 
 ---
@@ -294,7 +306,7 @@ Channel type summary:
 | IQ over network | No. CM5 runs FFT, sends only magnitude bins to clients. |
 | Audio codec (network) | Opus wideband, 48 kHz (not VoIP 8 kHz profile) |
 | IQ backend abstraction | `IqSource` trait in `efd-iq` with one driver per device under `drivers/*`, each behind a cargo feature flag. Vendor-native (no SoapySDR for now); adding a new SDR = one new file + one feature + one factory arm. |
-| DSP organization | Three tiers in `efd-dsp`: (1) analog IQ demod — one task, mode param (AM/SAM/USB/LSB/CW±/NFM/WFM); (2) IQ-domain codecs — DRM, FreeDV, each its own subsystem; (3) audio-domain decoders — RTTY/PSK/WSPR/FT8/APRS/CW/WEFAX, N in parallel off `AudioSamples`. Tiers 1 & 2 mutually exclusive; Tier 3 always-on and mode-agnostic. FFT is orthogonal to all three. |
+| DSP organization | Three tiers in `efd-dsp`: (1) analog IQ demod — one task, mode param (AM/SAM/USB/LSB/CW±/NFM/WFM plus a wideband-SSB DRM config that feeds Tier-2 instead of emitting listenable audio); (2) codecs — DRM, FreeDV, each its own subsystem; DRM consumes Tier-1's wideband-SSB audio-IF, not raw IQ; (3) audio-domain decoders — RTTY/PSK/WSPR/FT8/APRS/CW/WEFAX, N in parallel off `AudioSamples`. Tiers 1 & 2 never both write to the shared AudioSamples at once; Tier 3 always-on and mode-agnostic. FFT is orthogonal to all three. |
 | Hardware CAT | `efd-cat` owns FDM-DUO USB serial directly. hamlib `rigctld` is not used — we speak full native CAT instead of hamlib's subset (FDM-DUO is the only source with hardware CAT, so coverage matters more than ecosystem compat at the wire level). |
 | External-app CAT access | Hand-rolled rigctld-compatible responder in `efd-cat`, one codebase serving two bound ports with different backends: port A translates rigctld → native CAT for the FDM-DUO; port B fronts the software demod. Grown on demand as WSJT-X/FLDIGI/etc. require commands. |
 | Two-responder model | When FDM-DUO is in SDR mode, both ports bind. Client sees one logical radio via merged RadioState + capability flags indicating hardware vs software. |
@@ -302,9 +314,9 @@ Channel type summary:
 | Audio-domain decoders | WEFAX/RTTY/CW/PSK operate on `AudioSamples` regardless of origin (IQ demod, FDM-DUO audio passthrough, or analog audio via dongle). |
 | TX scope | RX-first. TX supported only on FDM-DUO and HackRF. Other configs advertise `has_tx=false`. |
 | TX audio source | From client over WebSocket (mic, WSJT-X, FLDIGI, FreeDV via PipeWire). |
-| Audio fan-out | In-process tokio broadcast channels for everything except DRM. PipeWire null sinks bridge IQ↔DREAM and DREAM audio↔pipeline; everything else stays in-process. |
-| DRM decoder | Vendored DREAM 2.1.1 (`third_party/dream/`) built console-only with a hamlib cast patch. Spawned as a subprocess on DRM mode selection; IQ fed via PipeWire null sink (`drm_in`) at 48 kHz stereo L=I R=Q (`-c 6`, I/Q zero IF); decoded audio read from the monitor of a second null sink (`drm_out`). DREAM stays unpatched beyond the hamlib fix. |
-| DRM-in-MON | Not supported — the radio's built-in AM demod destroys the OFDM signal. DRM requires SDR mode so the raw IQ reaches DREAM. |
+| Audio fan-out | In-process tokio broadcast channels for everything except DRM. PipeWire null sinks bridge the wideband-SSB audio-IF into DREAM and DREAM's decoded audio back into the pipeline; everything else stays in-process. |
+| DRM decoder | Vendored DREAM 2.1.1 (`third_party/dream/`) built console-only with a hamlib cast patch. Spawned as a subprocess on DRM mode selection. Input: a 48 kHz mono real-valued audio-IF stream (10 kHz wide, DRM block positioned at ~12 kHz audio IF — matches DREAM's FLAC sample format) fed via PipeWire null sink `drm_in`; DREAM launched in audio-IF mode (no `-c 6`): `-I drm_in.monitor -O drm_out --sigsrate 48000 --audsrate 48000`. Decoded audio read from `drm_out.monitor`. The audio-IF stream comes from a Tier-1 wideband-SSB demod config, not from raw IQ — keeps DREAM on the sound-card I/O path it was designed for instead of the less-tested `-c 6` I/Q mode. DREAM stays unpatched beyond the hamlib fix. |
+| DRM-in-MON | Not supported — the radio's built-in AM demod has a narrow passband that destroys the 10 kHz OFDM block. DRM requires SDR mode so the wideband SSB demod can deliver the full 10 kHz audio-IF to DREAM. |
 | Audio output hardware | HAT *or* USB dongle — exactly one per config. |
 | GPIO scope | Status indicators + reset/lock only. No tuning/CAT control via GPIO. Future use. |
 | Language / framework | Rust, Axum, tokio async runtime. |

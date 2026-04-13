@@ -191,7 +191,7 @@ receiver.
 | AM | SDR or MON | Envelope detect |
 | NFM | SDR or MON | FM discriminator |
 | CW / CWR | SDR or MON | Tone-shifted SSB |
-| DRM | **SDR only** | OFDM decode via vendored DREAM — MON's AM path destroys the signal |
+| DRM | **SDR only** | Wideband-SSB demod → vendored DREAM (audio-IF mode) — MON's narrow AM path destroys the 10 kHz OFDM block |
 | FreeDV | SDR (planned) | Digital-voice codec |
 
 ---
@@ -199,8 +199,12 @@ receiver.
 ## 7. DRM specifics
 
 DRM (Digital Radio Mondiale) is the band's OFDM digital-broadcast standard.
-efd-station decodes it by bridging the raw IQ stream to a vendored **DREAM
-2.1.1** subprocess via two PipeWire null sinks.
+efd-station decodes it by running a **wideband SSB demod** (10 kHz pass,
+−5 kHz LSB to +5 kHz USB, real-valued audio-IF output with the DRM block
+positioned around 12 kHz audio IF) and feeding that audio-IF stream into a
+vendored **DREAM 2.1.1** subprocess via two PipeWire null sinks. DREAM
+runs in its sound-card audio-IF mode — the same path used when feeding
+DREAM's bundled FLAC samples manually with `paplay | dream`.
 
 Requirements on the CM5:
 
@@ -208,19 +212,13 @@ Requirements on the CM5:
 - The efd-server service runs under a user that has a working PipeWire
   session. See §2 for how that's enforced.
 - Mode set to `DRM`. The mode must be SDR — MON-mode DRM isn't supported
-  because the radio's built-in AM demod destroys the OFDM signal before it
-  reaches DREAM.
+  because the radio's built-in AM demod has a narrow passband that
+  destroys the 10 kHz OFDM block before it reaches DREAM.
 - Tune to a live DRM broadcast. Known quiet periods (overnight, off-season
   frequencies) will show strong spectrum but no decode.
 
 When DREAM locks, the DisplayBar rows populate — FAC/SDC/MSC go from `✗` to
 `O`, and you'll see SNR / WMER / IF Level numbers.
-
-**Known limitation (April 2026):** the DRM task decimates the raw IQ
-without a frequency-offset correction. If the FDM-DUO's FPGA LO center is
-not at the DRM carrier (it can sit at an independent frequency), DREAM sees
-the OFDM signal at an offset and fails to lock even with good SNR. A fix
-using an NCO mixer is planned.
 
 ---
 
@@ -242,8 +240,9 @@ using an NCO mixer is planned.
 ### DRM stays `FAC:✗ SDC:✗ MSC:✗` despite a clean-looking signal
 
 Either the signal isn't actually a DRM broadcast (common during off-air
-periods on many frequencies), or the FPGA-LO-versus-broadcast-carrier
-offset is outside DREAM's capture range. See §7 "Known limitation".
+periods on many frequencies), or the tuning is off — the wideband-SSB
+demod pass needs the radio's center frequency within a few kHz of the
+DRM carrier, so re-check your VFO setting against the known DRM channel.
 
 ### Client shows "connection refused"
 

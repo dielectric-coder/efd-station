@@ -22,8 +22,8 @@ Work in progress. The architecture is settled (see `CLAUDE.md`); crates are land
   - **MON** — FDM-DUO as a conventional receiver; audio from the radio, CAT reports hardware state.
   - **SDR** — any supported source feeds IQ into the software demod; the demod fronts as a radio via a rigctld-compatible endpoint.
 - **Three-tier DSP**
-  1. Analog IQ demod — one task, mode param (AM / SAM / USB / LSB / CW± / NFM / WFM).
-  2. IQ-domain codecs — DRM (vendored DREAM 2.1.1 subprocess bridged via PipeWire null sinks), FreeDV.
+  1. Analog IQ demod — one task, mode param (AM / SAM / USB / LSB / CW± / NFM / WFM, plus a wideband-SSB configuration that produces a 10 kHz audio-IF stream for DRM instead of listenable audio).
+  2. Codecs — DRM (vendored DREAM 2.1.1 subprocess; Tier-1's wideband-SSB audio-IF is bridged into DREAM via PipeWire null sinks), FreeDV.
   3. Audio-domain decoders — CW / RTTY / PSK / WSPR / FT8 / APRS / WEFAX, N in parallel, mode-agnostic, works in MON and portable configs too.
 - **Hand-rolled rigctld responder** inside `efd-cat` — external apps (WSJT-X, FLDIGI, digital-mode tooling) connect to our TCP endpoint instead of fighting for the FDM-DUO USB serial port. hamlib's `rigctld` is not used on the CM5; we speak the FDM-DUO's full native CAT.
 - **Standalone or remote** — CM5 + HAT sound card + amp works as a tabletop radio with no network client; any number of GTK4 clients can also be connected simultaneously.
@@ -48,7 +48,7 @@ Single Cargo workspace:
 |--------------|---------|
 | `efd-proto`  | Shared WS message types (bincode). Breaking changes fail both binaries at compile time. |
 | `efd-iq`     | Multi-backend IQ capture. Trait + per-device drivers (`fdm_duo`, `hackrf`, `rspdx`, `rtl`), feature-gated. |
-| `efd-dsp`    | FFT (FFTW3 + volk), Tier-1 analog demod, Tier-2 IQ codecs (DRM, FreeDV), Tier-3 audio decoders. |
+| `efd-dsp`    | FFT (FFTW3 + volk), Tier-1 analog demod (incl. wideband-SSB DRM feed), Tier-2 codecs (DRM, FreeDV), Tier-3 audio decoders. |
 | `efd-audio`  | ALSA HAT/USB output, analog audio-in for MON/portable, USB audio TX. |
 | `efd-cat`    | Direct USB serial CAT to FDM-DUO + rigctld-compatible TCP responder (two bindable ports: hardware front, demod front). |
 | `server`     | Axum HTTP/WebSocket server, tokio pipeline, MON/SDR state machine. |
