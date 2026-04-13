@@ -448,6 +448,184 @@ impl Pipeline {
         }
     }
 
+    /// Minimal pipeline for the DRM file-playback test.
+    ///
+    /// Skips IQ capture / FFT / demod / CAT / rigctld / USB audio entirely.
+    /// A file-source task reads a mono audio-IF WAV or FLAC and publishes
+    /// `AudioBlock`s to the same `drm_if_tx` broadcast the demod normally
+    /// writes under Mode::DRM, so the real `efd-dsp::drm` bridge +
+    /// encode_audio_mux + WS downstream chain runs unchanged.
+    ///
+    /// A small synth task emits a fixed RadioState (mode=DRM, 10 kHz BW)
+    /// on `state_tx` every 500 ms so the client UI gates its DRM display
+    /// rows on (otherwise the screen looks blank).
+    ///
+    /// When the file source reaches EOF it fires the pipeline cancel
+    /// token; main.rs's shutdown path then winds down axum + pipeline.
+    pub fn start_drm_file_test(
+        config: &Config,
+        file_path: std::path::PathBuf,
+        cancel: CancellationToken,
+    ) -> Self {
+        // Same channel set as the real pipeline — WS handlers don't know
+        // (or need to know) which variant they're wired to.
+        let (fft_tx, _) = broadcast::channel::<Arc<FftBins>>(8);
+        let (state_tx, _) = broadcast::channel::<RadioState>(16);
+        let (audio_tx, _) = broadcast::channel::<AudioChunk>(32);
+        let (cat_tx, mut cat_rx) = mpsc::channel::<CatCommand>(64);
+        let (tx_audio_tx, mut tx_audio_rx) = mpsc::channel::<TxAudio>(64);
+        let (demod_audio_tx, demod_audio_rx) = mpsc::channel::<efd_dsp::AudioBlock>(64);
+        let (usb_rx_tx, usb_rx_rx) = mpsc::channel::<efd_audio::PcmBlock>(64);
+        drop(usb_rx_tx); // no USB audio producer in file-test mode
+        let (drm_if_tx, _drm_if_rx) =
+            broadcast::channel::<efd_dsp::AudioBlock>(16);
+        let (drm_status_tx, drm_status_rx) =
+            watch::channel::<Option<efd_proto::DrmStatus>>(None);
+        let (demod_mode_tx, _demod_mode_rx_unused) =
+            watch::channel::<Option<efd_proto::Mode>>(Some(efd_proto::Mode::DRM));
+        let (audio_source_tx, audio_source_rx) =
+            watch::channel(AudioSource::SoftwareDemod);
+
+        let mut tasks: Vec<(&'static str, JoinHandle<()>)> = Vec::new();
+
+        // Drain the unused upstream channels so senders held by WS handlers
+        // don't stall when clients send CAT / TX audio we ignore here.
+        {
+            let c = cancel.clone();
+            tasks.push((
+                "drain_upstream",
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            biased;
+                            _ = c.cancelled() => break,
+                            _ = cat_rx.recv() => {}
+                            _ = tx_audio_rx.recv() => {}
+                        }
+                    }
+                }),
+            ));
+        }
+
+        // --- File-source task (replaces IQ capture + demod) ---
+        {
+            let tx = drm_if_tx.clone();
+            let c = cancel.clone();
+            let handle = crate::drm_file_source::spawn(file_path.clone(), tx, c);
+            let handle = tokio::spawn(async move {
+                match handle.await {
+                    Ok(()) => info!("drm file source exited"),
+                    Err(e) => error!("drm file source join error: {e}"),
+                }
+            });
+            tasks.push(("drm_file_source", handle));
+        }
+
+        // --- DRM bridge supervisor ---
+        // Forced-on: mode watch starts as DRM so the supervisor spawns
+        // the bridge immediately and keeps it up for the whole test.
+        {
+            let drm_if_tx_for_drm = drm_if_tx.clone();
+            let audio_tx_for_drm = demod_audio_tx.clone();
+            let mode_rx = demod_mode_tx.subscribe();
+            let status_tx = drm_status_tx.clone();
+            let c = cancel.clone();
+            let drm_cfg = efd_dsp::DrmConfig {
+                dream_binary: config.drm.dream_binary.clone(),
+                input_sink: config.drm.input_sink.clone(),
+                output_sink: config.drm.output_sink.clone(),
+                dream_rate: config.audio.sample_rate,
+                ..Default::default()
+            };
+            let handle = tokio::spawn(async move {
+                run_drm_supervisor(
+                    drm_cfg,
+                    drm_if_tx_for_drm,
+                    audio_tx_for_drm,
+                    mode_rx,
+                    status_tx,
+                    c,
+                )
+                .await;
+            });
+            tasks.push(("drm_supervisor", handle));
+        }
+
+        // --- Opus encoder mux (unchanged from real pipeline) ---
+        {
+            let atx = audio_tx.clone();
+            let c = cancel.clone();
+            let handle = tokio::spawn(async move {
+                encode_audio_mux(demod_audio_rx, usb_rx_rx, audio_source_rx, atx, c).await;
+            });
+            tasks.push(("opus_encoder", handle));
+        }
+
+        // --- Synthetic RadioState so the client UI gates correctly ---
+        {
+            let stx = state_tx.clone();
+            let c = cancel.clone();
+            let handle = tokio::spawn(async move {
+                let state = RadioState {
+                    vfo: efd_proto::Vfo::A,
+                    freq_hz: 0,
+                    mode: efd_proto::Mode::DRM,
+                    filter_bw: "10.0k".into(),
+                    att: false,
+                    lp: false,
+                    agc: efd_proto::AgcMode::Off,
+                    agc_threshold: 0,
+                    nr: false,
+                    nb: false,
+                    s_meter_db: -120.0,
+                    tx: false,
+                };
+                let mut tick = tokio::time::interval(Duration::from_millis(500));
+                loop {
+                    tokio::select! {
+                        _ = c.cancelled() => break,
+                        _ = tick.tick() => {
+                            let _ = stx.send(state.clone());
+                        }
+                    }
+                }
+            });
+            tasks.push(("state_synth", handle));
+        }
+
+        // ALSA playback intentionally omitted — under SSH sessions on the
+        // CM5 there's no live audio context, and the point of the test is
+        // to verify the WS audio path, not local speaker output.
+
+        let capabilities = Capabilities {
+            source: efd_proto::SourceKind::FdmDuo,
+            has_iq: false,
+            has_tx: false,
+            has_hardware_cat: false,
+            supported_demod_modes: vec![efd_proto::Mode::DRM],
+        };
+
+        info!(
+            file = %file_path.display(),
+            tasks = tasks.len(),
+            "DRM file-test pipeline started"
+        );
+
+        Self {
+            fft_tx,
+            state_tx,
+            audio_tx,
+            cat_tx,
+            tx_audio_tx,
+            demod_mode_tx,
+            audio_source_tx,
+            capabilities,
+            drm_status_rx,
+            cancel,
+            tasks,
+        }
+    }
+
     /// Graceful shutdown — cancel all tasks and await them.
     pub async fn shutdown(self) {
         info!("pipeline shutting down");
