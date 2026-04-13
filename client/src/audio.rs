@@ -97,11 +97,6 @@ impl AudioPlayer {
         self.volume.store((vol.clamp(0.0, 1.0) * 1000.0) as u32, Ordering::Relaxed);
     }
 
-    /// Get current volume (0.0 to 1.0).
-    pub fn volume(&self) -> f32 {
-        self.volume.load(Ordering::Relaxed) as f32 / 1000.0
-    }
-
     /// Toggle mute. Returns new mute state.
     pub fn toggle_mute(&self) -> bool {
         let was = self.muted.load(Ordering::Relaxed);
@@ -118,7 +113,7 @@ impl AudioPlayer {
         let count = self.chunks_received.fetch_add(1, Ordering::Relaxed) + 1;
         if count == 1 {
             eprintln!("audio: first chunk received ({} bytes)", opus_data.len());
-        } else if count % 500 == 0 {
+        } else if count.is_multiple_of(500) {
             let rb = self.ring.lock().unwrap_or_else(|e| e.into_inner());
             eprintln!("audio: {} chunks received, ring buffer: {} samples", count, rb.len());
         }
@@ -143,7 +138,7 @@ impl AudioPlayer {
             }
         };
 
-        if count <= 5 || count % 500 == 0 {
+        if count <= 5 || count.is_multiple_of(500) {
             let peak = pcm[..n].iter().map(|s| s.abs()).fold(0.0f32, f32::max);
             eprintln!("audio: chunk #{count} decoded {n} samples, peak={peak:.6}");
         }

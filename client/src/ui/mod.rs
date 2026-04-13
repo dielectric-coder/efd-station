@@ -58,15 +58,6 @@ impl DisplayRange {
         self.zoom.load(Ordering::Relaxed) as f64 / 10.0
     }
 
-    pub fn set_zoom(&self, z: f64) {
-        let tenths = ((z * 10.0).round() as i32).clamp(ZOOM_MIN_TENTHS, ZOOM_MAX_TENTHS);
-        // Snap to ZOOM_STEP_TENTHS grid (anchored at ZOOM_MIN_TENTHS).
-        let snapped = ZOOM_MIN_TENTHS
-            + ((tenths - ZOOM_MIN_TENTHS + ZOOM_STEP_TENTHS / 2) / ZOOM_STEP_TENTHS)
-                * ZOOM_STEP_TENTHS;
-        self.zoom.store(snapped, Ordering::Relaxed);
-        self.clamp_pan();
-    }
 
     /// Pan offset as a fraction of full span (-0.5 to 0.5).
     pub fn pan_frac(&self) -> f64 {

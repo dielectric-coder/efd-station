@@ -106,7 +106,7 @@ fn run_usb_tx(
                 Ok(n) => offset += n,
                 Err(e) => {
                     warn!("USB TX write error: {e}, recovering");
-                    if let Err(e2) = pcm.recover(e.errno() as i32, true) {
+                    if let Err(e2) = pcm.recover(e.errno(), true) {
                         warn!("USB TX recover failed: {e2}");
                         return Err(AudioError::Alsa(e));
                     }

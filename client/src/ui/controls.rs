@@ -297,6 +297,9 @@ pub struct ControlBar {
     /// Persisted SDR operating parameters.
     sdr_params: Rc<RefCell<SdrParams>>,
     /// Timestamp of last user command — suppress sync briefly after.
+    /// Cloned into the per-control closures that mutate it; held on the
+    /// struct so a clone of `ControlBar` keeps the same shared state.
+    #[allow(dead_code)]
     last_cmd: Rc<Cell<Instant>>,
 }
 
