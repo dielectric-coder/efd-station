@@ -1,170 +1,142 @@
 # efd-station
 
-SDR backend and client application for the **Elad FDM-DUO** transceiver, running on a Raspberry Pi CM5.
+A multi-SDR ham-radio station: networked transceiver backend for the **Elad FDM-DUO**, extensible to **HackRF**, **SDRplay RSPdx**, **RTL-SDR**, and a plain analog portable radio. Runs headless on a Raspberry Pi CM5; native GTK4 client on any Linux desktop.
 
-## Overview
-
-efd-station turns an Elad FDM-DUO into a networked SDR. The CM5 backend captures IQ data over USB, runs all DSP locally (FFT, demodulation, encoding), and serves processed data to clients over WebSocket. The radio can operate standalone (CM5 + HAT sound card + amp) or remotely (any machine on the network running the client).
+All DSP — FFT, demodulation, DRM, FreeDV, audio-domain decoders — happens on the CM5. Clients receive only processed data (magnitude bins, Opus audio, radio state).
 
 ```
-[FDM-DUO] ──USB──> [CM5 backend] ──WebSocket──> [Client UI]
-  IQ data              FFT, demod, Opus             spectrum, waterfall,
-  CAT serial           ALSA local playback          audio, controls
-  USB audio            radio state polling
+[SDR / radio] ──USB──▶ [CM5 backend] ──WebSocket──▶ [GTK4 client]
+   IQ / audio             FFT · demod · codecs         spectrum · waterfall
+   CAT serial             rigctld responder            audio · controls · PTT
+                          ALSA → HAT/amp (standalone)
 ```
 
-## Architecture
+## Status
+
+Work in progress. The architecture is settled (see `CLAUDE.md`); crates are landing incrementally — FDM-DUO IQ, CAT, audio, and the WS pipeline first; other backends follow behind cargo feature flags.
+
+## Features
+
+- **Multi-backend IQ capture** — one `IqSource` trait, one driver file per device, each behind a cargo feature. Adding a new SDR = one file + one feature + one factory arm. Vendor-native (no SoapySDR).
+- **Two operating modes per source**
+  - **MON** — FDM-DUO as a conventional receiver; audio from the radio, CAT reports hardware state.
+  - **SDR** — any supported source feeds IQ into the software demod; the demod fronts as a radio via a rigctld-compatible endpoint.
+- **Three-tier DSP**
+  1. Analog IQ demod — one task, mode param (AM / SAM / USB / LSB / CW± / NFM / WFM).
+  2. IQ-domain codecs — DRM (vendored DREAM 2.1.1 subprocess bridged via PipeWire null sinks), FreeDV.
+  3. Audio-domain decoders — CW / RTTY / PSK / WSPR / FT8 / APRS / WEFAX, N in parallel, mode-agnostic, works in MON and portable configs too.
+- **Hand-rolled rigctld responder** inside `efd-cat` — external apps (WSJT-X, FLDIGI, digital-mode tooling) connect to our TCP endpoint instead of fighting for the FDM-DUO USB serial port. hamlib's `rigctld` is not used on the CM5; we speak the FDM-DUO's full native CAT.
+- **Standalone or remote** — CM5 + HAT sound card + amp works as a tabletop radio with no network client; any number of GTK4 clients can also be connected simultaneously.
+- **TX** on FDM-DUO and HackRF; per-device capability flags tell the client what to enable or grey out.
+
+## Supported RF sources
+
+| Source          | IQ path              | Audio path            | Hardware CAT | SW demod | TX  |
+|-----------------|----------------------|-----------------------|--------------|----------|-----|
+| FDM-DUO (MON)   | —                    | FDM-DUO USB audio     | native (USB) | no       | yes |
+| FDM-DUO (SDR)   | FDM-DUO USB IQ       | from SW demod         | native (USB) | yes      | yes |
+| HackRF          | libhackrf            | from SW demod         | —            | yes      | yes |
+| RSPdx           | SDRplay API          | from SW demod         | —            | yes      | no  |
+| RTL dongle      | librtlsdr            | from SW demod         | —            | yes      | no  |
+| Portable radio  | —                    | USB dongle analog-in  | —            | no       | no  |
+
+## Architecture at a glance
 
 Single Cargo workspace:
 
-| Crate | Purpose |
-|---|---|
-| `efd-proto` | Shared WS message types (bincode serialization) |
-| `efd-iq` | USB IQ capture from FDM-DUO via libusb |
-| `efd-dsp` | FFT (rustfft, Blackman-Harris, 4096-point) + AM/USB/LSB/FM demodulation |
-| `efd-audio` | ALSA playback, Opus wideband encode/decode, USB TX audio |
-| `efd-cat` | Direct serial CAT control (38400 8N1), auto-discovery |
-| `server` | Axum HTTP/WS server, tokio pipeline wiring |
-| `client` | GTK4 native client: spectrum, waterfall, controls, PTT |
+| Crate        | Purpose |
+|--------------|---------|
+| `efd-proto`  | Shared WS message types (bincode). Breaking changes fail both binaries at compile time. |
+| `efd-iq`     | Multi-backend IQ capture. Trait + per-device drivers (`fdm_duo`, `hackrf`, `rspdx`, `rtl`), feature-gated. |
+| `efd-dsp`    | FFT (FFTW3 + volk), Tier-1 analog demod, Tier-2 IQ codecs (DRM, FreeDV), Tier-3 audio decoders. |
+| `efd-audio`  | ALSA HAT/USB output, analog audio-in for MON/portable, USB audio TX. |
+| `efd-cat`    | Direct USB serial CAT to FDM-DUO + rigctld-compatible TCP responder (two bindable ports: hardware front, demod front). |
+| `server`     | Axum HTTP/WebSocket server, tokio pipeline, MON/SDR state machine. |
+| `client`     | GTK4 + GtkGLArea spectrum/waterfall, controls, PTT. |
 
-### Data flow
+See **`CLAUDE.md`** for the full architecture (pipeline diagrams, channel layout, decision log) and **`docs/CM5-sdr-backend.drawio.svg`** for the visual overview.
 
-**RX path:**
-```
-IQ capture → broadcast<IqBlock> → FFT → FftBins → WS → clients
-                                → demod → Opus encode → WS → clients
-                                                      → Opus decode → ALSA → amp
-```
+## Hardware
 
-**TX + CAT path:**
-```
-clients → WS → CatCommand → serial port → FDM-DUO
-              → TxAudio → Opus decode → USB audio TX → FDM-DUO
-              → Ptt → TX;/RX; → serial port
-```
+- **Host**: Raspberry Pi CM5 on a Waveshare CM5-PoE-Base-A IO board, headless.
+- **Audio out**: Pi HAT sound card or USB audio dongle → amplifier. Exactly one per config.
+- **Network**: Ethernet / WiFi.
+- **GPIO front panel**: reset / lock / status LEDs only. Not used for tuning or CAT.
 
 ## Building
 
-### Prerequisites
-
-```bash
-# Debian/Raspberry Pi OS
-sudo apt install build-essential libusb-1.0-0-dev libasound2-dev libopus-dev pkg-config
-
-# Arch/Manjaro
-sudo pacman -S rust libusb alsa-lib opus pkg-config
-```
-
-### Build
+Rust stable, Cargo workspace. Per-backend features keep deps off hosts that don't need them (a CM5 without SDRplay headers simply omits `--features rspdx`).
 
 ```bash
 git clone https://github.com/dielectric-coder/efd-station.git
 cd efd-station
-cargo build --release --package efd-server
+
+# FDM-DUO only (default on the CM5 target):
+cargo build --release -p efd-server --features fdm-duo
+
+# Multiple backends:
+cargo build --release -p efd-server --features "fdm-duo hackrf rtl"
 ```
 
-### Install packages
-
-**Debian/Raspberry Pi OS (.deb):**
-```bash
-cargo install cargo-deb
-cargo deb --package efd-server
-sudo dpkg -i target/debian/efd-server_*.deb
-```
-
-**Arch/Manjaro:**
-```bash
-cd dist/arch
-makepkg -sf
-sudo pacman -U efd-server-*.pkg.tar.zst
-```
-
-Both packages install a systemd service, udev rules, and example config.
-
-### Client
-
-The GTK4 client runs on any Linux machine with a display:
-
-```bash
-# Install GTK4 dev (if not present)
-# Debian: sudo apt install libgtk-4-dev
-# Arch: sudo pacman -S gtk4
-
-cargo run --package efd-client -- ws://pi-hostname:8080/ws
-```
-
-**Headless test client** (no GUI, validates the pipeline):
-```bash
-cargo run --example ws_test --package efd-client -- ws://pi-hostname:8080/ws
-```
-
-## Configuration
-
-Config file: `~/.config/efd-backend/config.toml`
-
-```toml
-[server]
-bind = "0.0.0.0"
-port = 8080
-
-[cat]
-serial_device = "auto"    # auto-discovers FDM-DUO CAT port
-poll_interval_ms = 200
-
-[dsp]
-fft_size = 4096
-fft_averaging = 3
-sample_rate = 192000
-
-[audio]
-alsa_device = "default"   # RX playback (HAT sound card)
-tx_device = "default"     # TX audio to FDM-DUO USB audio
-sample_rate = 48000
-```
-
-Serial device discovery tries (in order):
-1. `/dev/fdm-duo-cat` udev symlink
-2. `/dev/serial/by-id/` name matching
-3. Sysfs hub-sibling scan (finds FTDI serial port next to Elad IQ device)
+Runtime deps on the CM5: ALSA, PipeWire (for DRM null-sink bridge), vendored DREAM 2.1.1 under `third_party/dream/` (built `qmake CONFIG+=console` with a one-line hamlib cast patch). `hamlib rigctld` is **not** required.
 
 ## Running
 
 ```bash
-# Direct
-efd-server
-
-# Via systemd
-sudo systemctl enable --now efd-server
-
-# With debug logging
-RUST_LOG=debug efd-server
+efd-server                               # direct
+sudo systemctl enable --now efd-server   # via systemd
+RUST_LOG=debug efd-server                # with trace logging
 ```
-
-Health check: `curl http://localhost:8080/health`
 
 WebSocket endpoint: `ws://host:8080/ws`
 
-## Hardware
+## Client
 
-- **Radio**: Elad FDM-DUO (3 USB interfaces: IQ data, audio, CAT serial)
-- **Host**: Raspberry Pi CM5 (headless)
-- **Audio output**: Pi HAT sound card → amplifier (ALSA)
-- **Network**: Ethernet/WiFi — serves WS clients on LAN or internet
+```bash
+cargo run -p efd-client -- ws://pi-hostname:8080/ws
+```
+
+The client renders spectrum and waterfall (IQ spectrum in SDR mode, audio spectrum in MON/portable), plays Opus audio, shows radio state, sends CAT/PTT/TX-audio upstream, and enables controls based on the source's advertised capabilities.
+
+## Configuration
+
+TOML, at `~/.config/efd-backend/config.toml`. The active source, audio output device, enabled audio decoders, and responder ports are all selected here. Full schema lives alongside the crates — see `docs/DEV_GUIDE.md` and `docs/USER_GUIDE.md`.
+
+## Docs
+
+- `CLAUDE.md` — authoritative architecture + decision log
+- `docs/USER_GUIDE.md` — setup, configuration, operation
+- `docs/DEV_GUIDE.md` — building, contributing, crate internals
+- `docs/CM5-sdr-backend.drawio.svg` — architecture diagram
 
 ## License
 
-SPDX-License-Identifier: GPL-3.0-or-later
-
+**efd-station** — a multi-SDR ham-radio station for the Raspberry Pi CM5.
 Copyright (C) 2026 dielectric-coder
+
+SPDX-License-Identifier: GPL-3.0-or-later
 
 This program is free software: you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
 Foundation, either version 3 of the License, or (at your option) any later
 version.
 
-This program is distributed in the hope that it will be useful, but WITHOUT ANY
-WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
-PARTICULAR PURPOSE. See the GNU General Public License for more details.
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program. If not, see <https://www.gnu.org/licenses/>.
+
+The full license text is also available in the [`LICENSE`](LICENSE) file at
+the root of this repository.
+
+### Third-party components
+
+- **DREAM 2.1.1** (vendored under `third_party/dream/`) — GPL-2.0-or-later,
+  © Volker Fischer and contributors. Used as a separately-invoked subprocess.
+- **FFTW3**, **volk**, **libhackrf**, **librtlsdr**, **hamlib** — linked per
+  enabled cargo feature; each retains its own license (GPL / LGPL / BSD as
+  upstream declares).
+- **SDRplay API** — proprietary, redistributed under SDRplay's own license
+  terms; only built into the binary when the `rspdx` feature is enabled.
