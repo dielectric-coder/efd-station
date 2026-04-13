@@ -37,18 +37,18 @@ impl SerialPort {
             OFlag::O_RDWR | OFlag::O_NOCTTY | OFlag::O_NONBLOCK,
             Mode::empty(),
         )
-        .map_err(|e| CatError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+        .map_err(|e| CatError::Io(std::io::Error::other(e)))?;
 
         let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
 
         // Configure: 38400 8N1, no flow control, raw mode
         let mut tty = termios::tcgetattr(&fd)
-            .map_err(|e| CatError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| CatError::Io(std::io::Error::other(e)))?;
 
         termios::cfsetispeed(&mut tty, BaudRate::B38400)
-            .map_err(|e| CatError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| CatError::Io(std::io::Error::other(e)))?;
         termios::cfsetospeed(&mut tty, BaudRate::B38400)
-            .map_err(|e| CatError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| CatError::Io(std::io::Error::other(e)))?;
 
         // 8N1, no flow control
         tty.control_flags.remove(termios::ControlFlags::PARENB);
@@ -87,19 +87,19 @@ impl SerialPort {
         tty.control_chars[SpecialCharacterIndices::VTIME as usize] = 1;
 
         termios::tcsetattr(&fd, SetArg::TCSANOW, &tty)
-            .map_err(|e| CatError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| CatError::Io(std::io::Error::other(e)))?;
 
         // Clear O_NONBLOCK now that port is configured
         let flags = fcntl::fcntl(fd.as_raw_fd(), fcntl::FcntlArg::F_GETFL)
-            .map_err(|e| CatError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| CatError::Io(std::io::Error::other(e)))?;
         let mut oflags = OFlag::from_bits_truncate(flags);
         oflags.remove(OFlag::O_NONBLOCK);
         fcntl::fcntl(fd.as_raw_fd(), fcntl::FcntlArg::F_SETFL(oflags))
-            .map_err(|e| CatError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| CatError::Io(std::io::Error::other(e)))?;
 
         // Flush pending data
         termios::tcflush(&fd, termios::FlushArg::TCIOFLUSH)
-            .map_err(|e| CatError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| CatError::Io(std::io::Error::other(e)))?;
 
         info!(device = %device, "CAT serial port opened (38400 8N1)");
 
@@ -120,7 +120,7 @@ impl SerialPort {
 
         // Flush input buffer
         termios::tcflush(&self.fd, termios::FlushArg::TCIFLUSH)
-            .map_err(|e| CatError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+            .map_err(|e| CatError::Io(std::io::Error::other(e)))?;
 
         // Write command
         let mut written = 0;
@@ -130,8 +130,7 @@ impl SerialPort {
                 Ok(n) => written += n,
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(e) => {
-                    return Err(CatError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    return Err(CatError::Io(std::io::Error::other(
                         e,
                     )))
                 }
@@ -197,8 +196,7 @@ impl SerialPort {
                 }
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(e) => {
-                    return Err(CatError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    return Err(CatError::Io(std::io::Error::other(
                         e,
                     )))
                 }

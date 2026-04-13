@@ -143,7 +143,17 @@ async fn handle_conn(
                         return Ok(());
                     }
                 }
-                let line = std::str::from_utf8(&line_buf).unwrap_or("");
+                // rigctld is a line protocol; non-UTF-8 input is always
+                // garbage. Skip the line entirely instead of silently
+                // turning it into "" — that just made bad input look like
+                // an empty line and obscured debugging.
+                let line = match std::str::from_utf8(&line_buf) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        debug!("rigctld: dropping non-UTF-8 line");
+                        continue;
+                    }
+                };
                 let trimmed = line.trim();
                 if trimmed.is_empty() { continue; }
 
@@ -608,10 +618,7 @@ mod tests {
         let mut h = spawn_demod(None).await;
         assert_eq!(send_recv(h.addr, "M CW 500\n").await, "RPRT 0\n");
         // cat_rx should stay empty
-        assert!(matches!(
-            tokio::time::timeout(Duration::from_millis(50), h.cat_rx.recv()).await,
-            Err(_)
-        ));
+        assert!(tokio::time::timeout(Duration::from_millis(50), h.cat_rx.recv()).await.is_err());
         // watch should have the new mode
         let rx = h.demod_mode_rx.as_mut().unwrap();
         rx.changed().await.unwrap();
@@ -637,10 +644,7 @@ mod tests {
         });
         assert_eq!(send_recv(addr, "M CW 500\n").await, "RPRT 0\n");
         // demod_mode_rx.changed() should NOT fire within a small window.
-        assert!(matches!(
-            tokio::time::timeout(Duration::from_millis(50), demod_mode_rx.changed()).await,
-            Err(_)
-        ));
+        assert!(tokio::time::timeout(Duration::from_millis(50), demod_mode_rx.changed()).await.is_err());
     }
 
     #[tokio::test]

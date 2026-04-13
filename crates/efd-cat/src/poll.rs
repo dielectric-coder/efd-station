@@ -200,17 +200,50 @@ fn poll_radio_state(
         .and_then(|resp| parse::parse_th_response(&resp))
         .unwrap_or(0);
 
+    if cancel.is_cancelled() {
+        return Err(CatError::Cancelled);
+    }
+
+    // Optional state queries — if the radio doesn't reply (older firmware,
+    // wrong dialect), each silently falls back to the documented default
+    // rather than failing the whole poll.
+    let att = port
+        .command("RA;")
+        .ok()
+        .and_then(|r| parse::parse_ra_response(&r))
+        .unwrap_or(false);
+    let lp = port
+        .command("LP;")
+        .ok()
+        .and_then(|r| parse::parse_lp_response(&r))
+        .unwrap_or(false);
+    let nr = port
+        .command("NR;")
+        .ok()
+        .and_then(|r| parse::parse_nr_response(&r))
+        .unwrap_or(false);
+    let nb = port
+        .command("NB;")
+        .ok()
+        .and_then(|r| parse::parse_nb_response(&r))
+        .unwrap_or(false);
+    let agc = port
+        .command("GT;")
+        .ok()
+        .and_then(|r| parse::parse_gt_response(&r))
+        .unwrap_or(AgcMode::Slow);
+
     Ok(RadioState {
         vfo: parsed.vfo,
         freq_hz: parsed.freq_hz,
         mode: parsed.mode,
         filter_bw,
-        att: false,   // TODO: query AT; command when available
-        lp: false,    // TODO: query LP; command when available
-        agc: AgcMode::Slow, // TODO: query GT; command when available
+        att,
+        lp,
+        agc,
         agc_threshold,
-        nr: false,    // TODO: query NR; command when available
-        nb: false,    // TODO: query NB; command when available
+        nr,
+        nb,
         s_meter_db,
         tx: parsed.tx,
     })

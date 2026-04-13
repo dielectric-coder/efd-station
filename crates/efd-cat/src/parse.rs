@@ -132,6 +132,76 @@ pub fn parse_th_response(response: &str) -> Option<u8> {
     if value <= 10 { Some(value) } else { None }
 }
 
+/// Parse a single-digit on/off bit out of a `<XX>n;` response, where the
+/// response is exactly four characters (two-letter prefix, one digit, `;`).
+/// Treats any non-zero digit as "on".
+fn parse_bit_response(response: &str, prefix: &str) -> Option<bool> {
+    let s = response.trim();
+    if !s.starts_with(prefix) || !s.ends_with(';') {
+        return None;
+    }
+    // Payload is everything between prefix and trailing ';'.
+    let payload = &s[prefix.len()..s.len() - 1];
+    if payload.is_empty() {
+        return None;
+    }
+    // Tolerate longer payloads (e.g. NR2;, NB1;) — first digit is the on/off bit.
+    let first = payload.chars().next()?;
+    let n = first.to_digit(10)?;
+    Some(n != 0)
+}
+
+/// Parse an RA; (attenuator) response. `RA00;` is off; any other value is on.
+/// FDM-DUO uses Kenwood-compatible RA, with stepped values on some firmwares.
+pub fn parse_ra_response(response: &str) -> Option<bool> {
+    let s = response.trim();
+    if !s.starts_with("RA") || !s.ends_with(';') {
+        return None;
+    }
+    let payload = &s[2..s.len() - 1];
+    if payload.is_empty() || !payload.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(payload.chars().any(|c| c != '0'))
+}
+
+/// Parse an LP; (50 MHz low-pass filter) response. `LP0;` off, `LPx;` on.
+pub fn parse_lp_response(response: &str) -> Option<bool> {
+    parse_bit_response(response, "LP")
+}
+
+/// Parse an NR; (noise reduction) response. `NR0;` off, `NRx;` on at level x.
+pub fn parse_nr_response(response: &str) -> Option<bool> {
+    parse_bit_response(response, "NR")
+}
+
+/// Parse an NB; (noise blanker) response. `NB0;` off, `NBx;` on at level x.
+pub fn parse_nb_response(response: &str) -> Option<bool> {
+    parse_bit_response(response, "NB")
+}
+
+/// Parse a GT; (AGC speed) response into our [`AgcMode`] enum.
+///
+/// FDM-DUO follows Kenwood `GT;` semantics: `GTnnn;` where nnn is in
+/// [000, 020]. 000 = AGC off; 001..=007 ≈ Fast; 008..=014 ≈ Medium;
+/// 015..=020 ≈ Slow. Mapping is approximate — the radio doesn't expose
+/// discrete enum slots.
+pub fn parse_gt_response(response: &str) -> Option<crate::AgcMode> {
+    use crate::AgcMode;
+    let s = response.trim();
+    if !s.starts_with("GT") || !s.ends_with(';') {
+        return None;
+    }
+    let payload = &s[2..s.len() - 1];
+    let n: u16 = payload.parse().ok()?;
+    Some(match n {
+        0 => AgcMode::Off,
+        1..=7 => AgcMode::Fast,
+        8..=14 => AgcMode::Medium,
+        _ => AgcMode::Slow,
+    })
+}
+
 // ---------- filter bandwidth tables (per ELAD FDM-DUO manual) ----------
 
 const FILTER_LSB_USB: &[&str] = &[
@@ -274,6 +344,36 @@ mod tests {
         let resp = "RF50300;";
         let bw = parse_rf_response(resp, Mode::AM).unwrap();
         assert_eq!(bw, "4.0k");
+    }
+
+    #[test]
+    fn parse_ra_off_on() {
+        assert_eq!(parse_ra_response("RA00;"), Some(false));
+        assert_eq!(parse_ra_response("RA01;"), Some(true));
+        assert_eq!(parse_ra_response("RA00000;"), Some(false));
+        assert_eq!(parse_ra_response("RA00010;"), Some(true));
+        assert_eq!(parse_ra_response("BAD;"), None);
+    }
+
+    #[test]
+    fn parse_lp_nr_nb_bits() {
+        assert_eq!(parse_lp_response("LP0;"), Some(false));
+        assert_eq!(parse_lp_response("LP1;"), Some(true));
+        assert_eq!(parse_nr_response("NR0;"), Some(false));
+        assert_eq!(parse_nr_response("NR2;"), Some(true));
+        assert_eq!(parse_nb_response("NB0;"), Some(false));
+        assert_eq!(parse_nb_response("NB1;"), Some(true));
+        assert_eq!(parse_nr_response("foo"), None);
+    }
+
+    #[test]
+    fn parse_gt_agc_modes() {
+        use efd_proto::AgcMode;
+        assert_eq!(parse_gt_response("GT000;"), Some(AgcMode::Off));
+        assert_eq!(parse_gt_response("GT005;"), Some(AgcMode::Fast));
+        assert_eq!(parse_gt_response("GT010;"), Some(AgcMode::Medium));
+        assert_eq!(parse_gt_response("GT018;"), Some(AgcMode::Slow));
+        assert_eq!(parse_gt_response("GTxx;"), None);
     }
 
     #[test]
