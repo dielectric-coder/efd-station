@@ -20,11 +20,12 @@
 
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use efd_iq::IqBlock;
 use efd_proto::DrmStatus;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -33,6 +34,11 @@ use tracing::{debug, info, warn};
 use crate::demod::AudioBlock;
 use crate::error::DspError;
 use crate::filter::FirDecimator;
+
+/// Hard cap on how long any individual `pactl` / `pacat` / `parec` /
+/// `dream` subprocess setup step may block. If PipeWire is hung we want
+/// the whole bridge to fail loudly rather than wedge mode-switching.
+const SUBPROC_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Configuration for the DRM bridge.
 #[derive(Debug, Clone)]
@@ -102,7 +108,7 @@ async fn run_bridge(
     cancel: CancellationToken,
 ) -> Result<(), DspError> {
     let factor = (cfg.iq_input_rate / cfg.dream_rate) as usize;
-    if factor < 1 || cfg.iq_input_rate % cfg.dream_rate != 0 {
+    if factor < 1 || !cfg.iq_input_rate.is_multiple_of(cfg.dream_rate) {
         return Err(DspError::Drm(format!(
             "iq_input_rate ({}) not an integer multiple of dream_rate ({})",
             cfg.iq_input_rate, cfg.dream_rate
@@ -113,63 +119,88 @@ async fn run_bridge(
     // unload them on drop even if this fn returns via `?`.
     let _sinks = NullSinks::create(&cfg.input_sink, &cfg.output_sink, cfg.dream_rate).await?;
 
+    // Helper: take a Child's piped stdio handle, returning a structured error
+    // on the (vanishingly unlikely) event that the kernel didn't honor
+    // Stdio::piped(). `expect()` would panic the whole task.
+    fn take_stdin(child: &mut Child, name: &str) -> Result<tokio::process::ChildStdin, DspError> {
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| DspError::Drm(format!("{name}: stdin not piped")))
+    }
+    fn take_stdout(
+        child: &mut Child,
+        name: &str,
+    ) -> Result<tokio::process::ChildStdout, DspError> {
+        child
+            .stdout
+            .take()
+            .ok_or_else(|| DspError::Drm(format!("{name}: stdout not piped")))
+    }
+
     // `pacat` writes the decimated IQ (s16 stereo) into drm_in.
-    let mut pacat = Command::new("pacat")
-        .args([
-            "--playback",
-            "--device",
-            &cfg.input_sink,
-            "--channels=2",
-            "--format=s16le",
-            &format!("--rate={}", cfg.dream_rate),
-            "--raw",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| DspError::Drm(format!("pacat spawn failed: {e}")))?;
-    let mut pacat_stdin = pacat.stdin.take().expect("stdin piped");
+    let mut pacat = spawn_with_timeout("pacat", || {
+        Command::new("pacat")
+            .args([
+                "--playback",
+                "--device",
+                &cfg.input_sink,
+                "--channels=2",
+                "--format=s16le",
+                &format!("--rate={}", cfg.dream_rate),
+                "--raw",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+    })
+    .await?;
+    let mut pacat_stdin = take_stdin(&mut pacat, "pacat")?;
 
     // `parec` reads decoded audio from drm_out.monitor.
-    let mut parec = Command::new("parec")
-        .args([
-            "--record",
-            "--device",
-            &format!("{}.monitor", cfg.output_sink),
-            "--channels=2",
-            "--format=s16le",
-            &format!("--rate={}", cfg.dream_rate),
-            "--raw",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| DspError::Drm(format!("parec spawn failed: {e}")))?;
-    let mut parec_stdout = parec.stdout.take().expect("stdout piped");
+    let mut parec = spawn_with_timeout("parec", || {
+        Command::new("parec")
+            .args([
+                "--record",
+                "--device",
+                &format!("{}.monitor", cfg.output_sink),
+                "--channels=2",
+                "--format=s16le",
+                &format!("--rate={}", cfg.dream_rate),
+                "--raw",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    })
+    .await?;
+    let mut parec_stdout = take_stdout(&mut parec, "parec")?;
 
     // DREAM: I/Q input (0 Hz IF) from drm_in.monitor, audio to drm_out.
     // stdout is piped so the TUI parser can build a live DrmStatus.
-    let mut dream = Command::new(&cfg.dream_binary)
-        .args([
-            "-I",
-            &format!("{}.monitor", cfg.input_sink),
-            "-O",
-            &cfg.output_sink,
-            "-c",
-            "6", // I/Q input positive, 0 Hz IF
-            "--sigsrate",
-            &cfg.dream_rate.to_string(),
-            "--audsrate",
-            &cfg.dream_rate.to_string(),
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| DspError::Drm(format!("dream spawn failed: {e}")))?;
-    let dream_stdout = dream.stdout.take().expect("stdout piped");
+    let mut dream = spawn_with_timeout("dream", || {
+        Command::new(&cfg.dream_binary)
+            .args([
+                "-I",
+                &format!("{}.monitor", cfg.input_sink),
+                "-O",
+                &cfg.output_sink,
+                "-c",
+                "6", // I/Q input positive, 0 Hz IF
+                "--sigsrate",
+                &cfg.dream_rate.to_string(),
+                "--audsrate",
+                &cfg.dream_rate.to_string(),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+    })
+    .await?;
+    let dream_stdout = take_stdout(&mut dream, "dream")?;
 
     info!(
         pacat = pacat.id().unwrap_or(0),
@@ -178,11 +209,19 @@ async fn run_bridge(
         "DRM bridge started"
     );
 
+    // Coarse pipeline-latency estimate used to resync after an IQ lag.
+    // Empirically dream + the two PipeWire null sinks add roughly 200 ms
+    // of audio latency at 48 kHz; after an IQ gap, the reader drops that
+    // many frames so stale decoded audio doesn't blend into fresh audio.
+    const PURGE_FRAMES_AFTER_LAG: usize = 48_000 / 5;
+    let purge_frames = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
     // IQ → pacat writer task
     let cancel_w = cancel.clone();
     let dream_rate = cfg.dream_rate;
     let iq_rate = cfg.iq_input_rate;
     let decim_taps = cfg.decim_taps;
+    let purge_w = purge_frames.clone();
     let writer = tokio::spawn(async move {
         let mut dec_i = FirDecimator::new(factor, decim_taps);
         let mut dec_q = FirDecimator::new(factor, decim_taps);
@@ -217,9 +256,16 @@ async fn run_bridge(
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(skipped = n, "DRM writer: IQ lagged");
+                        warn!(skipped = n, "DRM writer: IQ lagged — resyncing");
                         dec_i.reset();
                         dec_q.reset();
+                        // Tell the reader to discard ~the dream pipeline
+                        // worth of stale audio so post-gap fresh audio
+                        // doesn't blend with what was already in flight.
+                        purge_w.store(
+                            PURGE_FRAMES_AFTER_LAG,
+                            std::sync::atomic::Ordering::Release,
+                        );
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         debug!("DRM writer: IQ channel closed");
@@ -236,6 +282,7 @@ async fn run_bridge(
     let cancel_r = cancel.clone();
     let audio_tx_r = audio_tx.clone();
     let dream_rate_r = cfg.dream_rate;
+    let purge_r = purge_frames.clone();
     let reader = tokio::spawn(async move {
         // Read in chunks that yield ~20 ms of audio each, so the WS
         // downstream and ALSA sink see comparable frame sizes to the
@@ -253,6 +300,16 @@ async fn run_bridge(
                 }
                 res = parec_stdout.read_exact(&mut buf) => match res {
                     Ok(_) => {
+                        // If the writer flagged a lag, swallow up to
+                        // PURGE_FRAMES_AFTER_LAG frames before resuming
+                        // forwarding. Decrement under Acquire/Release so
+                        // multiple lag events stack additively.
+                        let to_purge = purge_r.load(std::sync::atomic::Ordering::Acquire);
+                        if to_purge > 0 {
+                            let new_remaining = to_purge.saturating_sub(FRAMES_PER_CHUNK);
+                            purge_r.store(new_remaining, std::sync::atomic::Ordering::Release);
+                            continue;
+                        }
                         // Downmix stereo s16 → mono f32 to match the rest of
                         // the demod pipeline's AudioBlock contract.
                         let mut mono = Vec::with_capacity(FRAMES_PER_CHUNK);
@@ -477,8 +534,7 @@ fn parse_tui_line(line: &str, acc: &mut DrmStatus) -> bool {
         return false;
     }
     // Order matters: "MSC WMER" starts with "MSC" but isn't the MSC flag.
-    if t.starts_with("MSC WMER / MSC MER:") {
-        let body = &t["MSC WMER / MSC MER:".len()..];
+    if let Some(body) = t.strip_prefix("MSC WMER / MSC MER:") {
         let parts: Vec<&str> = body.split('/').collect();
         if parts.len() == 2 {
             acc.wmer_db = parse_opt_f32(parts[0]);
@@ -502,8 +558,7 @@ fn parse_tui_line(line: &str, acc: &mut DrmStatus) -> bool {
         acc.sample_offset_hz = parse_opt_f32(v);
         return false;
     }
-    if t.starts_with("Doppler / Delay:") {
-        let body = &t["Doppler / Delay:".len()..];
+    if let Some(body) = t.strip_prefix("Doppler / Delay:") {
         let parts: Vec<&str> = body.split('/').collect();
         if parts.len() == 2 {
             acc.doppler_hz = parse_opt_f32(parts[0]);
@@ -511,8 +566,7 @@ fn parse_tui_line(line: &str, acc: &mut DrmStatus) -> bool {
         }
         return false;
     }
-    if t.starts_with("DRM Mode / Bandwidth:") {
-        let body = &t["DRM Mode / Bandwidth:".len()..];
+    if let Some(body) = t.strip_prefix("DRM Mode / Bandwidth:") {
         let parts: Vec<&str> = body.split('/').collect();
         if parts.len() == 2 {
             let m = parts[0].trim();
@@ -538,8 +592,7 @@ fn parse_tui_line(line: &str, acc: &mut DrmStatus) -> bool {
         }
         return false;
     }
-    if t.starts_with("Number of Services:") {
-        let body = &t["Number of Services:".len()..];
+    if let Some(body) = t.strip_prefix("Number of Services:") {
         // Format: "Audio: 1 / Data: 0"
         for (label, setter) in [("Audio:", 0_u8), ("Data:", 1)] {
             if let Some(i) = body.find(label) {
@@ -595,18 +648,27 @@ impl NullSinks {
 impl Drop for NullSinks {
     fn drop(&mut self) {
         // Best-effort synchronous cleanup — Drop can't await, so just
-        // fire-and-forget via std::process.
+        // fire-and-forget via std::process. We spawn each child without
+        // waiting; the kernel reaps them via init when this process exits.
+        // Letting `pactl` block here would stall mode-switching teardown
+        // when PipeWire is hung.
         let _ = std::process::Command::new("pactl")
             .args(["unload-module", &self.in_module.to_string()])
-            .status();
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
         let _ = std::process::Command::new("pactl")
             .args(["unload-module", &self.out_module.to_string()])
-            .status();
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
     }
 }
 
 async fn pactl_load_null_sink(name: &str, rate: u32) -> Result<u32, DspError> {
-    let out = Command::new("pactl")
+    let fut = Command::new("pactl")
         .args([
             "load-module",
             "module-null-sink",
@@ -617,8 +679,10 @@ async fn pactl_load_null_sink(name: &str, rate: u32) -> Result<u32, DspError> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .output();
+    let out = tokio::time::timeout(SUBPROC_SETUP_TIMEOUT, fut)
         .await
+        .map_err(|_| DspError::Drm(format!("pactl load-module timed out for sink {name}")))?
         .map_err(|e| DspError::Drm(format!("pactl load-module: {e}")))?;
     if !out.status.success() {
         return Err(DspError::Drm(format!(
@@ -634,17 +698,35 @@ async fn pactl_load_null_sink(name: &str, rate: u32) -> Result<u32, DspError> {
 }
 
 async fn pactl_unload_module(idx: u32) -> Result<(), DspError> {
-    let status = Command::new("pactl")
+    let fut = Command::new("pactl")
         .args(["unload-module", &idx.to_string()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .status();
+    let status = tokio::time::timeout(SUBPROC_SETUP_TIMEOUT, fut)
         .await
+        .map_err(|_| DspError::Drm(format!("pactl unload-module timed out for {idx}")))?
         .map_err(|e| DspError::Drm(format!("pactl unload-module: {e}")))?;
     if !status.success() {
         warn!(module = idx, "pactl unload-module returned non-zero");
     }
     Ok(())
+}
+
+/// Run a subprocess `spawn` closure under [`SUBPROC_SETUP_TIMEOUT`].
+/// `tokio::process::Command::spawn` itself isn't truly async (it's a
+/// synchronous fork+exec under the hood), but wrapping it in
+/// `tokio::time::timeout` lets us bound the *whole* subprocess-setup phase
+/// — including the time we spend waiting on PipeWire tooling — and bail
+/// out cleanly instead of hanging the bridge.
+async fn spawn_with_timeout<F>(name: &'static str, f: F) -> Result<Child, DspError>
+where
+    F: FnOnce() -> std::io::Result<Child>,
+{
+    let res = tokio::time::timeout(SUBPROC_SETUP_TIMEOUT, async { f() })
+        .await
+        .map_err(|_| DspError::Drm(format!("{name} spawn timed out")))?;
+    res.map_err(|e| DspError::Drm(format!("{name} spawn failed: {e}")))
 }
 
 #[cfg(test)]
