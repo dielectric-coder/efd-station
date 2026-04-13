@@ -67,14 +67,26 @@ pub struct AudioBlock {
 /// demodulates, applies AGC, decimates, and sends `AudioBlock` out.
 ///
 /// `tuning_rx` carries runtime changes to mode, VFO offset, and filter BW.
+///
+/// `drm_if_tx`, if `Some`, receives wideband-SSB audio-IF samples when
+/// the active mode is [`Mode::DRM`] — this is the stream consumed by
+/// [`crate::drm`] to feed DREAM. Listenable-audio modes (USB/LSB/AM/CW/
+/// FM) continue to write to `audio_tx`; under DRM the normal audio path
+/// goes silent (the DRM bridge produces listenable audio via its own
+/// `audio_tx` clone once it decodes). If `None`, DRM mode simply emits
+/// nothing — useful for test builds or pipelines that haven't wired a
+/// DRM bridge.
 pub fn spawn_demod_task(
     iq_rx: broadcast::Receiver<Arc<IqBlock>>,
     audio_tx: mpsc::Sender<AudioBlock>,
+    drm_if_tx: Option<broadcast::Sender<AudioBlock>>,
     config: DemodConfig,
     tuning_rx: watch::Receiver<DemodTuning>,
     cancel: CancellationToken,
 ) -> JoinHandle<Result<(), DspError>> {
-    tokio::task::spawn_blocking(move || run_demod(iq_rx, audio_tx, config, tuning_rx, cancel))
+    tokio::task::spawn_blocking(move || {
+        run_demod(iq_rx, audio_tx, drm_if_tx, config, tuning_rx, cancel)
+    })
 }
 
 /// NCO (Numerically Controlled Oscillator) for frequency shifting.
@@ -312,9 +324,15 @@ impl DcBlock {
     }
 }
 
+/// DRM wideband audio-IF: 10 kHz symmetric passband centered at DC so
+/// both sidebands of the OFDM block are preserved. Same filter slot as
+/// the narrow SSB filter but rebuilt on mode transitions into/out of DRM.
+const DRM_IF_BW_HZ: f64 = 10_000.0;
+
 fn run_demod(
     mut iq_rx: broadcast::Receiver<Arc<IqBlock>>,
     audio_tx: mpsc::Sender<AudioBlock>,
+    drm_if_tx: Option<broadcast::Sender<AudioBlock>>,
     config: DemodConfig,
     mut tuning_rx: watch::Receiver<DemodTuning>,
     cancel: CancellationToken,
@@ -328,6 +346,8 @@ fn run_demod(
     // Channel filter at 48kHz — 127 taps gives ~375Hz transition bandwidth
     // (much sharper than 65 taps at 192kHz which had ~3kHz transition)
     // For SSB modes, uses complex bandpass to select only the desired sideband.
+    // For DRM, the same slot is configured as a wide (10 kHz) symmetric
+    // passband so both OFDM sidebands survive on their way to DREAM.
     let mut chan_filter = ChannelFilter::new(
         DemodTuning::default().filter_bw_hz,
         config.output_rate,
@@ -340,7 +360,19 @@ fn run_demod(
 
     let mut tuning = *tuning_rx.borrow_and_update();
     let mut nco = Nco::new(-tuning.vfo_offset_hz, config.input_rate);
-    chan_filter.configure(tuning.filter_bw_hz, config.output_rate, tuning.mode);
+    let initial_bw = if tuning.mode == Mode::DRM {
+        DRM_IF_BW_HZ
+    } else {
+        tuning.filter_bw_hz
+    };
+    // See mode-change branch below for the rationale — DRM reuses the
+    // symmetric AM-filter shape.
+    let initial_filter_mode = if tuning.mode == Mode::DRM {
+        Mode::AM
+    } else {
+        tuning.mode
+    };
+    chan_filter.configure(initial_bw, config.output_rate, initial_filter_mode);
 
     // Reusable buffers
     let mut shifted_buf: Vec<[f32; 2]> = Vec::new();
@@ -377,11 +409,21 @@ fn run_demod(
                         debug!(old = ?tuning.mode, new = ?new_tuning.mode, "demod mode changed");
                         iq_decimator.reset();
                     }
-                    chan_filter.configure(
-                        new_tuning.filter_bw_hz,
-                        config.output_rate,
-                        new_tuning.mode,
-                    );
+                    let effective_bw = if new_tuning.mode == Mode::DRM {
+                        DRM_IF_BW_HZ
+                    } else {
+                        new_tuning.filter_bw_hz
+                    };
+                    // DRM uses an AM-style symmetric filter shape so both
+                    // sidebands of the OFDM block pass. The ChannelFilter's
+                    // `AM` arm already does this; reuse it here rather than
+                    // add a DRM-specific code path.
+                    let filter_mode = if new_tuning.mode == Mode::DRM {
+                        Mode::AM
+                    } else {
+                        new_tuning.mode
+                    };
+                    chan_filter.configure(effective_bw, config.output_rate, filter_mode);
                 }
                 tuning = new_tuning;
             }
@@ -410,6 +452,29 @@ fn run_demod(
 
         // 3. Channel filter at 48kHz (sharp selectivity: 127 taps ≈ 375Hz transition)
         chan_filter.process(&decimated_iq, &mut filtered_buf);
+
+        // DRM branch: emit the filtered real part as wideband audio-IF and
+        // loop. No demodulation, no DC block, no AGC — DREAM does its own
+        // signal processing on the raw IF, and AGC here would corrupt OFDM
+        // amplitude statistics.
+        if tuning.mode == Mode::DRM {
+            if let Some(tx) = &drm_if_tx {
+                let samples: Vec<f32> = filtered_buf.iter().map(|&[i, _q]| i).collect();
+                if !samples.is_empty() {
+                    let block = AudioBlock {
+                        samples,
+                        sample_rate: config.output_rate,
+                        timestamp_us: block.timestamp_us,
+                    };
+                    // broadcast::send returns Err only when all receivers
+                    // have been dropped — treat that as a no-consumer state
+                    // (harmless) rather than a fatal error, so the demod
+                    // keeps running if the DRM bridge comes and goes.
+                    let _ = tx.send(block);
+                }
+            }
+            continue;
+        }
 
         // 4. Demodulate (now at 48kHz)
         let mut audio = demodulate(&filtered_buf, tuning.mode);
@@ -445,10 +510,11 @@ fn demodulate(iq: &[[f32; 2]], mode: Mode) -> Vec<f32> {
         Mode::LSB => demod_lsb(iq),
         Mode::FM => demod_fm(iq),
         Mode::CW | Mode::CWR => demod_usb(iq),
-        // DRM audio comes from the DREAM bridge, not this in-process demod.
-        // The caller switches to the DRM task; if DRM still reaches here
-        // (mode mismatch during a transition), emit silence rather than
-        // garbage so speakers don't pop.
+        // In DRM mode this `demodulate()` path is only reached for the
+        // *listenable-audio* output (audio_tx) — which is silent, because
+        // the DRM bridge is the producer of listenable audio once DREAM
+        // decodes. The wideband audio-IF that feeds DREAM is produced by
+        // `demod_drm_audio_if` below and routed through `drm_if_tx`.
         Mode::DRM => vec![0.0; iq.len()],
         Mode::Unknown => demod_usb(iq),
     }

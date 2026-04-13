@@ -113,6 +113,12 @@ impl Pipeline {
         // --- Demod task ---
         let (demod_tuning_tx, demod_tuning_rx) =
             tokio::sync::watch::channel(efd_dsp::DemodTuning::default());
+        // Wideband-SSB audio-IF stream the demod emits under Mode::DRM; the
+        // DRM bridge will subscribe here once it's wired up. Kept live at
+        // pipeline scope so the demod's sender never sees a fully-dropped
+        // channel even while no DRM bridge is running.
+        let (drm_if_tx, _drm_if_rx) =
+            broadcast::channel::<efd_dsp::AudioBlock>(16);
         {
             let iq_rx = iq_tx.subscribe();
             let demod_cfg = efd_dsp::DemodConfig {
@@ -121,8 +127,16 @@ impl Pipeline {
                 mode: efd_proto::Mode::USB,
             };
             let dtx = demod_audio_tx.clone();
+            let drm_tx = Some(drm_if_tx.clone());
             let c = cancel.clone();
-            let handle = efd_dsp::spawn_demod_task(iq_rx, dtx, demod_cfg, demod_tuning_rx, c);
+            let handle = efd_dsp::spawn_demod_task(
+                iq_rx,
+                dtx,
+                drm_tx,
+                demod_cfg,
+                demod_tuning_rx,
+                c,
+            );
             let handle = tokio::spawn(async move {
                 match handle.await {
                     Ok(Ok(())) => info!("demod task exited cleanly"),
