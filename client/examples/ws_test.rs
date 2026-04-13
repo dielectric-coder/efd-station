@@ -34,8 +34,7 @@ async fn main() {
         let msg = ClientMsg::CatCommand(CatCommand {
             raw: "IF;".to_string(),
         });
-        let cfg = bincode::config::standard();
-        let bytes = bincode::encode_to_vec(&msg, cfg).unwrap();
+        let bytes = efd_proto::encode_msg(&msg).unwrap();
         sink.send(Message::Binary(bytes.into())).await.unwrap();
         println!("sent test command: IF;");
     }
@@ -50,8 +49,6 @@ async fn main() {
     let mut last_state: Option<efd_proto::RadioState> = None;
     let mut error_count: u64 = 0;
     let mut decode_errors: u64 = 0;
-
-    let cfg = bincode::config::standard();
 
     println!("receiving for {}s...\n", run_duration.as_secs());
 
@@ -81,8 +78,8 @@ async fn main() {
             }
         };
 
-        let msg: ServerMsg = match bincode::decode_from_slice(&data, cfg) {
-            Ok((msg, _)) => msg,
+        let msg: ServerMsg = match efd_proto::decode_msg(&data) {
+            Ok(m) => m,
             Err(e) => {
                 decode_errors += 1;
                 if decode_errors <= 3 {
@@ -111,7 +108,7 @@ async fn main() {
             }
             ServerMsg::RadioState(state) => {
                 state_count += 1;
-                if state_count == 1 || state_count % 10 == 0 {
+                if state_count == 1 || state_count.is_multiple_of(10) {
                     println!(
                         "RadioState: VFO {:?} freq={} Hz mode={:?} bw={} s={:.0} dB tx={}",
                         state.vfo,

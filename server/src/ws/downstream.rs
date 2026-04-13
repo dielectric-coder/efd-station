@@ -33,11 +33,9 @@ pub async fn run(
     let mut audio_rx = audio_rx;
     let mut last_drm_sent = tokio::time::Instant::now() - DRM_STATUS_MIN_INTERVAL;
 
-    let cfg = bincode::config::standard();
-
     // Send capabilities as the very first message so clients can gate UI
     // before any state arrives.
-    match bincode::encode_to_vec(&ServerMsg::Capabilities(capabilities), cfg) {
+    match efd_proto::encode_msg(&ServerMsg::Capabilities(capabilities)) {
         Ok(bytes) => {
             let send_fut = sink.send(Message::Binary(Bytes::from(bytes)));
             match tokio::time::timeout(SEND_TIMEOUT, send_fut).await {
@@ -113,7 +111,7 @@ pub async fn run(
 
         let Some(msg) = msg else { break };
 
-        match bincode::encode_to_vec(&msg, cfg) {
+        match efd_proto::encode_msg(&msg) {
             Ok(bytes) => {
                 let send_fut = sink.send(Message::Binary(Bytes::from(bytes)));
                 match tokio::time::timeout(SEND_TIMEOUT, send_fut).await {

@@ -23,8 +23,6 @@ pub async fn run(
     audio_source_tx: watch::Sender<AudioSource>,
     cancel: CancellationToken,
 ) {
-    let cfg = bincode::config::standard().with_limit::<MAX_WS_FRAME>();
-
     loop {
         let frame = tokio::select! {
             _ = cancel.cancelled() => break,
@@ -59,10 +57,18 @@ pub async fn run(
             }
         };
 
-        let msg: ClientMsg = match bincode::decode_from_slice(&data, cfg) {
-            Ok((msg, _)) => msg,
+        let msg: ClientMsg = match efd_proto::decode_msg(&data) {
+            Ok(m) => m,
+            Err(efd_proto::WireError::VersionMismatch { got, want }) => {
+                warn!(
+                    got,
+                    want,
+                    "WS client wire-format mismatch — disconnecting"
+                );
+                break;
+            }
             Err(e) => {
-                warn!("bincode decode error: {e}");
+                warn!("WS decode error: {e}");
                 continue;
             }
         };
@@ -116,15 +122,103 @@ pub async fn run(
     }
 }
 
+/// Allowlist of two-letter CAT prefixes accepted from WS clients. Keeps
+/// untrusted input on the rails — anything outside this set is rejected
+/// before it reaches the radio. Grow as the UI gains controls.
+const ALLOWED_CAT_PREFIXES: &[&str] = &[
+    "FA", "FB", // VFO A/B frequency
+    "MD",       // mode
+    "RF",       // filter bandwidth (RF<mode><idx>)
+    "RA",       // attenuator
+    "LP",       // 50 MHz low-pass filter
+    "GT", "TH", // AGC mode + threshold
+    "NR", "NB", // noise reduction / blanker
+    "RT", "XT", // RIT / XIT enable
+    "RC",       // RIT clear
+    "RU", "RD", // RIT up / down
+    "TX", "RX", // PTT on / off
+    "IF", "RI", "SM", // poll commands (IF status, RSSI, S-meter)
+    "FR", "FT", // RX/TX VFO selection
+    "AI",       // auto-info
+];
+
 /// Validate a CAT command from a WS client.
-/// Only allows printable ASCII, must end with ';', length limited.
+///
+/// The radio's CAT dialect is `XX[payload];` where `XX` is two ASCII
+/// uppercase letters. We:
+///   - cap length;
+///   - require the trailing `;`;
+///   - require the prefix to be uppercase ASCII letters and on the
+///     allowlist above (so an attacker can't poke at undocumented or
+///     destructive commands by guessing prefixes);
+///   - restrict the payload to printable ASCII without `;` (which would
+///     allow stuffing a second command into one frame).
 fn validate_cat_command(cmd: &str) -> bool {
-    if cmd.is_empty() || cmd.len() > MAX_CAT_CMD_LEN {
+    if cmd.len() < 3 || cmd.len() > MAX_CAT_CMD_LEN {
         return false;
     }
     if !cmd.ends_with(';') {
         return false;
     }
-    // Only printable ASCII (0x20..=0x7E)
-    cmd.bytes().all(|b| (0x20..=0x7E).contains(&b))
+    let bytes = cmd.as_bytes();
+    if !bytes[0].is_ascii_uppercase() || !bytes[1].is_ascii_uppercase() {
+        return false;
+    }
+    let prefix = &cmd[..2];
+    if !ALLOWED_CAT_PREFIXES.contains(&prefix) {
+        return false;
+    }
+    // Payload between the prefix and the trailing ';' must be
+    // printable-ASCII and free of an embedded ';' (which would let a
+    // client smuggle a second command).
+    let payload = &cmd[2..cmd.len() - 1];
+    payload
+        .bytes()
+        .all(|b| (0x20..=0x7E).contains(&b) && b != b';')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_well_formed_commands() {
+        assert!(validate_cat_command("FA00007100000;"));
+        assert!(validate_cat_command("MD2;"));
+        assert!(validate_cat_command("TX;"));
+        assert!(validate_cat_command("RX;"));
+        assert!(validate_cat_command("IF;"));
+    }
+
+    #[test]
+    fn rejects_unknown_prefix() {
+        assert!(!validate_cat_command("ZZ00;"));
+    }
+
+    #[test]
+    fn rejects_lowercase_prefix() {
+        assert!(!validate_cat_command("fa12345;"));
+    }
+
+    #[test]
+    fn rejects_missing_terminator() {
+        assert!(!validate_cat_command("FA00007100000"));
+    }
+
+    #[test]
+    fn rejects_embedded_semicolon() {
+        assert!(!validate_cat_command("FA;TX;"));
+    }
+
+    #[test]
+    fn rejects_oversize() {
+        let big = format!("FA{};", "0".repeat(MAX_CAT_CMD_LEN));
+        assert!(!validate_cat_command(&big));
+    }
+
+    #[test]
+    fn rejects_too_short() {
+        assert!(!validate_cat_command(";"));
+        assert!(!validate_cat_command("F;"));
+    }
 }

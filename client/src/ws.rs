@@ -40,7 +40,6 @@ async fn run_ws(
     msg_queue: Arc<Mutex<Vec<ServerMsg>>>,
     mut client_rx: mpsc::UnboundedReceiver<ClientMsg>,
 ) {
-    let cfg = bincode::config::standard();
     let mut backoff_secs: u64 = 2;
 
     loop {
@@ -77,8 +76,15 @@ async fn run_ws(
                         }
                     };
 
-                    let msg: ServerMsg = match bincode::decode_from_slice(&data, cfg) {
-                        Ok((msg, _)) => msg,
+                    let msg: ServerMsg = match efd_proto::decode_msg(&data) {
+                        Ok(m) => m,
+                        Err(efd_proto::WireError::VersionMismatch { got, want }) => {
+                            tracing::error!(
+                                got, want,
+                                "server wire-format mismatch — disconnecting"
+                            );
+                            break;
+                        }
                         Err(_) => continue,
                     };
 
@@ -92,7 +98,7 @@ async fn run_ws(
                 }
                 msg = client_rx.recv() => {
                     let Some(msg) = msg else { return };
-                    let bytes = match bincode::encode_to_vec(&msg, cfg) {
+                    let bytes = match efd_proto::encode_msg(&msg) {
                         Ok(b) => b,
                         Err(_) => continue,
                     };
