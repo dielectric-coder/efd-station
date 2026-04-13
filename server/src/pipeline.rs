@@ -435,6 +435,152 @@ impl Pipeline {
         }
     }
 
+    /// Build a minimal pipeline for the DRM file-playback test.
+    ///
+    /// Replaces the IQ capture / demod / CAT / FFT tasks with a single
+    /// [`efd_dsp::spawn_drm_file_bridge`] that plays a local audio-IF
+    /// recording through DREAM. Rest of the downstream path (Opus
+    /// encoder → `broadcast<AudioChunk>` → WS + ALSA) runs unchanged, so
+    /// a real `efd-client` can connect and verify the end-to-end audio
+    /// chain without any radio hardware.
+    ///
+    /// The bridge's join handle is wired so that when `paplay` finishes
+    /// streaming the file, `cancel` is fired — which the main loop uses
+    /// to trigger a clean server shutdown.
+    pub fn start_drm_file_test(
+        config: &Config,
+        file_path: std::path::PathBuf,
+        cancel: CancellationToken,
+    ) -> Self {
+
+        // Channels we still need downstream even without a radio.
+        let (fft_tx, _) = broadcast::channel::<Arc<FftBins>>(8);
+        let (state_tx, _) = broadcast::channel::<RadioState>(16);
+        let (audio_tx, _) = broadcast::channel::<AudioChunk>(32);
+
+        // Placeholder single-consumer channels so WS handlers can still
+        // clone senders even though nothing downstream will act on them
+        // in file-test mode.
+        let (cat_tx, mut cat_rx) = mpsc::channel::<CatCommand>(64);
+        let (tx_audio_tx, mut tx_audio_rx) = mpsc::channel::<TxAudio>(64);
+        let (demod_audio_tx, demod_audio_rx) = mpsc::channel::<efd_dsp::AudioBlock>(64);
+        // usb_rx is always empty in this mode — dropping the sender makes
+        // encode_audio_mux treat it as closed from the start.
+        let (usb_rx_tx, usb_rx_rx) = mpsc::channel::<efd_audio::PcmBlock>(64);
+        drop(usb_rx_tx);
+
+        // Drain the unused upstream channels so their senders (cloned per
+        // WS client) don't back up and deadlock.
+        {
+            let c = cancel.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = c.cancelled() => break,
+                        _ = cat_rx.recv() => { /* ignore CAT in file-test */ }
+                        _ = tx_audio_rx.recv() => { /* ignore TX audio */ }
+                    }
+                }
+            });
+        }
+
+        let mut tasks: Vec<(&'static str, JoinHandle<()>)> = Vec::new();
+
+        // --- DRM file bridge (replaces IQ capture + demod + supervisor) ---
+        let drm_cfg = efd_dsp::DrmConfig {
+            dream_binary: config.drm.dream_binary.clone(),
+            input_sink: config.drm.input_sink.clone(),
+            output_sink: config.drm.output_sink.clone(),
+            iq_input_rate: config.dsp.sample_rate,
+            dream_rate: config.audio.sample_rate,
+            ..Default::default()
+        };
+        let bridge =
+            efd_dsp::spawn_drm_file_bridge(drm_cfg, file_path, demod_audio_tx, cancel.clone());
+        let drm_status_rx = bridge.status_rx;
+
+        // Watch the bridge join — when it exits (paplay finished, or a
+        // child died) fire the top-level cancel so the server winds down.
+        let cancel_done = cancel.clone();
+        let bridge_handle = tokio::spawn(async move {
+            match bridge.join.await {
+                Ok(Ok(())) => info!("DRM file bridge exited cleanly"),
+                Ok(Err(e)) => error!("DRM file bridge error: {e}"),
+                Err(e) => error!("DRM file bridge panicked: {e}"),
+            }
+            cancel_done.cancel();
+        });
+        tasks.push(("drm_file_bridge", bridge_handle));
+
+        // --- Opus encoder → broadcast<AudioChunk> ---
+        // Uses the same mux path as the real pipeline; usb_rx is closed so
+        // only demod_audio (DRM output) feeds the encoder.
+        let (audio_source_tx, audio_source_rx) = watch::channel(AudioSource::SoftwareDemod);
+        {
+            let atx = audio_tx.clone();
+            let c = cancel.clone();
+            let handle = tokio::spawn(async move {
+                encode_audio_mux(demod_audio_rx, usb_rx_rx, audio_source_rx, atx, c).await;
+            });
+            tasks.push(("opus_encoder", handle));
+        }
+
+        // --- Local ALSA monitor (optional but useful while testing) ---
+        {
+            let alsa_cfg = efd_audio::AlsaConfig {
+                device: config.audio.alsa_device.clone(),
+                sample_rate: config.audio.sample_rate,
+                latency_ms: 50,
+            };
+            let (alsa_tx, alsa_rx) = mpsc::channel::<efd_audio::PcmBlock>(64);
+            let audio_rx_for_alsa = audio_tx.subscribe();
+            let c = cancel.clone();
+            let alsa_bridge = tokio::spawn(async move {
+                decode_audio_for_alsa(audio_rx_for_alsa, alsa_tx, c).await;
+            });
+            tasks.push(("alsa_bridge", alsa_bridge));
+
+            let c2 = cancel.clone();
+            let handle = efd_audio::spawn_alsa_task(alsa_cfg, alsa_rx, c2);
+            let handle = tokio::spawn(async move {
+                match handle.await {
+                    Ok(Ok(())) => info!("ALSA task exited cleanly"),
+                    Ok(Err(e)) => error!("ALSA task error: {e}"),
+                    Err(e) => error!("ALSA task panicked: {e}"),
+                }
+            });
+            tasks.push(("alsa", handle));
+        }
+
+        let (demod_mode_tx, _demod_mode_rx) =
+            watch::channel::<Option<efd_proto::Mode>>(Some(efd_proto::Mode::DRM));
+
+        let capabilities = Capabilities {
+            source: efd_proto::SourceKind::FdmDuo, // placeholder — no real source
+            has_iq: false,
+            has_tx: false,
+            has_hardware_cat: false,
+            supported_demod_modes: vec![efd_proto::Mode::DRM],
+        };
+
+        info!(tasks = tasks.len(), "DRM file-test pipeline started");
+
+        Self {
+            fft_tx,
+            state_tx,
+            audio_tx,
+            cat_tx,
+            tx_audio_tx,
+            demod_mode_tx,
+            audio_source_tx,
+            capabilities,
+            drm_status_rx,
+            cancel,
+            tasks,
+        }
+    }
+
     /// Graceful shutdown — cancel all tasks and await them.
     pub async fn shutdown(self) {
         info!("pipeline shutting down");

@@ -37,7 +37,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!(bind = %cfg.server.bind, port = cfg.server.port, "starting efd-backend");
 
     let cancel = CancellationToken::new();
-    let pipeline = pipeline::Pipeline::start(&cfg);
+    let pipeline = match std::env::var("EFD_DRM_FILE_TEST").ok() {
+        Some(path) if !path.is_empty() => {
+            info!(file = %path, "EFD_DRM_FILE_TEST set — starting DRM file-test pipeline");
+            pipeline::Pipeline::start_drm_file_test(&cfg, path.into(), cancel.clone())
+        }
+        _ => pipeline::Pipeline::start(&cfg),
+    };
 
     let state = Arc::new(AppState {
         pipeline,
