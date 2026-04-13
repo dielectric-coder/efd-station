@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub server: ServerConfig,
@@ -42,6 +42,12 @@ pub struct CatConfig {
     /// Or an explicit path like "/dev/ttyUSB0".
     pub serial_device: String,
     pub poll_interval_ms: u64,
+    /// rigctld-compatible TCP responder fronting the FDM-DUO (native CAT).
+    /// Bound only when the active source has hardware CAT.
+    pub responder_fdmduo_bind: String,
+    /// rigctld-compatible TCP responder fronting the software demod.
+    /// Bound only when the active source can supply IQ.
+    pub responder_demod_bind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,18 +86,6 @@ pub struct AudioConfig {
 
 // -- defaults --
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            usb: UsbConfig::default(),
-            dsp: DspConfig::default(),
-            cat: CatConfig::default(),
-            audio: AudioConfig::default(),
-            drm: DrmConfig::default(),
-        }
-    }
-}
 
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -126,6 +120,8 @@ impl Default for CatConfig {
         Self {
             serial_device: "auto".into(),
             poll_interval_ms: 200,
+            responder_fdmduo_bind: "127.0.0.1:4532".into(),
+            responder_demod_bind: "127.0.0.1:4533".into(),
         }
     }
 }

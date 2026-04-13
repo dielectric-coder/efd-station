@@ -351,43 +351,63 @@ impl Pipeline {
         // Port A fronts the FDM-DUO; bound whenever hardware CAT is present.
         // Port B fronts the software demod; bound whenever IQ is available.
         if source_caps.has_hardware_cat {
-            let cfg = efd_cat::ResponderConfig {
-                bind_addr: "127.0.0.1:4532".parse().expect("valid bind addr"),
-                label: "fdmduo-front",
-            };
-            let backend = efd_cat::Backend::Hardware {
-                cat_tx: cat_tx.clone(),
-            };
-            let c = cancel.clone();
-            let handle = efd_cat::spawn_responder(cfg, backend, state_watch_rx.clone(), c);
-            let handle = tokio::spawn(async move {
-                match handle.await {
-                    Ok(Ok(())) => info!("rigctld fdmduo-front exited cleanly"),
-                    Ok(Err(e)) => error!("rigctld fdmduo-front error: {e}"),
-                    Err(e) => error!("rigctld fdmduo-front panicked: {e}"),
+            match config.cat.responder_fdmduo_bind.parse() {
+                Ok(bind_addr) => {
+                    let cfg = efd_cat::ResponderConfig {
+                        bind_addr,
+                        label: "fdmduo-front",
+                    };
+                    let backend = efd_cat::Backend::Hardware {
+                        cat_tx: cat_tx.clone(),
+                    };
+                    let c = cancel.clone();
+                    let handle = efd_cat::spawn_responder(cfg, backend, state_watch_rx.clone(), c);
+                    let handle = tokio::spawn(async move {
+                        match handle.await {
+                            Ok(Ok(())) => info!("rigctld fdmduo-front exited cleanly"),
+                            Ok(Err(e)) => error!("rigctld fdmduo-front error: {e}"),
+                            Err(e) => error!("rigctld fdmduo-front panicked: {e}"),
+                        }
+                    });
+                    tasks.push(("rigctld_hw", handle));
                 }
-            });
-            tasks.push(("rigctld_hw", handle));
+                Err(e) => {
+                    error!(
+                        bind = %config.cat.responder_fdmduo_bind,
+                        "invalid responder_fdmduo_bind, skipping FDM-DUO front: {e}"
+                    );
+                }
+            }
         }
         if source_caps.has_iq {
-            let cfg = efd_cat::ResponderConfig {
-                bind_addr: "127.0.0.1:4533".parse().expect("valid bind addr"),
-                label: "demod-front",
-            };
-            let backend = efd_cat::Backend::Demod {
-                cat_tx: cat_tx.clone(),
-                demod_mode: demod_mode_tx.clone(),
-            };
-            let c = cancel.clone();
-            let handle = efd_cat::spawn_responder(cfg, backend, state_watch_rx.clone(), c);
-            let handle = tokio::spawn(async move {
-                match handle.await {
-                    Ok(Ok(())) => info!("rigctld demod-front exited cleanly"),
-                    Ok(Err(e)) => error!("rigctld demod-front error: {e}"),
-                    Err(e) => error!("rigctld demod-front panicked: {e}"),
+            match config.cat.responder_demod_bind.parse() {
+                Ok(bind_addr) => {
+                    let cfg = efd_cat::ResponderConfig {
+                        bind_addr,
+                        label: "demod-front",
+                    };
+                    let backend = efd_cat::Backend::Demod {
+                        cat_tx: cat_tx.clone(),
+                        demod_mode: demod_mode_tx.clone(),
+                    };
+                    let c = cancel.clone();
+                    let handle = efd_cat::spawn_responder(cfg, backend, state_watch_rx.clone(), c);
+                    let handle = tokio::spawn(async move {
+                        match handle.await {
+                            Ok(Ok(())) => info!("rigctld demod-front exited cleanly"),
+                            Ok(Err(e)) => error!("rigctld demod-front error: {e}"),
+                            Err(e) => error!("rigctld demod-front panicked: {e}"),
+                        }
+                    });
+                    tasks.push(("rigctld_demod", handle));
                 }
-            });
-            tasks.push(("rigctld_demod", handle));
+                Err(e) => {
+                    error!(
+                        bind = %config.cat.responder_demod_bind,
+                        "invalid responder_demod_bind, skipping demod front: {e}"
+                    );
+                }
+            }
         }
 
         info!(tasks = tasks.len(), "pipeline started");
