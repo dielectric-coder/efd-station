@@ -1,28 +1,33 @@
 //! DRM (Digital Radio Mondiale) decoder bridge.
 //!
-//! Pipes the in-process IQ stream through the vendored DREAM 2.1.1
-//! decoder by way of two PipeWire null sinks:
+//! Pipes a **wideband-SSB audio-IF stream** (produced by `crate::demod`
+//! under `Mode::DRM`, see its [`crate::demod::spawn_demod_task`] docs)
+//! through the vendored DREAM 2.1.1 decoder by way of two PipeWire null
+//! sinks. DREAM runs in its sound-card audio-IF mode — the same path
+//! that works when manually running `paplay FILE.fla | dream` on
+//! DREAM's bundled sample set.
 //!
 //! ```text
-//! IqBlock  ──→ decimate 192k→48k ──→ pacat → sink(drm_in)
-//!                                                │ (monitor)
-//!                          dream -I drm_in.monitor -O drm_out -c 6
-//!                                                │
-//!                                          sink(drm_out).monitor → parec
-//!                                                │
-//!                                          AudioBlock → broadcast
+//! AudioBlock (48 kHz mono f32, 10 kHz BW audio-IF)
+//!           ──→ pacat channels=1 → sink(drm_in)
+//!                                       │ (monitor)
+//!                   dream -I drm_in.monitor -O drm_out
+//!                         --sigsrate 48000 --audsrate 48000
+//!                                       │
+//!                            sink(drm_out).monitor → parec channels=1
+//!                                       │
+//!                            AudioBlock → pipeline audio mpsc
 //! ```
 //!
-//! DREAM stays unpatched beyond the hamlib cast fix — sound-card I/O
-//! is the path it was designed for. On CM5 Trixie PipeWire ships by
-//! default, so `pactl`/`pacat`/`parec` are available and the null-sink
-//! pattern works without snd-aloop or extra config.
+//! Rationale for audio-IF instead of raw I/Q (`-c 6`): DREAM's most-
+//! tested input path is sound-card audio — the mode its built-in FLAC
+//! samples exercise — so we match that format. The SSB demod upstream
+//! handles decimation, VFO centering, and sideband filtering; DREAM
+//! just does OFDM decode on the resulting real-valued IF signal.
 
 use std::process::Stdio;
-use std::sync::Arc;
 use std::time::Duration;
 
-use efd_iq::IqBlock;
 use efd_proto::DrmStatus;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -33,7 +38,6 @@ use tracing::{debug, info, warn};
 
 use crate::demod::AudioBlock;
 use crate::error::DspError;
-use crate::filter::FirDecimator;
 
 /// Hard cap on how long any individual `pactl` / `pacat` / `parec` /
 /// `dream` subprocess setup step may block. If PipeWire is hung we want
@@ -49,13 +53,12 @@ pub struct DrmConfig {
     pub input_sink: String,
     /// Name of the output null sink we create.
     pub output_sink: String,
-    /// Incoming IQ sample rate (broadcast publisher's rate).
-    pub iq_input_rate: u32,
     /// Rate at which dream is driven. Must be one of 24/48/96/192 kHz
-    /// (dream only accepts those). 48 kHz is the usual choice.
+    /// (dream only accepts those). 48 kHz is the usual choice. The
+    /// incoming [`AudioBlock`]s must already be at this rate — the
+    /// wideband-SSB demod stage upstream is responsible for producing
+    /// them at 48 kHz.
     pub dream_rate: u32,
-    /// Taps in the anti-aliasing FIR used for the IQ→dream decimation.
-    pub decim_taps: usize,
 }
 
 impl Default for DrmConfig {
@@ -64,9 +67,7 @@ impl Default for DrmConfig {
             dream_binary: "dream".into(),
             input_sink: "efd_drm_in".into(),
             output_sink: "efd_drm_out".into(),
-            iq_input_rate: 192_000,
             dream_rate: 48_000,
-            decim_taps: 65,
         }
     }
 }
@@ -89,34 +90,27 @@ pub struct DrmHandles {
 /// best-effort Drop guard.
 pub fn spawn_drm_bridge(
     cfg: DrmConfig,
-    iq_rx: broadcast::Receiver<Arc<IqBlock>>,
+    audio_rx: broadcast::Receiver<AudioBlock>,
     audio_tx: mpsc::Sender<AudioBlock>,
     cancel: CancellationToken,
 ) -> DrmHandles {
     let (status_tx, status_rx) = watch::channel::<Option<DrmStatus>>(None);
     let join = tokio::spawn(
-        async move { run_bridge(cfg, iq_rx, audio_tx, status_tx, cancel).await },
+        async move { run_bridge(cfg, audio_rx, audio_tx, status_tx, cancel).await },
     );
     DrmHandles { join, status_rx }
 }
 
 async fn run_bridge(
     cfg: DrmConfig,
-    mut iq_rx: broadcast::Receiver<Arc<IqBlock>>,
+    mut audio_rx: broadcast::Receiver<AudioBlock>,
     audio_tx: mpsc::Sender<AudioBlock>,
     status_tx: watch::Sender<Option<DrmStatus>>,
     cancel: CancellationToken,
 ) -> Result<(), DspError> {
-    let factor = (cfg.iq_input_rate / cfg.dream_rate) as usize;
-    if factor < 1 || cfg.iq_input_rate % cfg.dream_rate != 0 {
-        return Err(DspError::Drm(format!(
-            "iq_input_rate ({}) not an integer multiple of dream_rate ({})",
-            cfg.iq_input_rate, cfg.dream_rate
-        )));
-    }
-
-    // Load both null sinks. Module indices are held by the guard so we
-    // unload them on drop even if this fn returns via `?`.
+    // Load both null sinks (mono, matches DREAM's sound-card audio-IF
+    // expectations). Module indices are held by the guard so we unload
+    // them on drop even if this fn returns via `?`.
     let _sinks = NullSinks::create(&cfg.input_sink, &cfg.output_sink, cfg.dream_rate).await?;
 
     // Helper: take a Child's piped stdio handle, returning a structured error
@@ -138,14 +132,14 @@ async fn run_bridge(
             .ok_or_else(|| DspError::Drm(format!("{name}: stdout not piped")))
     }
 
-    // `pacat` writes the decimated IQ (s16 stereo) into drm_in.
+    // `pacat` writes the wideband audio-IF (mono s16) into drm_in.
     let mut pacat = spawn_with_timeout("pacat", || {
         Command::new("pacat")
             .args([
                 "--playback",
                 "--device",
                 &cfg.input_sink,
-                "--channels=2",
+                "--channels=1",
                 "--format=s16le",
                 &format!("--rate={}", cfg.dream_rate),
                 "--raw",
@@ -165,7 +159,7 @@ async fn run_bridge(
                 "--record",
                 "--device",
                 &format!("{}.monitor", cfg.output_sink),
-                "--channels=2",
+                "--channels=1",
                 "--format=s16le",
                 &format!("--rate={}", cfg.dream_rate),
                 "--raw",
@@ -178,7 +172,8 @@ async fn run_bridge(
     .await?;
     let mut parec_stdout = take_stdout(&mut parec, "parec")?;
 
-    // DREAM: I/Q input (0 Hz IF) from drm_in.monitor, audio to drm_out.
+    // DREAM: mono audio-IF input from drm_in.monitor, audio to drm_out.
+    // No `-c 6` — we feed real-valued audio, not complex I/Q.
     // stdout is piped so the TUI parser can build a live DrmStatus.
     let mut dream = spawn_with_timeout("dream", || {
         Command::new(&cfg.dream_binary)
@@ -187,8 +182,6 @@ async fn run_bridge(
                 &format!("{}.monitor", cfg.input_sink),
                 "-O",
                 &cfg.output_sink,
-                "-c",
-                "6", // I/Q input positive, 0 Hz IF
                 "--sigsrate",
                 &cfg.dream_rate.to_string(),
                 "--audsrate",
@@ -209,24 +202,13 @@ async fn run_bridge(
         "DRM bridge started"
     );
 
-    // Coarse pipeline-latency estimate used to resync after an IQ lag.
-    // Empirically dream + the two PipeWire null sinks add roughly 200 ms
-    // of audio latency at 48 kHz; after an IQ gap, the reader drops that
-    // many frames so stale decoded audio doesn't blend into fresh audio.
-    const PURGE_FRAMES_AFTER_LAG: usize = 48_000 / 5;
-    let purge_frames = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-
-    // IQ → pacat writer task
+    // AudioBlock → pacat writer task.
+    //
+    // Incoming samples are already at `dream_rate` (the demod upstream
+    // handles decimation to 48 kHz), so this task just transcodes f32 →
+    // mono s16le and streams the bytes into pacat's stdin.
     let cancel_w = cancel.clone();
-    let dream_rate = cfg.dream_rate;
-    let iq_rate = cfg.iq_input_rate;
-    let decim_taps = cfg.decim_taps;
-    let purge_w = purge_frames.clone();
     let writer = tokio::spawn(async move {
-        let mut dec_i = FirDecimator::new(factor, decim_taps);
-        let mut dec_q = FirDecimator::new(factor, decim_taps);
-        let mut i_buf = Vec::with_capacity(4096);
-        let mut q_buf = Vec::with_capacity(4096);
         loop {
             tokio::select! {
                 biased;
@@ -234,21 +216,11 @@ async fn run_bridge(
                     debug!("DRM writer: cancelled");
                     break;
                 }
-                r = iq_rx.recv() => match r {
+                r = audio_rx.recv() => match r {
                     Ok(block) => {
-                        i_buf.clear();
-                        q_buf.clear();
-                        for &[i, q] in &block.samples {
-                            i_buf.push(i);
-                            q_buf.push(q);
-                        }
-                        let i_dec = dec_i.process(&i_buf);
-                        let q_dec = dec_q.process(&q_buf);
-                        // Interleave L=I, R=Q as s16le.
-                        let mut out = Vec::with_capacity(i_dec.len() * 4);
-                        for (i, q) in i_dec.iter().zip(q_dec.iter()) {
-                            out.extend_from_slice(&f32_to_s16(*i).to_le_bytes());
-                            out.extend_from_slice(&f32_to_s16(*q).to_le_bytes());
+                        let mut out = Vec::with_capacity(block.samples.len() * 2);
+                        for &s in &block.samples {
+                            out.extend_from_slice(&f32_to_s16(s).to_le_bytes());
                         }
                         if pacat_stdin.write_all(&out).await.is_err() {
                             debug!("DRM writer: pacat stdin closed");
@@ -256,39 +228,30 @@ async fn run_bridge(
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(skipped = n, "DRM writer: IQ lagged — resyncing");
-                        dec_i.reset();
-                        dec_q.reset();
-                        // Tell the reader to discard ~the dream pipeline
-                        // worth of stale audio so post-gap fresh audio
-                        // doesn't blend with what was already in flight.
-                        purge_w.store(
-                            PURGE_FRAMES_AFTER_LAG,
-                            std::sync::atomic::Ordering::Release,
-                        );
+                        // The demod broadcast outpaced us. DREAM handles
+                        // modest gaps gracefully; log and keep going.
+                        warn!(skipped = n, "DRM writer: audio-IF lagged");
                     }
                     Err(broadcast::error::RecvError::Closed) => {
-                        debug!("DRM writer: IQ channel closed");
+                        debug!("DRM writer: audio-IF channel closed");
                         break;
                     }
                 }
             }
         }
         let _ = pacat_stdin.shutdown().await;
-        let _ = (iq_rate, dream_rate); // silence unused warnings when features change
     });
 
-    // parec → AudioBlock task
+    // parec → AudioBlock task.
+    //
+    // parec delivers mono s16le decoded audio from DREAM at `dream_rate`;
+    // we repack into f32 AudioBlocks matching the demod pipeline contract.
     let cancel_r = cancel.clone();
     let audio_tx_r = audio_tx.clone();
     let dream_rate_r = cfg.dream_rate;
-    let purge_r = purge_frames.clone();
     let reader = tokio::spawn(async move {
-        // Read in chunks that yield ~20 ms of audio each, so the WS
-        // downstream and ALSA sink see comparable frame sizes to the
-        // in-process demod.
-        const FRAMES_PER_CHUNK: usize = 960;                         // 20 ms @ 48 kHz
-        const BYTES_PER_CHUNK: usize = FRAMES_PER_CHUNK * 2 * 2;     // stereo s16
+        const FRAMES_PER_CHUNK: usize = 960;                  // 20 ms @ 48 kHz
+        const BYTES_PER_CHUNK: usize = FRAMES_PER_CHUNK * 2;  // mono s16
         let mut buf = vec![0u8; BYTES_PER_CHUNK];
         let start = std::time::Instant::now();
         loop {
@@ -300,24 +263,10 @@ async fn run_bridge(
                 }
                 res = parec_stdout.read_exact(&mut buf) => match res {
                     Ok(_) => {
-                        // If the writer flagged a lag, swallow up to
-                        // PURGE_FRAMES_AFTER_LAG frames before resuming
-                        // forwarding. Decrement under Acquire/Release so
-                        // multiple lag events stack additively.
-                        let to_purge = purge_r.load(std::sync::atomic::Ordering::Acquire);
-                        if to_purge > 0 {
-                            let new_remaining = to_purge.saturating_sub(FRAMES_PER_CHUNK);
-                            purge_r.store(new_remaining, std::sync::atomic::Ordering::Release);
-                            continue;
-                        }
-                        // Downmix stereo s16 → mono f32 to match the rest of
-                        // the demod pipeline's AudioBlock contract.
                         let mut mono = Vec::with_capacity(FRAMES_PER_CHUNK);
-                        for chunk in buf.chunks_exact(4) {
-                            let l = i16::from_le_bytes([chunk[0], chunk[1]]);
-                            let r = i16::from_le_bytes([chunk[2], chunk[3]]);
-                            let mix = (l as f32 + r as f32) * 0.5 / 32768.0;
-                            mono.push(mix);
+                        for chunk in buf.chunks_exact(2) {
+                            let s = i16::from_le_bytes([chunk[0], chunk[1]]);
+                            mono.push(s as f32 / 32768.0);
                         }
                         let blk = AudioBlock {
                             samples: mono,
@@ -674,7 +623,7 @@ async fn pactl_load_null_sink(name: &str, rate: u32) -> Result<u32, DspError> {
             "module-null-sink",
             &format!("sink_name={name}"),
             &format!("rate={rate}"),
-            "channels=2",
+            "channels=1",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -743,9 +692,8 @@ mod tests {
     }
 
     #[test]
-    fn default_config_rates_are_compatible() {
+    fn default_dream_rate_is_supported() {
         let cfg = DrmConfig::default();
-        assert_eq!(cfg.iq_input_rate % cfg.dream_rate, 0);
         assert!(matches!(
             cfg.dream_rate,
             24_000 | 48_000 | 96_000 | 192_000

@@ -156,7 +156,7 @@ impl Pipeline {
         let (drm_status_tx, drm_status_rx) =
             watch::channel::<Option<efd_proto::DrmStatus>>(None);
         if source_caps.has_iq {
-            let iq_tx_for_drm = iq_tx.clone();
+            let drm_if_tx_for_drm = drm_if_tx.clone();
             let audio_tx_for_drm = demod_audio_tx.clone();
             let mode_rx = demod_mode_tx.subscribe();
             let status_tx = drm_status_tx.clone();
@@ -165,14 +165,13 @@ impl Pipeline {
                 dream_binary: config.drm.dream_binary.clone(),
                 input_sink: config.drm.input_sink.clone(),
                 output_sink: config.drm.output_sink.clone(),
-                iq_input_rate: config.dsp.sample_rate,
                 dream_rate: config.audio.sample_rate,
                 ..Default::default()
             };
             let handle = tokio::spawn(async move {
                 run_drm_supervisor(
                     drm_cfg,
-                    iq_tx_for_drm,
+                    drm_if_tx_for_drm,
                     audio_tx_for_drm,
                     mode_rx,
                     status_tx,
@@ -640,7 +639,7 @@ async fn decode_audio_for_alsa(
 /// don't have to re-subscribe on every mode change.
 async fn run_drm_supervisor(
     cfg: efd_dsp::DrmConfig,
-    iq_tx: broadcast::Sender<Arc<efd_iq::IqBlock>>,
+    drm_if_tx: broadcast::Sender<efd_dsp::AudioBlock>,
     audio_tx: mpsc::Sender<efd_dsp::AudioBlock>,
     mut mode_rx: watch::Receiver<Option<efd_proto::Mode>>,
     status_tx: watch::Sender<Option<efd_proto::DrmStatus>>,
@@ -662,7 +661,7 @@ async fn run_drm_supervisor(
                 let bc = CancellationToken::new();
                 let handles = efd_dsp::spawn_drm_bridge(
                     cfg.clone(),
-                    iq_tx.subscribe(),
+                    drm_if_tx.subscribe(),
                     audio_tx.clone(),
                     bc.clone(),
                 );

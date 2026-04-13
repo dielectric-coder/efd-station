@@ -11,26 +11,24 @@
 //!
 //! What it exercises:
 //! 1. `spawn_drm_bridge` creates the two null sinks and launches the
-//!    dream/pacat/parec subprocesses.
+//!    dream/pacat/parec subprocesses in audio-IF mode.
 //! 2. A known-good DRM recording (VoR FLAC) is pushed directly into the
-//!    bridge's `drm_in` sink via `paplay`, simulating what the Rust
-//!    IQ→pacat path would produce if fed a real DRM IQ stream.
+//!    bridge's `drm_in` sink via `paplay`, bypassing the bridge's own
+//!    pacat writer (which normally receives audio-IF from the demod).
 //! 3. The bridge's `audio_tx` receives decoded DRM audio, which we
 //!    verify is non-silent.
 //!
-//! The test intentionally bypasses the Rust IQ→pacat path because we
-//! don't have a baseband-IQ DRM recording handy; the FLAC recordings
-//! are mono IF. The `-c 6` channel selection used by `spawn_drm_bridge`
-//! expects I/Q, so the decoded result when fed mono-IF-as-stereo-IQ is
-//! not expected to match the reference decode exactly — but dream will
-//! still attempt to decode and produce output, which is enough to
-//! prove the subprocess + routing + capture chain is alive.
+//! Bypassing the bridge's writer via paplay lets this test validate the
+//! subprocess + routing + capture chain without needing a live demod
+//! upstream or a file-backed audio source. The bridge's own audio-IF
+//! input stays empty (no sender pushes to the broadcast here), but
+//! DREAM happily consumes from drm_in.monitor regardless of which
+//! process is filling it.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use efd_dsp::{spawn_drm_bridge, AudioBlock, DrmConfig};
-use efd_iq::IqBlock;
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -93,18 +91,17 @@ async fn drm_bridge_decodes_vor_sample() {
         dream_binary: dream.to_string_lossy().into(),
         input_sink: format!("efd_drm_test_in_{tag}"),
         output_sink: format!("efd_drm_test_out_{tag}"),
-        iq_input_rate: 48_000,
         dream_rate: 48_000,
         ..Default::default()
     };
 
-    // Unused IQ channel — we're pushing audio directly into the sink
-    // below via paplay, bypassing the Rust IQ→pacat path.
-    let (_iq_tx, iq_rx) = broadcast::channel::<std::sync::Arc<IqBlock>>(4);
+    // Unused audio-IF broadcast — we're pushing audio directly into
+    // drm_in via paplay, bypassing the bridge's own pacat writer.
+    let (_audio_if_tx, audio_if_rx) = broadcast::channel::<AudioBlock>(4);
     let (audio_tx, mut audio_rx) = mpsc::channel::<AudioBlock>(256);
     let cancel = CancellationToken::new();
 
-    let handles = spawn_drm_bridge(cfg.clone(), iq_rx, audio_tx, cancel.clone());
+    let handles = spawn_drm_bridge(cfg.clone(), audio_if_rx, audio_tx, cancel.clone());
     let bridge = handles.join;
 
     // Give the bridge a moment to load sinks and start subprocesses.
