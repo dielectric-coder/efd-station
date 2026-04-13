@@ -108,7 +108,7 @@ async fn run_bridge(
     cancel: CancellationToken,
 ) -> Result<(), DspError> {
     let factor = (cfg.iq_input_rate / cfg.dream_rate) as usize;
-    if factor < 1 || !cfg.iq_input_rate.is_multiple_of(cfg.dream_rate) {
+    if factor < 1 || cfg.iq_input_rate % cfg.dream_rate != 0 {
         return Err(DspError::Drm(format!(
             "iq_input_rate ({}) not an integer multiple of dream_rate ({})",
             cfg.iq_input_rate, cfg.dream_rate

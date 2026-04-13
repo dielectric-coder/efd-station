@@ -108,7 +108,7 @@ async fn main() {
             }
             ServerMsg::RadioState(state) => {
                 state_count += 1;
-                if state_count == 1 || state_count.is_multiple_of(10) {
+                if state_count == 1 || state_count % 10 == 0 {
                     println!(
                         "RadioState: VFO {:?} freq={} Hz mode={:?} bw={} s={:.0} dB tx={}",
                         state.vfo,

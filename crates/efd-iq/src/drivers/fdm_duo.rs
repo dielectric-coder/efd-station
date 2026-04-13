@@ -303,11 +303,11 @@ fn run(
                 let _ = tx.send(block);
 
                 block_count += 1;
-                if block_count.is_multiple_of(1000) {
+                if block_count % 1000 == 0 {
                     debug!(block_count, "IQ blocks captured");
                 }
                 // Periodically re-read FPGA center frequency (LO may change)
-                if block_count.is_multiple_of(500) {
+                if block_count % 500 == 0 {
                     if let Ok(freq) = dev.read_frequency() {
                         let _ = center_freq_tx.send(freq);
                     }
