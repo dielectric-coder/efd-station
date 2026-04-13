@@ -133,6 +133,12 @@ async fn run_bridge(
     }
 
     // `pacat` writes the wideband audio-IF (mono s16) into drm_in.
+    //
+    // `--latency-msec=500` gives the pipewire client a generous target
+    // buffer so small hiccups in our Rust-side pacer don't underrun the
+    // null-sink on the DREAM-read side. Adds ~500 ms of end-to-end
+    // latency (inaudible for DRM, which already has ~2 s of interleaver
+    // delay on top).
     let mut pacat = spawn_with_timeout("pacat", || {
         Command::new("pacat")
             .args([
@@ -142,6 +148,7 @@ async fn run_bridge(
                 "--channels=1",
                 "--format=s16le",
                 &format!("--rate={}", cfg.dream_rate),
+                "--latency-msec=500",
                 "--raw",
             ])
             .stdin(Stdio::piped())
@@ -299,6 +306,13 @@ async fn run_bridge(
         let mut reader = BufReader::new(dream_stdout);
         let mut acc = DrmStatus::empty();
         let mut line = String::new();
+        // Counters so operators can see at a glance whether DREAM is
+        // producing TUI frames (frames_published) and whether stdout is
+        // actually line-delimited (lines_read). If lines_read climbs but
+        // frames_published doesn't, the frame-terminator match is off.
+        let mut lines_read: u64 = 0;
+        let mut frames_published: u64 = 0;
+        let mut last_report = std::time::Instant::now();
         loop {
             line.clear();
             tokio::select! {
@@ -313,11 +327,21 @@ async fn run_bridge(
                         break;
                     }
                     Ok(_) => {
+                        lines_read += 1;
                         let clean = strip_ansi(line.trim_end_matches(['\r', '\n']));
                         if parse_tui_line(&clean, &mut acc) {
                             acc.timestamp_us = bridge_start.elapsed().as_micros() as u64;
                             let _ = status_tx.send(Some(acc.clone()));
                             acc = DrmStatus::empty();
+                            frames_published += 1;
+                        }
+                        if last_report.elapsed() >= std::time::Duration::from_secs(5) {
+                            info!(
+                                lines_read,
+                                frames_published,
+                                "DRM TUI: activity"
+                            );
+                            last_report = std::time::Instant::now();
                         }
                     }
                     Err(e) => {
@@ -327,6 +351,11 @@ async fn run_bridge(
                 }
             }
         }
+        info!(
+            lines_read,
+            frames_published,
+            "DRM TUI: exiting"
+        );
     });
 
     // Supervise: cancel when any child dies or cancel fires. Then tear down.
