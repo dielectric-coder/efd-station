@@ -71,6 +71,7 @@ impl DisplayBar {
         let app_mode_label = Label::new(Some("MON"));
         app_mode_label.add_css_class("monospace");
         app_mode_label.add_css_class("app-mode");
+        app_mode_label.set_width_chars(6);
         app_mode_label.set_xalign(0.0);
         disp0_left.append(&app_mode_label);
 
@@ -136,6 +137,7 @@ impl DisplayBar {
         let audio_src_label = Label::new(Some("AUD"));
         audio_src_label.add_css_class("monospace");
         audio_src_label.add_css_class("app-mode");
+        audio_src_label.set_width_chars(6);
         audio_src_label.set_xalign(0.0);
         disp1_left.append(&audio_src_label);
 
@@ -373,10 +375,13 @@ impl ControlBar {
         audio: Option<Arc<AudioPlayer>>,
         display_bar: DisplayBar,
     ) -> Self {
-        // Two-row layout (docs/client-sdr-UI.drawio): ctrl0 has left/
-        // center/right slots for the MODE button + always-visible
-        // controls; ctrl1's center slot hosts the SDR-only controls and
-        // is visibility-toggled by the MODE button.
+        // Three-row layout: ctrl0 has left/center/right slots for the
+        // MODE button + always-visible controls; ctrl1's center slot
+        // hosts the SDR-only controls (visibility-toggled by MODE);
+        // ctrl2 is reserved for future controls. All three rows get a
+        // fixed minimum height so the control bar doesn't collapse as
+        // sdr_box / audio_btn toggle visibility.
+        const CTRL_ROW_HEIGHT: i32 = 42;
         let container = GtkBox::new(Orientation::Vertical, 2);
         container.set_margin_start(8);
         container.set_margin_end(8);
@@ -385,9 +390,14 @@ impl ControlBar {
         container.set_hexpand(true);
 
         let (ctrl0_row, ctrl0_left, ctrl0_center, _ctrl0_right) = make_lcr_row();
+        ctrl0_row.set_size_request(-1, CTRL_ROW_HEIGHT);
         container.append(&ctrl0_row);
         let (ctrl1_row, _ctrl1_left, ctrl1_center, _ctrl1_right) = make_lcr_row();
+        ctrl1_row.set_size_request(-1, CTRL_ROW_HEIGHT);
         container.append(&ctrl1_row);
+        let (ctrl2_row, _ctrl2_left, _ctrl2_center, _ctrl2_right) = make_lcr_row();
+        ctrl2_row.set_size_request(-1, CTRL_ROW_HEIGHT);
+        container.append(&ctrl2_row);
 
         let last_cmd = Rc::new(Cell::new(Instant::now() - std::time::Duration::from_secs(10)));
         let last_radio: Rc<RefCell<Option<RadioState>>> = Rc::new(RefCell::new(None));
@@ -703,9 +713,11 @@ impl ControlBar {
         self.ptt_btn.set_visible(caps.has_tx);
         // MON/SDR toggle is only meaningful when the source can supply IQ.
         self.mode_btn.set_visible(caps.has_iq);
-        // SRC (audio-source) toggle: gated on the USB-audio endpoint, not
-        // CAT — the FDM-DUO happens to expose both but they're separate.
-        self.audio_btn.set_visible(caps.has_usb_audio);
+        // SRC (audio-source) toggle is visibility-driven by MON/SDR
+        // state, not by USB-audio availability: when AUD is unavailable
+        // the indicator goes yellow (AUD→IQ) and the user still needs
+        // the SRC toggle to explicitly pick IQ and dismiss the warning.
+        self.audio_btn.set_visible(!self.mode_btn.is_active());
         // AGC threshold is a CAT command, so it keys on has_hardware_cat.
         self.agc_label.set_visible(caps.has_hardware_cat);
         self.agc_scale.set_visible(caps.has_hardware_cat);
