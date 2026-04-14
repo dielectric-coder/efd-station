@@ -258,7 +258,10 @@ async fn run_bridge(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     if cfg.flip_spectrum {
-        dream_cmd.arg("-p");
+        // DREAM's source takes `-p <0|1>` (GetNumericArgument), even though
+        // the man page writes it as a bare flag. Passing `-p` alone makes
+        // DREAM consume the next token as the argument and bail with exit 1.
+        dream_cmd.args(["-p", "1"]);
     }
     // SAFETY: `setsid(2)` is async-signal-safe, which is the contract for
     // pre_exec (runs post-fork / pre-exec). Return value is ignored: if
