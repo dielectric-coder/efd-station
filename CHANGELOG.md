@@ -4,6 +4,29 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **DRM bridge simpler in file-test mode.** `spawn_drm_bridge` now takes
+  a `DrmInput` enum (`AudioBroadcast` or `File`). The `File` variant
+  makes DREAM read the audio-IF file directly via its `-f` flag —
+  libsndfile handles WAV/FLAC natively; `.iq`/`.if` → raw s16 stereo,
+  `.pcm` → raw s16 mono. No Rust-side file reader, no `drm_in` null
+  sink, no `pacat` subprocess needed for the test path.
+  - Deleted `server/src/drm_file_source.rs` (was ~280 LOC claxon/hound
+    reader).
+  - Removed `claxon` and `hound` deps from `server/Cargo.toml`.
+  - `Pipeline::start_drm_file_test` no longer creates a `drm_if`
+    broadcast or runs the supervisor; it spawns the bridge directly in
+    `DrmInput::File` mode and winds down cleanly when DREAM hits EOF.
+  - Production AudioBroadcast path untouched — live-IQ deploys behave
+    identically to before.
+
+### Added
+- `DrmConfig.flip_spectrum: bool` (+ `[drm] flip_spectrum = true` in
+  `config.toml`) passes `-p` to DREAM. Some DRM broadcasters transmit
+  with inverted spectrum; one of DREAM's bundled FLAC samples is named
+  `R_Nigeria_Mode_C_10kHz_flipped_spectrum.flac`. DREAM has no
+  auto-detection for this, so it's a config toggle.
+
 ## [0.6.0] - 2026-04-13
 
 ### Changed (BREAKING — wire format)

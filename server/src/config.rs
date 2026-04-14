@@ -56,10 +56,16 @@ pub struct DrmConfig {
     /// Path to the dream binary. Defaults to "dream" on PATH; set to the
     /// vendored build path (e.g. "/usr/lib/efd-station/dream") when packaged.
     pub dream_binary: String,
-    /// PipeWire null-sink name for IQ fed to dream.
+    /// PipeWire null-sink name for audio-IF fed to dream.
     pub input_sink: String,
     /// PipeWire null-sink name for dream's decoded audio output.
     pub output_sink: String,
+    /// Pass `-p` to dream so it flips the input spectrum. Some DRM
+    /// broadcasters transmit with inverted spectrum (one of DREAM's
+    /// bundled samples is labeled `..._flipped_spectrum.flac`); DREAM
+    /// has no auto-detection, so toggle this per deploy or per test
+    /// file as needed.
+    pub flip_spectrum: bool,
 }
 
 impl Default for DrmConfig {
@@ -68,6 +74,7 @@ impl Default for DrmConfig {
             dream_binary: "dream".into(),
             input_sink: "efd_drm_in".into(),
             output_sink: "efd_drm_out".into(),
+            flip_spectrum: false,
         }
     }
 }

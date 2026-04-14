@@ -1,5 +1,4 @@
 mod config;
-mod drm_file_source;
 mod pipeline;
 mod ws;
 

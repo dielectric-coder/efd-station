@@ -28,7 +28,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use efd_dsp::{spawn_drm_bridge, AudioBlock, DrmConfig};
+use efd_dsp::{spawn_drm_bridge, AudioBlock, DrmConfig, DrmInput};
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -101,7 +101,12 @@ async fn drm_bridge_decodes_vor_sample() {
     let (audio_tx, mut audio_rx) = mpsc::channel::<AudioBlock>(256);
     let cancel = CancellationToken::new();
 
-    let handles = spawn_drm_bridge(cfg.clone(), audio_if_rx, audio_tx, cancel.clone());
+    let handles = spawn_drm_bridge(
+        cfg.clone(),
+        DrmInput::AudioBroadcast(audio_if_rx),
+        audio_tx,
+        cancel.clone(),
+    );
     let bridge = handles.join;
 
     // Give the bridge a moment to load sinks and start subprocesses.

@@ -281,12 +281,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "claxon"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4bfbf56724aa9eca8afa4fcfadeb479e722935bb2a0900c2d37e0cc477af0688"
-
-[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -504,7 +498,6 @@ dependencies = [
  "axum",
  "bincode",
  "bytes",
- "claxon",
  "directories",
  "efd-audio",
  "efd-cat",
@@ -512,7 +505,6 @@ dependencies = [
  "efd-iq",
  "efd-proto",
  "futures-util",
- "hound",
  "serde",
  "thiserror 2.0.18",
  "tokio",
@@ -956,12 +948,6 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
-
-[[package]]
-name = "hound"
-version = "3.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62adaabb884c94955b19907d60019f4e145d091c75345379e70d1ee696f7854f"
 
 [[package]]
 name = "http"

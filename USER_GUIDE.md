@@ -236,12 +236,20 @@ EFD_DRM_FILE_TEST=/path/to/dream/samples/VoiceOfRussia_ModeB_10kHz.flac \
   /usr/bin/efd-server
 ```
 
-This replaces the normal IQ → demod path with a FLAC/WAV reader that
-publishes mono 48 kHz audio-IF samples onto the same internal channel the
-demod would write. DREAM runs the same way it does against live signal;
-the client sees the full DrmStatus + decoded audio chain. On EOF the
-server exits cleanly. Bundled FLAC samples under
+This bypasses IQ capture / demod / CAT / FFT and lets DREAM read the
+FLAC/WAV file directly via its `-f` flag (libsndfile handles WAV/FLAC;
+raw `.iq`/`.if`/`.pcm` are recognized by extension). No Rust-side file
+reader or extra PipeWire sink is involved — only the output side
+(DREAM → null sink → parec → Opus → WS) runs, and it's the same code
+path production uses, so a real client connected to
+`ws://…:8080/ws` exercises the full receive chain. On EOF the server
+exits cleanly. Bundled FLAC samples under
 `third_party/dream/samples/` are audio-IF recordings known to decode.
+
+If the sample file has inverted spectrum (DREAM's bundled
+`R_Nigeria_Mode_C_10kHz_flipped_spectrum.flac` is one example), add
+`flip_spectrum = true` to the `[drm]` section of your `config.toml`
+before starting the server — DREAM doesn't auto-detect that.
 
 ---
 

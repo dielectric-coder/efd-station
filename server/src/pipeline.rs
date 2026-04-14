@@ -166,7 +166,7 @@ impl Pipeline {
                 input_sink: config.drm.input_sink.clone(),
                 output_sink: config.drm.output_sink.clone(),
                 dream_rate: config.audio.sample_rate,
-                ..Default::default()
+                flip_spectrum: config.drm.flip_spectrum,
             };
             let handle = tokio::spawn(async move {
                 run_drm_supervisor(
@@ -477,10 +477,6 @@ impl Pipeline {
         let (demod_audio_tx, demod_audio_rx) = mpsc::channel::<efd_dsp::AudioBlock>(64);
         let (usb_rx_tx, usb_rx_rx) = mpsc::channel::<efd_audio::PcmBlock>(64);
         drop(usb_rx_tx); // no USB audio producer in file-test mode
-        let (drm_if_tx, _drm_if_rx) =
-            broadcast::channel::<efd_dsp::AudioBlock>(16);
-        let (drm_status_tx, drm_status_rx) =
-            watch::channel::<Option<efd_proto::DrmStatus>>(None);
         let (demod_mode_tx, _demod_mode_rx_unused) =
             watch::channel::<Option<efd_proto::Mode>>(Some(efd_proto::Mode::DRM));
         let (audio_source_tx, audio_source_rx) =
@@ -507,49 +503,37 @@ impl Pipeline {
             ));
         }
 
-        // --- File-source task (replaces IQ capture + demod) ---
-        {
-            let tx = drm_if_tx.clone();
-            let c = cancel.clone();
-            let handle = crate::drm_file_source::spawn(file_path.clone(), tx, c);
-            let handle = tokio::spawn(async move {
-                match handle.await {
-                    Ok(()) => info!("drm file source exited"),
-                    Err(e) => error!("drm file source join error: {e}"),
-                }
-            });
-            tasks.push(("drm_file_source", handle));
-        }
-
-        // --- DRM bridge supervisor ---
-        // Forced-on: mode watch starts as DRM so the supervisor spawns
-        // the bridge immediately and keeps it up for the whole test.
-        {
-            let drm_if_tx_for_drm = drm_if_tx.clone();
-            let audio_tx_for_drm = demod_audio_tx.clone();
-            let mode_rx = demod_mode_tx.subscribe();
-            let status_tx = drm_status_tx.clone();
-            let c = cancel.clone();
-            let drm_cfg = efd_dsp::DrmConfig {
-                dream_binary: config.drm.dream_binary.clone(),
-                input_sink: config.drm.input_sink.clone(),
-                output_sink: config.drm.output_sink.clone(),
-                dream_rate: config.audio.sample_rate,
-                ..Default::default()
-            };
-            let handle = tokio::spawn(async move {
-                run_drm_supervisor(
-                    drm_cfg,
-                    drm_if_tx_for_drm,
-                    audio_tx_for_drm,
-                    mode_rx,
-                    status_tx,
-                    c,
-                )
-                .await;
-            });
-            tasks.push(("drm_supervisor", handle));
-        }
+        // --- DRM bridge in File mode ---
+        //
+        // DREAM reads the audio-IF file directly via `-f`; no Rust-side
+        // file reader, no `drm_if` broadcast, no `drm_in` null sink, no
+        // pacat — all eliminated relative to the AudioBroadcast path.
+        // When DREAM hits EOF the bridge exits cleanly and we propagate
+        // cancel so axum shuts down.
+        let drm_cfg = efd_dsp::DrmConfig {
+            dream_binary: config.drm.dream_binary.clone(),
+            input_sink: config.drm.input_sink.clone(),
+            output_sink: config.drm.output_sink.clone(),
+            dream_rate: config.audio.sample_rate,
+            flip_spectrum: config.drm.flip_spectrum,
+        };
+        let bridge = efd_dsp::spawn_drm_bridge(
+            drm_cfg,
+            efd_dsp::DrmInput::File(file_path.clone()),
+            demod_audio_tx.clone(),
+            cancel.clone(),
+        );
+        let drm_status_rx = bridge.status_rx;
+        let cancel_done = cancel.clone();
+        let bridge_handle = tokio::spawn(async move {
+            match bridge.join.await {
+                Ok(Ok(())) => info!("DRM bridge (file mode) exited cleanly"),
+                Ok(Err(e)) => error!("DRM bridge error: {e}"),
+                Err(e) => error!("DRM bridge panicked: {e}"),
+            }
+            cancel_done.cancel();
+        });
+        tasks.push(("drm_bridge", bridge_handle));
 
         // --- Opus encoder mux (unchanged from real pipeline) ---
         {
@@ -839,7 +823,7 @@ async fn run_drm_supervisor(
                 let bc = CancellationToken::new();
                 let handles = efd_dsp::spawn_drm_bridge(
                     cfg.clone(),
-                    drm_if_tx.subscribe(),
+                    efd_dsp::DrmInput::AudioBroadcast(drm_if_tx.subscribe()),
                     audio_tx.clone(),
                     bc.clone(),
                 );

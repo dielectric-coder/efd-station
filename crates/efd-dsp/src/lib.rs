@@ -6,7 +6,7 @@ pub mod filter;
 pub mod window;
 
 pub use demod::{spawn_demod_task, AudioBlock, DemodConfig, DemodTuning};
-pub use drm::{spawn_drm_bridge, DrmConfig};
+pub use drm::{spawn_drm_bridge, DrmConfig, DrmInput};
 pub use filter::FirDecimator;
 pub use error::DspError;
 pub use fft::{spawn_fft_task, FftConfig};

@@ -24,10 +24,6 @@ bytes = "1"
 futures-util = "0.3"
 toml = "0.8"
 directories = "6"
-# Audio-IF file sources for the DRM file-test path (EFD_DRM_FILE_TEST).
-# Both crates are small and pure-Rust.
-claxon = "0.4"
-hound = "3"
 
 [package.metadata.deb]
 maintainer = "dielectric-coder"

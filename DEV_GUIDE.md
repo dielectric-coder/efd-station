@@ -158,11 +158,13 @@ EFD_DRM_FILE_TEST=third_party/dream/samples/VoiceOfRussia_ModeB_10kHz.flac \
 ```
 
 Server picks a minimal pipeline (`Pipeline::start_drm_file_test` in
-`server/src/pipeline.rs`): no IQ capture, no demod, no CAT, no FFT. A
-FLAC/WAV reader (`server/src/drm_file_source.rs`) publishes audio-IF
-samples onto the same `drm_if` broadcast the wideband-SSB demod writes
-under `Mode::DRM`. From there the production DRM bridge + Opus encoder
-+ WS downstream run unchanged, so a real `efd-client` connected to
+`server/src/pipeline.rs`): no IQ capture, no demod, no CAT, no FFT.
+The DRM bridge spawns directly in `DrmInput::File(path)` mode — DREAM
+reads the file natively via its `-f` flag (libsndfile for WAV/FLAC,
+extension-sniffed for raw `.iq`/`.if`/`.pcm`). No Rust-side file
+reader, no `drm_in` null sink, no `pacat`. Only the output side
+(DREAM → `drm_out.monitor` → parec → Opus → WS) is plumbed, and it's
+the same code path as production so a real `efd-client` connected to
 `ws://localhost:8080/ws` exercises the full client-side chain.
 
 A synthetic `RadioState { mode: DRM, bw: "10.0k" }` is emitted every
@@ -173,6 +175,11 @@ On FLAC EOF the pipeline fires its cancel token and the server exits.
 Useful for: validating DREAM subprocess wiring after a refactor,
 confirming the client renders DRM status correctly, reproducing an
 audio-chopping bug without tying up the radio.
+
+If a sample file has inverted spectrum (one of DREAM's bundled samples
+is `R_Nigeria_Mode_C_10kHz_flipped_spectrum.flac`), set
+`[drm] flip_spectrum = true` in `config.toml` so DREAM is launched with
+`-p`.
 
 **Runtime deps**: vendored DREAM built via `third_party/dream/build.sh`,
 `pulseaudio-utils`, `libfaad2` (DREAM dlopens it for AAC decode;

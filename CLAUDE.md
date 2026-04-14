@@ -360,17 +360,24 @@ UI design itself comes after the backend architecture settles.
 
 `EFD_DRM_FILE_TEST=/path/to/file.flac` at server startup selects
 `Pipeline::start_drm_file_test` (in `server/src/pipeline.rs`) — a minimal
-pipeline that skips IQ capture / FFT / demod / CAT and uses
-`server/src/drm_file_source.rs` (claxon + hound) to publish audio-IF
-samples onto the same `drm_if_tx` broadcast that `demod.rs` writes under
-`Mode::DRM`. The production DRM bridge, Opus encoder, and WS downstream
-then run unchanged; a real `efd-client` exercises the full client-side
-chain. A synthetic `RadioState { mode: DRM, bw: "10.0k" }` keeps the
-client UI gated on correctly. Exits cleanly on file EOF.
+pipeline that skips IQ capture / FFT / demod / CAT and spawns the
+DRM bridge directly in `DrmInput::File` mode. DREAM opens the file
+itself via its `-f` flag (libsndfile for WAV/FLAC; extension-sniffed
+raw for `.iq`/`.if`/`.pcm`), so there is no Rust-side file reader, no
+`drm_in` null sink, and no pacat subprocess on this path. Only the
+output side (DREAM → `drm_out.monitor` → parec → Opus → WS) runs, and
+it's shared with production. A synthetic
+`RadioState { mode: DRM, bw: "10.0k" }` keeps the client UI gated on
+correctly. When DREAM finishes the file the bridge exits cleanly and
+the pipeline cancel fires, winding down axum.
 
 Bundled FLAC samples under `third_party/dream/samples/` are audio-IF
 recordings known to decode. This path is the canonical smoke test for
 any DRM-related refactor before touching live radio code.
+
+For inverted-spectrum broadcasts (one bundled sample is labeled
+`..._flipped_spectrum.flac`), set `[drm] flip_spectrum = true` in
+`config.toml` so DREAM is launched with `-p`. No auto-detection.
 
 ---
 
