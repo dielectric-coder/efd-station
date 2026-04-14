@@ -183,30 +183,43 @@ impl Pipeline {
         }
 
         // --- USB RX audio capture (radio's hardware demod output) ---
+        //
+        // Gate on a real snd_pcm_open probe, not just sysfs resolution.
+        // On the FDM-DUO another process (PipeWire/PulseAudio) can grab
+        // the USB audio card, so the device name exists but opening it
+        // fails with ENOTSUPP (errno 524) — we need to learn that now,
+        // so `has_usb_audio` is accurate before we advertise capabilities.
         let (usb_rx_tx, usb_rx_rx) = mpsc::channel::<efd_audio::PcmBlock>(64);
-        let usb_audio_live;
-        if let Some(rx_dev) = efd_audio::resolve_device(&config.audio.rx_device, true) {
-            info!(device = %rx_dev, "USB RX audio capture device");
-            let usb_rx_cfg = efd_audio::UsbRxConfig {
-                device: rx_dev,
-                sample_rate: config.audio.sample_rate,
-            };
-            let c = cancel.clone();
-            let handle = efd_audio::spawn_usb_rx_task(usb_rx_cfg, usb_rx_tx, c);
-            let handle = tokio::spawn(async move {
-                match handle.await {
-                    Ok(Ok(())) => info!("USB RX capture exited cleanly"),
-                    Ok(Err(e)) => error!("USB RX capture error: {e}"),
-                    Err(e) => error!("USB RX capture panicked: {e}"),
-                }
-            });
-            tasks.push(("usb_rx", handle));
-            usb_audio_live = true;
-        } else {
-            drop(usb_rx_tx); // no producer — mux will see closed channel immediately
-            info!("USB RX audio disabled (device not found)");
-            usb_audio_live = false;
-        }
+        let usb_audio_live = match efd_audio::resolve_device(&config.audio.rx_device, true) {
+            Some(rx_dev) if efd_audio::probe_capture(&rx_dev) => {
+                info!(device = %rx_dev, "USB RX audio capture device");
+                let usb_rx_cfg = efd_audio::UsbRxConfig {
+                    device: rx_dev,
+                    sample_rate: config.audio.sample_rate,
+                };
+                let c = cancel.clone();
+                let handle = efd_audio::spawn_usb_rx_task(usb_rx_cfg, usb_rx_tx, c);
+                let handle = tokio::spawn(async move {
+                    match handle.await {
+                        Ok(Ok(())) => info!("USB RX capture exited cleanly"),
+                        Ok(Err(e)) => error!("USB RX capture error: {e}"),
+                        Err(e) => error!("USB RX capture panicked: {e}"),
+                    }
+                });
+                tasks.push(("usb_rx", handle));
+                true
+            }
+            Some(rx_dev) => {
+                drop(usb_rx_tx);
+                info!(device = %rx_dev, "USB RX audio unavailable (probe failed)");
+                false
+            }
+            None => {
+                drop(usb_rx_tx);
+                info!("USB RX audio disabled (device not found)");
+                false
+            }
+        };
 
         // --- Audio source mux → Opus encoder → broadcast<AudioChunk> ---
         let (audio_source_tx, audio_source_rx) = watch::channel(AudioSource::RadioUsb);

@@ -67,6 +67,24 @@ pub fn discover_alsa_devices() -> Option<FdmDuoAlsa> {
     None
 }
 
+/// Probe whether an ALSA capture device can actually be opened.
+/// Used as a runtime gate for `Capabilities::has_usb_audio` —
+/// resolving the device *name* from sysfs isn't enough; the open
+/// itself can fail with ENOTSUPP (errno 524) if another process
+/// (PipeWire/PulseAudio) has claimed it or the format isn't
+/// supported. The returned PCM is dropped immediately, releasing
+/// the device for the real capture task to reopen.
+pub fn probe_capture(device: &str) -> bool {
+    use alsa::{Direction, PCM};
+    match PCM::new(device, Direction::Capture, false) {
+        Ok(_pcm) => true,
+        Err(e) => {
+            warn!(device, error = %e, "USB RX audio probe failed");
+            false
+        }
+    }
+}
+
 /// Resolve a single ALSA device name for `rx_device` or `tx_device`.
 ///
 /// If `configured` is `"auto"`, runs discovery and returns the appropriate
