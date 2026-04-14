@@ -10,8 +10,19 @@ use cpal::{SampleFormat, Stream, StreamConfig};
 /// Opus frame size: 20ms at 48kHz = 960 samples.
 const OPUS_FRAME_SIZE: usize = 960;
 
-/// Ring buffer capacity in samples (~200ms at 48kHz).
-const RING_CAPACITY: usize = 48000 / 5;
+/// Ring buffer capacity in samples. Sized to absorb DRM's bursty audio
+/// output without dropping samples: DREAM emits audio in ~400–500 ms
+/// frame-aligned chunks (one per OFDM transmission frame) rather than
+/// at strict 20 ms cadence, and the earlier 200 ms buffer was smaller
+/// than a single burst, so the drain-oldest logic below threw away
+/// half of every burst and played silence between them.
+///
+/// 1.5 s at 48 kHz = 72 000 f32 samples ≈ 280 KB. Cheap, and DRM's
+/// inherent ~2 s interleaver delay dwarfs the added latency anyway.
+/// For SSB/AM where low latency matters, the drain-oldest logic will
+/// trim down to near-empty in normal operation since arrivals match
+/// output rate.
+const RING_CAPACITY: usize = 48000 * 3 / 2;
 
 /// Audio player: decodes Opus chunks and plays through the default output device.
 pub struct AudioPlayer {
