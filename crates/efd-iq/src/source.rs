@@ -79,11 +79,15 @@ impl SourceConfig {
             ]
         };
         match self {
+            // FDM-DUO exposes three independent USB endpoints (IQ,
+            // audio, CAT). Other SDRs have IQ only; portable radio has
+            // audio only (via USB dongle line-in).
             SourceConfig::FdmDuo(_) => SourceCapabilities {
                 kind: SourceKind::FdmDuo,
                 has_iq: true,
                 has_tx: true,
                 has_hardware_cat: true,
+                has_usb_audio: true,
                 supported_demod_modes: iq_modes(),
             },
             SourceConfig::HackRf(_) => SourceCapabilities {
@@ -91,6 +95,7 @@ impl SourceConfig {
                 has_iq: true,
                 has_tx: true,
                 has_hardware_cat: false,
+                has_usb_audio: false,
                 supported_demod_modes: iq_modes(),
             },
             SourceConfig::RspDx(_) => SourceCapabilities {
@@ -98,6 +103,7 @@ impl SourceConfig {
                 has_iq: true,
                 has_tx: false,
                 has_hardware_cat: false,
+                has_usb_audio: false,
                 supported_demod_modes: iq_modes(),
             },
             SourceConfig::RtlSdr(_) => SourceCapabilities {
@@ -105,6 +111,7 @@ impl SourceConfig {
                 has_iq: true,
                 has_tx: false,
                 has_hardware_cat: false,
+                has_usb_audio: false,
                 supported_demod_modes: iq_modes(),
             },
             SourceConfig::PortableRadio(_) => SourceCapabilities {
@@ -112,6 +119,7 @@ impl SourceConfig {
                 has_iq: false,
                 has_tx: false,
                 has_hardware_cat: false,
+                has_usb_audio: true,
                 supported_demod_modes: vec![],
             },
         }
@@ -127,5 +135,10 @@ pub struct SourceCapabilities {
     pub has_iq: bool,
     pub has_tx: bool,
     pub has_hardware_cat: bool,
+    /// USB audio passthrough endpoint (FDM-DUO) or USB-dongle analog
+    /// line-in (portable radio). Independent of `has_hardware_cat` —
+    /// the FDM-DUO happens to expose both, but they're separate USB
+    /// endpoints.
+    pub has_usb_audio: bool,
     pub supported_demod_modes: Vec<Mode>,
 }

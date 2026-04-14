@@ -133,11 +133,12 @@ async fn main() {
             }
             ServerMsg::Capabilities(caps) => {
                 println!(
-                    "Capabilities: source={:?} iq={} tx={} hw_cat={} modes={:?}",
+                    "Capabilities: source={:?} iq={} tx={} hw_cat={} usb_audio={} modes={:?}",
                     caps.source,
                     caps.has_iq,
                     caps.has_tx,
                     caps.has_hardware_cat,
+                    caps.has_usb_audio,
                     caps.supported_demod_modes,
                 );
             }

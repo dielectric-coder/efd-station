@@ -133,6 +133,7 @@ mod tests {
             has_iq: true,
             has_tx: true,
             has_hardware_cat: true,
+            has_usb_audio: true,
             supported_demod_modes: vec![Mode::USB, Mode::LSB, Mode::CW, Mode::AM, Mode::FM],
         };
         assert_eq!(orig, round_trip(&orig));

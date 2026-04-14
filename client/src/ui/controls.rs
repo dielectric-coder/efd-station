@@ -29,6 +29,8 @@ pub struct DisplayBar {
     smeter: LevelBar,
     smeter_label: Label,
     tx_label: Label,
+    app_mode_label: Label,
+    audio_src_label: Label,
     /// First DRM info line — mode/bandwidth/modulation/services.
     drm_line1: Label,
     /// Second DRM info line — SNR/WMER/lock flags.
@@ -48,43 +50,55 @@ struct CachedState {
 
 impl DisplayBar {
     pub fn new() -> Self {
-        // Outer vertical container: the existing status row on top, plus
-        // two optional DRM info lines underneath.
+        // Outer vertical container holds three rows. Each row has left /
+        // center / right slots so cross-row alignment matches the
+        // drawio wireframe (docs/client-sdr-UI.drawio).
         let container = GtkBox::new(Orientation::Vertical, 2);
         container.set_margin_start(8);
         container.set_margin_end(8);
         container.set_margin_top(4);
         container.set_margin_bottom(4);
-        container.set_halign(Align::Center);
+        container.set_hexpand(true);
 
-        let status_row = GtkBox::new(Orientation::Horizontal, 12);
-        status_row.set_halign(Align::Center);
-        container.append(&status_row);
+        let (row0, disp0_left, disp0_center, disp0_right) = make_lcr_row();
+        container.append(&row0);
+        let (row1, disp1_left, disp1_center, _) = make_lcr_row();
+        container.append(&row1);
+        let (row2, _, disp2_center, _) = make_lcr_row();
+        container.append(&row2);
 
+        // disp0-left: MON/SDR indicator, left-justified.
+        let app_mode_label = Label::new(Some("MON"));
+        app_mode_label.add_css_class("monospace");
+        app_mode_label.add_css_class("app-mode");
+        app_mode_label.set_xalign(0.0);
+        disp0_left.append(&app_mode_label);
+
+        // disp0-center: VFO, freq, mode, BW, S-meter (center-justified).
         let vfo_label = Label::new(Some("VFO A"));
         vfo_label.add_css_class("monospace");
         vfo_label.set_width_chars(5);
-        vfo_label.set_xalign(0.0);
-        status_row.append(&vfo_label);
+        vfo_label.set_xalign(0.5);
+        disp0_center.append(&vfo_label);
 
         let freq_label = Label::new(Some("--- Hz"));
         freq_label.add_css_class("monospace");
         freq_label.set_width_chars(16);
-        freq_label.set_xalign(1.0);
+        freq_label.set_xalign(0.5);
         freq_label.set_markup("<span font='18' weight='bold'>--- Hz</span>");
-        status_row.append(&freq_label);
+        disp0_center.append(&freq_label);
 
         let mode_label = Label::new(Some("---"));
         mode_label.add_css_class("monospace");
         mode_label.set_width_chars(5);
-        mode_label.set_xalign(0.0);
-        status_row.append(&mode_label);
+        mode_label.set_xalign(0.5);
+        disp0_center.append(&mode_label);
 
         let bw_label = Label::new(Some("BW: ---"));
         bw_label.add_css_class("monospace");
         bw_label.set_width_chars(10);
-        bw_label.set_xalign(0.0);
-        status_row.append(&bw_label);
+        bw_label.set_xalign(0.5);
+        disp0_center.append(&bw_label);
 
         let smeter_box = GtkBox::new(Orientation::Horizontal, 4);
         smeter_box.set_valign(Align::Center);
@@ -103,32 +117,40 @@ impl DisplayBar {
         let smeter_label = Label::new(Some("S0"));
         smeter_label.add_css_class("monospace");
         smeter_label.set_width_chars(6);
-        smeter_label.set_xalign(0.0);
+        smeter_label.set_xalign(0.5);
         smeter_box.append(&smeter_label);
-        status_row.append(&smeter_box);
+        disp0_center.append(&smeter_box);
 
+        // disp0-right: RX/TX indicator, right-justified.
         let tx_label = Label::new(Some("RX"));
         tx_label.add_css_class("monospace");
         tx_label.add_css_class("tx-rx-rx");
         tx_label.set_width_chars(2);
-        tx_label.set_xalign(0.5);
-        status_row.append(&tx_label);
+        tx_label.set_xalign(1.0);
+        tx_label.set_halign(Align::End);
+        disp0_right.append(&tx_label);
 
-        // Two always-visible extra info lines. Today they carry DRM
-        // decoder status when Mode::DRM is selected; future modes will
-        // reuse them for RIT/XIT/DNR/DNF/NB readouts, etc. The Display-
-        // Bar exposes mode-agnostic setters (`update_drm`, `clear_extras`,
-        // plus whatever we add next) so the rows can be repurposed
-        // without widget-tree changes.
+        // disp1-left: audio source indicator (AUD = radio USB audio,
+        // IQ = software demod from IQ).
+        let audio_src_label = Label::new(Some("AUD"));
+        audio_src_label.add_css_class("monospace");
+        audio_src_label.add_css_class("app-mode");
+        audio_src_label.set_xalign(0.0);
+        disp1_left.append(&audio_src_label);
+
+        // disp1-center / disp2-center: DRM info lines (center-justified).
+        // Mode-agnostic rows — today carry DRM decoder status; future
+        // modes (RIT/XIT/DNR/DNF/NB readouts, etc.) reuse them via
+        // `update_drm` / `clear_extras` without widget-tree changes.
         let drm_line1 = Label::new(None);
         drm_line1.add_css_class("monospace");
         drm_line1.set_xalign(0.5);
-        container.append(&drm_line1);
+        disp1_center.append(&drm_line1);
 
         let drm_line2 = Label::new(None);
         drm_line2.add_css_class("monospace");
         drm_line2.set_xalign(0.5);
-        container.append(&drm_line2);
+        disp2_center.append(&drm_line2);
 
         Self {
             container,
@@ -139,6 +161,8 @@ impl DisplayBar {
             smeter,
             smeter_label,
             tx_label,
+            app_mode_label,
+            audio_src_label,
             drm_line1,
             drm_line2,
             prev: RefCell::new(None),
@@ -147,6 +171,28 @@ impl DisplayBar {
 
     pub fn widget(&self) -> &GtkBox {
         &self.container
+    }
+
+    /// Set the MON/SDR indicator in the top bar.
+    pub fn set_app_mode(&self, is_sdr: bool) {
+        self.app_mode_label
+            .set_text(if is_sdr { "SDR" } else { "MON" });
+    }
+
+    /// Set the audio-source indicator in disp1-left.
+    /// `is_iq` true when audio comes from the software demod (SDR mode
+    /// or MON+SW); false when it comes from the radio's USB audio.
+    /// `unavailable` true when the selected source isn't actually
+    /// serviceable (e.g. MON+AUD with no FDM-DUO hardware CAT) — paints
+    /// the indicator yellow.
+    pub fn set_audio_source(&self, is_iq: bool, unavailable: bool) {
+        self.audio_src_label
+            .set_text(if is_iq { "IQ" } else { "AUD" });
+        if unavailable {
+            self.audio_src_label.add_css_class("app-mode-warn");
+        } else {
+            self.audio_src_label.remove_css_class("app-mode-warn");
+        }
     }
 
     /// Optimistic frequency update (before radio confirms).
@@ -301,6 +347,14 @@ pub struct ControlBar {
     /// struct so a clone of `ControlBar` keeps the same shared state.
     #[allow(dead_code)]
     last_cmd: Rc<Cell<Instant>>,
+    /// Display bar handle — needed by `apply_capabilities` so the AUD
+    /// indicator can be re-painted when server capabilities arrive.
+    display_bar: DisplayBar,
+    /// Whether AUD (radio USB audio passthrough) is actually serviceable.
+    /// Driven by `caps.has_usb_audio`; consulted by the toggle handlers
+    /// and `apply_capabilities` to decide whether to yellow-flag the AUD
+    /// indicator.
+    aud_available: Rc<Cell<bool>>,
 }
 
 impl ControlBar {
@@ -309,16 +363,28 @@ impl ControlBar {
         audio: Option<Arc<AudioPlayer>>,
         display_bar: DisplayBar,
     ) -> Self {
-        let container = GtkBox::new(Orientation::Horizontal, 12);
+        // Two-row layout (docs/client-sdr-UI.drawio): ctrl0 has left/
+        // center/right slots for the MODE button + always-visible
+        // controls; ctrl1's center slot hosts the SDR-only controls and
+        // is visibility-toggled by the MODE button.
+        let container = GtkBox::new(Orientation::Vertical, 2);
         container.set_margin_start(8);
         container.set_margin_end(8);
         container.set_margin_top(4);
         container.set_margin_bottom(4);
-        container.set_halign(Align::Center);
+        container.set_hexpand(true);
+
+        let (ctrl0_row, ctrl0_left, ctrl0_center, _ctrl0_right) = make_lcr_row();
+        container.append(&ctrl0_row);
+        let (ctrl1_row, _ctrl1_left, ctrl1_center, _ctrl1_right) = make_lcr_row();
+        container.append(&ctrl1_row);
 
         let last_cmd = Rc::new(Cell::new(Instant::now() - std::time::Duration::from_secs(10)));
         let last_radio: Rc<RefCell<Option<RadioState>>> = Rc::new(RefCell::new(None));
         let sdr_params = Rc::new(RefCell::new(sdr_params::load()));
+        // Optimistic until server capabilities arrive; apply_capabilities
+        // will flip this based on `caps.has_usb_audio`.
+        let aud_available = Rc::new(Cell::new(true));
 
         // --- SDR controls box (visible in SDR mode only) ---
         let sdr_box = GtkBox::new(Orientation::Horizontal, 8);
@@ -384,27 +450,31 @@ impl ControlBar {
         sdr_box.append(&mode_dropdown);
 
         // --- Audio source toggle (MON mode only) ---
-        let audio_btn = ToggleButton::with_label("USB");
+        let audio_btn = ToggleButton::with_label("SRC");
         audio_btn.set_valign(Align::Center);
-        audio_btn.set_tooltip_text(Some("USB = radio hardware demod, SW = software demod"));
+        audio_btn.set_tooltip_text(Some(
+            "Audio source — untoggled: radio USB audio (AUD); toggled: software demod (IQ)",
+        ));
         {
             let tx = ws_tx.clone();
+            let db = display_bar.clone();
+            let aa = aud_available.clone();
             audio_btn.connect_toggled(move |btn| {
-                if btn.is_active() {
+                let is_iq = btn.is_active();
+                db.set_audio_source(is_iq, !is_iq && !aa.get());
+                if is_iq {
                     // MON+USB → MON+SW: demod mirrors radio params
-                    btn.set_label("SW");
                     let _ = tx.send(ClientMsg::SetDemodMode(None));
                     let _ = tx.send(ClientMsg::SetAudioSource(AudioSource::SoftwareDemod));
                 } else {
                     // MON+SW → MON+USB
-                    btn.set_label("USB");
                     let _ = tx.send(ClientMsg::SetAudioSource(AudioSource::RadioUsb));
                 }
             });
         }
 
         // --- MON/SDR mode toggle ---
-        let mode_btn = ToggleButton::with_label("MON");
+        let mode_btn = ToggleButton::with_label("MODE");
         mode_btn.set_valign(Align::Center);
         {
             let sb = sdr_box.clone();
@@ -416,9 +486,15 @@ impl ControlBar {
             let md = mode_dropdown.clone();
             let am = active_modes.clone();
             let db = display_bar.clone();
+            let aa = aud_available.clone();
             mode_btn.connect_toggled(move |btn| {
                 let is_sdr = btn.is_active();
-                btn.set_label(if is_sdr { "SDR" } else { "MON" });
+                db.set_app_mode(is_sdr);
+                // SDR always runs software demod (IQ); in MON, the audio
+                // source follows the SRC toggle state. Warn (yellow) only
+                // when MON+AUD is selected but AUD isn't serviceable.
+                let is_iq = is_sdr || ab.is_active();
+                db.set_audio_source(is_iq, !is_iq && !aa.get());
                 sb.set_visible(is_sdr);
                 ab.set_visible(!is_sdr);
 
@@ -468,15 +544,15 @@ impl ControlBar {
             });
         }
 
-        container.append(&mode_btn);
-        container.append(&audio_btn);
+        ctrl0_left.append(&mode_btn);
+        ctrl0_center.append(&audio_btn);
 
         // --- AGC threshold slider (always visible, 0–10) ---
         let initial_threshold = sdr_params.borrow().agc_threshold;
         let agc_label = Label::new(Some("AGC:"));
         agc_label.add_css_class("monospace");
         agc_label.set_valign(Align::Center);
-        container.append(&agc_label);
+        ctrl0_center.append(&agc_label);
 
         let agc_adj = Adjustment::new(initial_threshold as f64, 0.0, 10.0, 1.0, 1.0, 0.0);
         let agc_scale = Scale::new(Orientation::Horizontal, Some(&agc_adj));
@@ -499,7 +575,7 @@ impl ControlBar {
                 let _ = tx.send(ClientMsg::CatCommand(cat_commands::set_agc_threshold(v)));
             });
         }
-        container.append(&agc_scale);
+        ctrl0_center.append(&agc_scale);
 
         // Audio-source initial sync is always safe; the AGC-threshold initial
         // sync is deferred to `apply_capabilities` so it's gated on
@@ -543,7 +619,7 @@ impl ControlBar {
             sdr_box.append(&tune_up);
         }
 
-        container.append(&sdr_box);
+        ctrl1_center.append(&sdr_box);
 
         // --- Always-visible controls: PTT, Mute, Volume ---
         let ptt_btn = ToggleButton::with_label("PTT");
@@ -553,7 +629,7 @@ impl ControlBar {
             let on = btn.is_active();
             let _ = tx.send(ClientMsg::Ptt(Ptt { on }));
         });
-        container.append(&ptt_btn);
+        ctrl0_center.append(&ptt_btn);
 
         if let Some(ref player) = audio {
             let mute_btn = ToggleButton::with_label("Mute");
@@ -565,11 +641,11 @@ impl ControlBar {
                     ap.toggle_mute();
                 }
             });
-            container.append(&mute_btn);
+            ctrl0_center.append(&mute_btn);
 
             let vol_label = Label::new(Some("Vol:"));
             vol_label.add_css_class("monospace");
-            container.append(&vol_label);
+            ctrl0_center.append(&vol_label);
 
             let vol_adj = Adjustment::new(70.0, 0.0, 100.0, 5.0, 10.0, 0.0);
             let vol_scale = Scale::new(Orientation::Horizontal, Some(&vol_adj));
@@ -580,7 +656,7 @@ impl ControlBar {
             vol_adj.connect_value_changed(move |adj| {
                 ap.set_volume(adj.value() as f32 / 100.0);
             });
-            container.append(&vol_scale);
+            ctrl0_center.append(&vol_scale);
         }
 
         Self {
@@ -598,6 +674,8 @@ impl ControlBar {
             last_radio,
             sdr_params,
             last_cmd,
+            display_bar,
+            aud_available,
         }
     }
 
@@ -615,10 +693,19 @@ impl ControlBar {
         self.ptt_btn.set_visible(caps.has_tx);
         // MON/SDR toggle is only meaningful when the source can supply IQ.
         self.mode_btn.set_visible(caps.has_iq);
-        // USB audio passthrough and AGC threshold are FDM-DUO CAT features.
-        self.audio_btn.set_visible(caps.has_hardware_cat);
+        // SRC (audio-source) toggle: gated on the USB-audio endpoint, not
+        // CAT — the FDM-DUO happens to expose both but they're separate.
+        self.audio_btn.set_visible(caps.has_usb_audio);
+        // AGC threshold is a CAT command, so it keys on has_hardware_cat.
         self.agc_label.set_visible(caps.has_hardware_cat);
         self.agc_scale.set_visible(caps.has_hardware_cat);
+
+        // Re-paint the AUD indicator: yellow when MON+AUD is the current
+        // selection but the source has no USB-audio endpoint.
+        self.aud_available.set(caps.has_usb_audio);
+        let is_iq = self.mode_btn.is_active() || self.audio_btn.is_active();
+        self.display_bar
+            .set_audio_source(is_iq, !is_iq && !caps.has_usb_audio);
 
         // Initial AGC-threshold sync, deferred from construction so we only
         // emit it to sources that can accept the CAT command.
@@ -711,6 +798,36 @@ fn tune_by_step(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Build a horizontal row with three slots: left (start-aligned, fixed
+/// width), center (expanding, center-aligned), right (end-aligned, fixed
+/// width). Matches the disp{0,1,2}/ctrl0 cell layout in
+/// docs/client-sdr-UI.drawio.
+fn make_lcr_row() -> (GtkBox, GtkBox, GtkBox, GtkBox) {
+    const SIDE_WIDTH: i32 = 120;
+
+    let row = GtkBox::new(Orientation::Horizontal, 0);
+    row.set_hexpand(true);
+
+    let left = GtkBox::new(Orientation::Horizontal, 8);
+    left.set_halign(Align::Start);
+    left.set_hexpand(false);
+    left.set_size_request(SIDE_WIDTH, -1);
+    row.append(&left);
+
+    let center = GtkBox::new(Orientation::Horizontal, 12);
+    center.set_halign(Align::Center);
+    center.set_hexpand(true);
+    row.append(&center);
+
+    let right = GtkBox::new(Orientation::Horizontal, 8);
+    right.set_halign(Align::End);
+    right.set_hexpand(false);
+    right.set_size_request(SIDE_WIDTH, -1);
+    row.append(&right);
+
+    (row, left, center, right)
+}
 
 fn format_freq(hz: u64) -> String {
     if hz >= 1_000_000 {

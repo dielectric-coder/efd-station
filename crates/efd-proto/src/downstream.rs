@@ -55,6 +55,9 @@ pub struct Capabilities {
     pub has_iq: bool,
     pub has_tx: bool,
     pub has_hardware_cat: bool,
+    /// USB audio passthrough (FDM-DUO) or USB-dongle line-in (portable
+    /// radio). Independent of `has_hardware_cat`.
+    pub has_usb_audio: bool,
     pub supported_demod_modes: Vec<Mode>,
 }
 

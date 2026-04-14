@@ -430,6 +430,7 @@ impl Pipeline {
             has_iq: source_caps.has_iq,
             has_tx: source_caps.has_tx,
             has_hardware_cat: source_caps.has_hardware_cat,
+            has_usb_audio: source_caps.has_usb_audio,
             supported_demod_modes: source_caps.supported_demod_modes,
         };
 
@@ -586,6 +587,7 @@ impl Pipeline {
             has_iq: false,
             has_tx: false,
             has_hardware_cat: false,
+            has_usb_audio: false,
             supported_demod_modes: vec![efd_proto::Mode::DRM],
         };
 

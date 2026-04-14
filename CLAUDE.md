@@ -199,7 +199,7 @@ Exact port numbers and defaults TBD in config.
   - `FftBins` — magnitude bin array + metadata (center freq, span, ref level)
   - `AudioChunk` — encoded audio (Opus wideband 48 kHz)
   - `RadioState` — frequency, mode, BW, ATT, LP, AGC, NR, NB, S-meter, RX/TX
-  - `Capabilities` — per-source: has_iq, has_tx, has_hardware_cat, supported_demod_modes, etc.
+  - `Capabilities` — per-source: has_iq, has_tx, has_hardware_cat, has_usb_audio, supported_demod_modes, etc.
   - `DecodedText` — output from audio-domain decoders (WEFAX/RTTY/CW/PSK)
   - `Error`
 - **Client → server (upstream)**:

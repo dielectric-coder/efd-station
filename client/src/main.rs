@@ -45,6 +45,18 @@ fn load_css() {
             border-radius: 4px;
             padding: 2px 6px;
         }
+        .app-mode {
+            background-color: #bbdefb;
+            color: #0d47a1;
+            font-size: 13pt;
+            font-weight: bold;
+            border-radius: 4px;
+            padding: 2px 8px;
+        }
+        .app-mode-warn {
+            background-color: #fff176;
+            color: #5d4037;
+        }
         .spectrum-controls {
             background-color: rgba(0, 0, 0, 0.5);
             border-radius: 4px;
@@ -163,11 +175,12 @@ fn build_ui(app: &Application, url: &str) {
                 }
                 ServerMsg::Capabilities(caps) => {
                     eprintln!(
-                        "server capabilities: source={:?} iq={} tx={} hw_cat={} modes={:?}",
+                        "server capabilities: source={:?} iq={} tx={} hw_cat={} usb_audio={} modes={:?}",
                         caps.source,
                         caps.has_iq,
                         caps.has_tx,
                         caps.has_hardware_cat,
+                        caps.has_usb_audio,
                         caps.supported_demod_modes,
                     );
                     control_bar2.apply_capabilities(&caps);
