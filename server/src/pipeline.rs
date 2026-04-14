@@ -665,6 +665,12 @@ async fn encode_audio_mux(
     };
     let mut seq: u32 = 0;
     let mut frame_buf: Vec<f32> = Vec::with_capacity(efd_audio::OPUS_FRAME_SIZE);
+    // Audio-domain DSP block — sits on every path to Audio Out per the
+    // pipeline drawio. Pass-through stub in Phase 1; real filters land
+    // in a later phase. Flags are always-off by default so this is a
+    // no-op today.
+    let dsp = efd_dsp::AudioDsp::new();
+    let mut dsp_scratch: Vec<f32> = Vec::with_capacity(efd_audio::OPUS_FRAME_SIZE);
     let mut demod_alive = true;
     let mut usb_alive = true;
     let mut logged_fallback = false;
@@ -708,7 +714,10 @@ async fn encode_audio_mux(
                 if source != AudioSource::SoftwareDemod {
                     continue;
                 }
-                encode_samples(&block.samples, &mut frame_buf, &mut encoder, &mut seq, &tx);
+                dsp_scratch.clear();
+                dsp_scratch.extend_from_slice(&block.samples);
+                dsp.process(&mut dsp_scratch);
+                encode_samples(&dsp_scratch, &mut frame_buf, &mut encoder, &mut seq, &tx);
             }
             block = usb_rx.recv(), if usb_alive => {
                 let Some(block) = block else {
@@ -719,7 +728,10 @@ async fn encode_audio_mux(
                 if source != AudioSource::RadioUsb {
                     continue;
                 }
-                encode_samples(&block.samples, &mut frame_buf, &mut encoder, &mut seq, &tx);
+                dsp_scratch.clear();
+                dsp_scratch.extend_from_slice(&block.samples);
+                dsp.process(&mut dsp_scratch);
+                encode_samples(&dsp_scratch, &mut frame_buf, &mut encoder, &mut seq, &tx);
             }
         }
     }
