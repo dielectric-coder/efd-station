@@ -130,8 +130,9 @@ impl DisplayBar {
         tx_label.set_halign(Align::End);
         disp0_right.append(&tx_label);
 
-        // disp1-left: audio source indicator (AUD = radio USB audio,
-        // IQ = software demod from IQ).
+        // disp1-left: audio source indicator. Normally "AUD" or "IQ";
+        // when AUD is requested but the server is falling back to IQ,
+        // the label switches to "AUD→IQ" with a yellow background.
         let audio_src_label = Label::new(Some("AUD"));
         audio_src_label.add_css_class("monospace");
         audio_src_label.add_css_class("app-mode");
@@ -186,8 +187,17 @@ impl DisplayBar {
     /// serviceable (e.g. MON+AUD with no FDM-DUO hardware CAT) — paints
     /// the indicator yellow.
     pub fn set_audio_source(&self, is_iq: bool, unavailable: bool) {
-        self.audio_src_label
-            .set_text(if is_iq { "IQ" } else { "AUD" });
+        // "AUD→IQ" when the requested source (AUD) isn't available and
+        // the server is silently falling back to the IQ path; plain
+        // "AUD" / "IQ" otherwise.
+        let text = if is_iq {
+            "IQ"
+        } else if unavailable {
+            "AUD\u{2192}IQ"
+        } else {
+            "AUD"
+        };
+        self.audio_src_label.set_text(text);
         if unavailable {
             self.audio_src_label.add_css_class("app-mode-warn");
         } else {
