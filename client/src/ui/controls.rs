@@ -341,6 +341,13 @@ pub struct ControlBar {
     sdr_box: GtkBox,
     mode_dropdown: DropDown,
     mode_list: StringList,
+    /// DRM spectrum-flip toggle — visible only when current demod mode
+    /// is DRM. Mirrors the server's `flip_spectrum` watch.
+    flip_btn: ToggleButton,
+    /// Set to true while `apply_capabilities` syncs the flip toggle
+    /// from caps so the transient `set_active` doesn't round-trip back
+    /// to the server.
+    suppress_flip_notify: Rc<Cell<bool>>,
     /// Modes currently offered in the dropdown — filtered to server capabilities.
     active_modes: Rc<RefCell<Vec<(&'static str, Mode)>>>,
     /// Set to true while `apply_capabilities` rewires the mode list so its
@@ -435,16 +442,36 @@ impl ControlBar {
         let active_modes: Rc<RefCell<Vec<(&'static str, Mode)>>> =
             Rc::new(RefCell::new(MODES.to_vec()));
         let suppress_mode_notify = Rc::new(Cell::new(false));
+        let suppress_flip_notify = Rc::new(Cell::new(false));
         let mode_list = StringList::new(&MODES.iter().map(|(s, _)| *s).collect::<Vec<_>>());
         let mode_dropdown = DropDown::new(Some(mode_list.clone()), gtk4::Expression::NONE);
         mode_dropdown.set_selected(1); // default USB
         mode_dropdown.set_valign(Align::Center);
+        // DRM spectrum-flip toggle; visible only when mode=DRM.
+        let flip_btn = ToggleButton::with_label("Flip");
+        flip_btn.set_valign(Align::Center);
+        flip_btn.set_visible(false);
+        flip_btn.set_tooltip_text(Some(
+            "DRM spectrum flip — toggle when DREAM can't lock onto a broadcast",
+        ));
+        {
+            let tx = ws_tx.clone();
+            let suppress = suppress_flip_notify.clone();
+            flip_btn.connect_toggled(move |btn| {
+                if suppress.get() {
+                    return;
+                }
+                let _ = tx.send(ClientMsg::SetDrmFlipSpectrum(btn.is_active()));
+            });
+        }
+
         {
             let tx = ws_tx.clone();
             let sp = sdr_params.clone();
             let am = active_modes.clone();
             let suppress = suppress_mode_notify.clone();
             let db = display_bar.clone();
+            let fb = flip_btn.clone();
             mode_dropdown.connect_selected_notify(move |dd| {
                 if suppress.get() {
                     return;
@@ -462,6 +489,7 @@ impl ControlBar {
                     } else {
                         db.clear_extras();
                     }
+                    fb.set_visible(mode == Mode::DRM);
                 }
             });
         }
@@ -597,6 +625,7 @@ impl ControlBar {
         }
 
         ctrl1_center.append(&mode_dropdown);
+        ctrl1_center.append(&flip_btn);
         ctrl1_center.append(&sdr_box);
 
         // --- Always-visible controls: PTT, Mute, Volume ---
@@ -646,6 +675,8 @@ impl ControlBar {
             sdr_box,
             mode_dropdown,
             mode_list,
+            flip_btn,
+            suppress_flip_notify,
             active_modes,
             suppress_mode_notify,
             ws_tx,
@@ -674,6 +705,16 @@ impl ControlBar {
         // AUD / IQ availability indicators in the display bar.
         self.display_bar
             .set_source_availability(caps.has_usb_audio, caps.has_iq);
+
+        // DRM flip toggle — sync initial state from the server's
+        // advertised value (usually seeded from its config.toml).
+        // Suppressed so the programmatic set_active doesn't round-trip
+        // back to the server as a "client wants to change this" message.
+        if self.flip_btn.is_active() != caps.drm_flip_spectrum {
+            self.suppress_flip_notify.set(true);
+            self.flip_btn.set_active(caps.drm_flip_spectrum);
+            self.suppress_flip_notify.set(false);
+        }
 
         // Source selection — the sole mode choice. Button visible only
         // when both sources are available so the user can pick; hidden

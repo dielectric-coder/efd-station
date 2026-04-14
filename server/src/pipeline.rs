@@ -27,6 +27,10 @@ pub struct Pipeline {
     /// Audio source selection: SoftwareDemod or RadioUsb.
     pub audio_source_tx: watch::Sender<AudioSource>,
 
+    /// Runtime DREAM spectrum-flip flag (`-p`). Updated by the client;
+    /// the DRM supervisor restarts the bridge when this changes.
+    pub flip_spectrum_tx: watch::Sender<bool>,
+
     /// What the active source supports; sent to every client on connect.
     pub capabilities: Capabilities,
 
@@ -155,18 +159,27 @@ impl Pipeline {
         // is running, and resets it to None when the bridge stops.
         let (drm_status_tx, drm_status_rx) =
             watch::channel::<Option<efd_proto::DrmStatus>>(None);
+        // Runtime flip-spectrum watch. Seeded from config at startup so
+        // existing configs keep their behaviour; the client can flip it
+        // at any time via `ClientMsg::SetDrmFlipSpectrum`.
+        let (flip_spectrum_tx, _flip_spectrum_rx) =
+            watch::channel::<bool>(config.drm.flip_spectrum);
         if source_caps.has_iq {
             let drm_if_tx_for_drm = drm_if_tx.clone();
             let audio_tx_for_drm = demod_audio_tx.clone();
             let mode_rx = demod_mode_tx.subscribe();
+            let flip_rx = flip_spectrum_tx.subscribe();
             let status_tx = drm_status_tx.clone();
             let c = cancel.clone();
+            // Base DrmConfig; supervisor overrides `flip_spectrum` from
+            // the watch on each bridge spawn so the value is always
+            // fresh and runtime-toggleable.
             let drm_cfg = efd_dsp::DrmConfig {
                 dream_binary: config.drm.dream_binary.clone(),
                 input_sink: config.drm.input_sink.clone(),
                 output_sink: config.drm.output_sink.clone(),
                 dream_rate: config.audio.sample_rate,
-                flip_spectrum: config.drm.flip_spectrum,
+                flip_spectrum: false,
             };
             let handle = tokio::spawn(async move {
                 run_drm_supervisor(
@@ -174,6 +187,7 @@ impl Pipeline {
                     drm_if_tx_for_drm,
                     audio_tx_for_drm,
                     mode_rx,
+                    flip_rx,
                     status_tx,
                     c,
                 )
@@ -489,6 +503,7 @@ impl Pipeline {
             has_hardware_cat: source_caps.has_hardware_cat,
             has_usb_audio: source_caps.has_usb_audio && usb_audio_live,
             supported_demod_modes: source_caps.supported_demod_modes,
+            drm_flip_spectrum: config.drm.flip_spectrum,
         };
 
         Self {
@@ -499,6 +514,7 @@ impl Pipeline {
             tx_audio_tx,
             demod_mode_tx,
             audio_source_tx,
+            flip_spectrum_tx,
             capabilities,
             drm_status_rx,
             cancel,
@@ -656,7 +672,13 @@ impl Pipeline {
             has_hardware_cat: false,
             has_usb_audio: false,
             supported_demod_modes: vec![efd_proto::Mode::DRM],
+            drm_flip_spectrum: false,
         };
+
+        // Flip-spectrum watch exists for API parity with the live
+        // pipeline; file-test DRM doesn't use it — `dream -f` path
+        // decides its own flip from the file contents.
+        let (flip_spectrum_tx, _) = watch::channel::<bool>(false);
 
         info!(
             file = %file_path.display(),
@@ -672,6 +694,7 @@ impl Pipeline {
             tx_audio_tx,
             demod_mode_tx,
             audio_source_tx,
+            flip_spectrum_tx,
             capabilities,
             drm_status_rx,
             cancel,
@@ -902,10 +925,11 @@ async fn decode_audio_for_alsa(
 /// status watch into the pipeline-scope `status_tx` so WS handlers
 /// don't have to re-subscribe on every mode change.
 async fn run_drm_supervisor(
-    cfg: efd_dsp::DrmConfig,
+    mut cfg: efd_dsp::DrmConfig,
     drm_if_tx: broadcast::Sender<efd_dsp::AudioBlock>,
     audio_tx: mpsc::Sender<efd_dsp::AudioBlock>,
     mut mode_rx: watch::Receiver<Option<efd_proto::Mode>>,
+    mut flip_rx: watch::Receiver<bool>,
     status_tx: watch::Sender<Option<efd_proto::DrmStatus>>,
     cancel: CancellationToken,
 ) {
@@ -915,49 +939,60 @@ async fn run_drm_supervisor(
         forwarder: JoinHandle<()>,
     }
     let mut active: Option<Active> = None;
+    // Flip value the currently-active bridge was spawned with; any
+    // change from this demands a restart so dream picks up the new
+    // `-p` arg.
+    let mut active_flip: bool = *flip_rx.borrow();
 
     loop {
         let want_drm = matches!(*mode_rx.borrow(), Some(efd_proto::Mode::DRM));
+        let want_flip = *flip_rx.borrow();
+        let flip_stale = active.is_some() && active_flip != want_flip;
 
-        match (&active, want_drm) {
-            (None, true) => {
-                info!("DRM supervisor: starting bridge");
-                let bc = CancellationToken::new();
-                let handles = efd_dsp::spawn_drm_bridge(
-                    cfg.clone(),
-                    efd_dsp::DrmInput::AudioBroadcast(drm_if_tx.subscribe()),
-                    audio_tx.clone(),
-                    bc.clone(),
-                );
-                let mut brs = handles.status_rx;
-                let pipe_status = status_tx.clone();
-                let fwd_cancel = bc.clone();
-                let forwarder = tokio::spawn(async move {
-                    loop {
-                        tokio::select! {
-                            _ = fwd_cancel.cancelled() => break,
-                            r = brs.changed() => {
-                                if r.is_err() { break; }
-                                let _ = pipe_status.send(brs.borrow().clone());
-                            }
+        // Teardown path: mode left DRM, OR flip changed on an active bridge.
+        if active.is_some() && (!want_drm || flip_stale) {
+            if flip_stale {
+                info!(want_flip, "DRM supervisor: flip_spectrum changed, restarting bridge");
+            } else {
+                info!("DRM supervisor: stopping bridge");
+            }
+            let a = active.take().expect("active checked");
+            a.cancel.cancel();
+            let _ = a.forwarder.await;
+            match a.join.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!("DRM bridge exited with error: {e}"),
+                Err(e) => tracing::warn!("DRM bridge panicked: {e}"),
+            }
+            let _ = status_tx.send(None);
+        }
+
+        if active.is_none() && want_drm {
+            info!(flip = want_flip, "DRM supervisor: starting bridge");
+            cfg.flip_spectrum = want_flip;
+            active_flip = want_flip;
+            let bc = CancellationToken::new();
+            let handles = efd_dsp::spawn_drm_bridge(
+                cfg.clone(),
+                efd_dsp::DrmInput::AudioBroadcast(drm_if_tx.subscribe()),
+                audio_tx.clone(),
+                bc.clone(),
+            );
+            let mut brs = handles.status_rx;
+            let pipe_status = status_tx.clone();
+            let fwd_cancel = bc.clone();
+            let forwarder = tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = fwd_cancel.cancelled() => break,
+                        r = brs.changed() => {
+                            if r.is_err() { break; }
+                            let _ = pipe_status.send(brs.borrow().clone());
                         }
                     }
-                });
-                active = Some(Active { cancel: bc, join: handles.join, forwarder });
-            }
-            (Some(_), false) => {
-                info!("DRM supervisor: stopping bridge");
-                let a = active.take().expect("active checked");
-                a.cancel.cancel();
-                let _ = a.forwarder.await;
-                match a.join.await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => tracing::warn!("DRM bridge exited with error: {e}"),
-                    Err(e) => tracing::warn!("DRM bridge panicked: {e}"),
                 }
-                let _ = status_tx.send(None);
-            }
-            _ => {}
+            });
+            active = Some(Active { cancel: bc, join: handles.join, forwarder });
         }
 
         tokio::select! {
@@ -980,6 +1015,9 @@ async fn run_drm_supervisor(
                     }
                     return;
                 }
+            }
+            r = flip_rx.changed() => {
+                if r.is_err() { /* sender dropped; next loop will notice */ }
             }
         }
     }

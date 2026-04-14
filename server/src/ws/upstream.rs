@@ -21,6 +21,7 @@ pub async fn run(
     tx_audio_tx: mpsc::Sender<TxAudio>,
     demod_mode_tx: watch::Sender<Option<Mode>>,
     audio_source_tx: watch::Sender<AudioSource>,
+    flip_spectrum_tx: watch::Sender<bool>,
     cancel: CancellationToken,
 ) {
     loop {
@@ -117,6 +118,10 @@ pub async fn run(
             ClientMsg::SetDemodMode(mode) => {
                 debug!(?mode, "upstream: demod mode override");
                 let _ = demod_mode_tx.send(mode);
+            }
+            ClientMsg::SetDrmFlipSpectrum(flip) => {
+                debug!(flip, "upstream: DRM flip_spectrum toggle");
+                let _ = flip_spectrum_tx.send(flip);
             }
         }
     }

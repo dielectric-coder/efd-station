@@ -135,6 +135,7 @@ mod tests {
             has_hardware_cat: true,
             has_usb_audio: true,
             supported_demod_modes: vec![Mode::USB, Mode::LSB, Mode::CW, Mode::AM, Mode::FM],
+            drm_flip_spectrum: false,
         };
         assert_eq!(orig, round_trip(&orig));
     }

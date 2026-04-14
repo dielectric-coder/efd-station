@@ -34,6 +34,7 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
     let tx_audio_tx = state.pipeline.tx_audio_tx.clone();
     let demod_mode_tx = state.pipeline.demod_mode_tx.clone();
     let audio_source_tx = state.pipeline.audio_source_tx.clone();
+    let flip_spectrum_tx = state.pipeline.flip_spectrum_tx.clone();
     let capabilities = state.pipeline.capabilities.clone();
     let drm_status_rx = state.pipeline.drm_status_rx.clone();
     let cancel = state.cancel.clone();
@@ -55,7 +56,16 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
     });
 
     let mut up = tokio::spawn(async move {
-        super::upstream::run(stream, cat_tx, tx_audio_tx, demod_mode_tx, audio_source_tx, cancel).await;
+        super::upstream::run(
+            stream,
+            cat_tx,
+            tx_audio_tx,
+            demod_mode_tx,
+            audio_source_tx,
+            flip_spectrum_tx,
+            cancel,
+        )
+        .await;
     });
 
     // Wait for either task to finish, then abort the other

@@ -59,6 +59,10 @@ pub struct Capabilities {
     /// radio). Independent of `has_hardware_cat`.
     pub has_usb_audio: bool,
     pub supported_demod_modes: Vec<Mode>,
+    /// Initial state of DREAM's `-p` flag as the server will use it on
+    /// the next DRM bridge spawn. Client uses this to sync its Flip
+    /// toggle on connect.
+    pub drm_flip_spectrum: bool,
 }
 
 /// Live DRM decoder status parsed from DREAM's TUI output.

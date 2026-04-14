@@ -34,6 +34,10 @@ pub enum ClientMsg {
     /// Set or clear the demod mode override. `Some(mode)` overrides (SDR),
     /// `None` clears the override so demod follows the radio's mode (MON).
     SetDemodMode(Option<Mode>),
+    /// Runtime toggle for DREAM's `-p` (spectrum flip) flag. Taking the
+    /// bridge down and bringing it back up with the new flag is handled
+    /// by the server; the client just asks for the new state.
+    SetDrmFlipSpectrum(bool),
 }
 
 /// Decode error returned by [`decode_msg`]. Distinct from a bincode error
