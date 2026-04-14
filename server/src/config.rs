@@ -62,6 +62,18 @@ pub struct DrmConfig {
     /// bundled samples is labeled `..._flipped_spectrum.flac`); DREAM
     /// has no auto-detection.
     pub flip_spectrum: bool,
+    /// Deprecated (removed in 0.7.0): was the PipeWire null-sink name
+    /// for audio-IF into DREAM. snd-aloop replaced null sinks, so the
+    /// field is accepted-but-ignored for config back-compat. Remove
+    /// from your config.toml at your leisure.
+    #[serde(skip_serializing, default)]
+    #[allow(dead_code)]
+    pub input_sink: Option<String>,
+    /// Deprecated (removed in 0.7.0): was the PipeWire null-sink name
+    /// for dream's decoded audio. See `input_sink` above.
+    #[serde(skip_serializing, default)]
+    #[allow(dead_code)]
+    pub output_sink: Option<String>,
 }
 
 impl Default for DrmConfig {
@@ -69,6 +81,8 @@ impl Default for DrmConfig {
         Self {
             dream_binary: "dream".into(),
             flip_spectrum: false,
+            input_sink: None,
+            output_sink: None,
         }
     }
 }
@@ -218,5 +232,12 @@ fn log_effective(cfg: &Config) {
         flip_spectrum = cfg.drm.flip_spectrum,
         "effective drm config"
     );
+    if cfg.drm.input_sink.is_some() || cfg.drm.output_sink.is_some() {
+        tracing::warn!(
+            "[drm] input_sink / output_sink are deprecated since 0.7.0 \
+             (snd-aloop replaced PipeWire null sinks) and are ignored. \
+             Remove them from your config.toml to silence this."
+        );
+    }
     tracing::debug!(?cfg, "effective config (full)");
 }
