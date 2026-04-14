@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub server: ServerConfig,
     pub usb: UsbConfig,
@@ -14,21 +14,21 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ServerConfig {
     pub bind: String,
     pub port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct UsbConfig {
     pub vendor_id: u16,
     pub product_id: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DspConfig {
     pub fft_size: usize,
     pub fft_averaging: usize,
@@ -36,7 +36,7 @@ pub struct DspConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct CatConfig {
     /// Serial device for CAT control. "auto" discovers the FDM-DUO CAT port.
     /// Or an explicit path like "/dev/ttyUSB0".
@@ -51,7 +51,7 @@ pub struct CatConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct DrmConfig {
     /// Path to the dream binary. Defaults to "dream" on PATH; set to the
     /// vendored build path (e.g. "/usr/lib/efd-station/dream") when packaged.
@@ -80,7 +80,7 @@ impl Default for DrmConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AudioConfig {
     /// ALSA device for RX audio playback (HAT sound card).
     pub alsa_device: String,
@@ -152,16 +152,38 @@ pub fn config_path() -> PathBuf {
 }
 
 /// Load config from disk, falling back to defaults for missing fields.
+///
+/// All sub-structs use `#[serde(default, deny_unknown_fields)]`, so any
+/// typo, unknown field, or type mismatch in the user's `config.toml`
+/// produces a loud parse error rather than silently using defaults.
+/// The server still starts (degrades to full defaults) so a misconfig
+/// doesn't prevent operator recovery, but the warning log will tell
+/// them exactly what went wrong.
 pub fn load() -> Config {
     let path = config_path();
-    match std::fs::read_to_string(&path) {
+    let cfg = match std::fs::read_to_string(&path) {
         Ok(text) => match toml::from_str::<Config>(&text) {
             Ok(cfg) => {
                 tracing::info!(path = %path.display(), "config loaded");
                 cfg
             }
             Err(e) => {
-                tracing::warn!(path = %path.display(), err = %e, "bad config, using defaults");
+                // The error includes line/column when toml's deserializer
+                // knows where the problem is (unknown field, type
+                // mismatch). Make it impossible to miss.
+                tracing::warn!(
+                    "\n\
+                    ============================================================\n\
+                    config parse error — FALLING BACK TO DEFAULTS\n\
+                    file:  {}\n\
+                    error: {e}\n\
+                    Common causes:\n\
+                      - typo in a field name (e.g. `flipspectrum` not `flip_spectrum`)\n\
+                      - wrong type (e.g. `flip_spectrum = \"true\"` instead of `flip_spectrum = true`)\n\
+                      - field placed outside its `[section]` (e.g. under `[server]` instead of `[drm]`)\n\
+                    ============================================================\n",
+                    path.display()
+                );
                 Config::default()
             }
         },
@@ -169,5 +191,40 @@ pub fn load() -> Config {
             tracing::info!(path = %path.display(), "no config file, using defaults");
             Config::default()
         }
-    }
+    };
+    log_effective(&cfg);
+    cfg
+}
+
+/// Log the effective config so operators can tell at a glance what
+/// actually took effect — the best defense against "I set X but it
+/// seems to be ignored" confusion.
+fn log_effective(cfg: &Config) {
+    tracing::info!(
+        bind = %cfg.server.bind,
+        port = cfg.server.port,
+        "effective server config"
+    );
+    tracing::info!(
+        serial = %cfg.cat.serial_device,
+        poll_ms = cfg.cat.poll_interval_ms,
+        fdmduo_bind = %cfg.cat.responder_fdmduo_bind,
+        demod_bind = %cfg.cat.responder_demod_bind,
+        "effective cat config"
+    );
+    tracing::info!(
+        alsa = %cfg.audio.alsa_device,
+        tx = %cfg.audio.tx_device,
+        rx = %cfg.audio.rx_device,
+        rate = cfg.audio.sample_rate,
+        "effective audio config"
+    );
+    tracing::info!(
+        dream = %cfg.drm.dream_binary,
+        flip_spectrum = cfg.drm.flip_spectrum,
+        in_sink = %cfg.drm.input_sink,
+        out_sink = %cfg.drm.output_sink,
+        "effective drm config"
+    );
+    tracing::debug!(?cfg, "effective config (full)");
 }
