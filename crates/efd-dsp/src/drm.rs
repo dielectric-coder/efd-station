@@ -182,24 +182,45 @@ async fn run_bridge(
     // DREAM: mono audio-IF input from drm_in.monitor, audio to drm_out.
     // No `-c 6` — we feed real-valued audio, not complex I/Q.
     // stdout is piped so the TUI parser can build a live DrmStatus.
-    let mut dream = spawn_with_timeout("dream", || {
-        Command::new(&cfg.dream_binary)
-            .args([
-                "-I",
-                &format!("{}.monitor", cfg.input_sink),
-                "-O",
-                &cfg.output_sink,
-                "--sigsrate",
-                &cfg.dream_rate.to_string(),
-                "--audsrate",
-                &cfg.dream_rate.to_string(),
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-    })
-    .await?;
+    //
+    // setsid() via pre_exec detaches DREAM from our controlling TTY (if
+    // any). Without this, DREAM's curses TUI writes to /dev/tty — which
+    // means in an interactive SSH session the TUI bleeds into the user's
+    // terminal and our stdout pipe gets nothing, so DrmStatus never
+    // reaches the client. With /dev/tty gone, DREAM's open("/dev/tty")
+    // fails and the 0002-consoleio-stdout-fallback patch routes the TUI
+    // to STDOUT_FILENO (our captured pipe). Under systemd (no tty) this
+    // is already fine; setsid is a no-op or harmless EPERM there.
+    let mut dream_cmd = Command::new(&cfg.dream_binary);
+    dream_cmd
+        .args([
+            "-I",
+            &format!("{}.monitor", cfg.input_sink),
+            "-O",
+            &cfg.output_sink,
+            "--sigsrate",
+            &cfg.dream_rate.to_string(),
+            "--audsrate",
+            &cfg.dream_rate.to_string(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    // SAFETY: `setsid(2)` is async-signal-safe, which is the contract for
+    // pre_exec (runs post-fork / pre-exec). Return value is ignored: if
+    // we're already a session leader (rare — happens under some systemd
+    // configurations) it returns EPERM, which is harmless because in
+    // that case there's no controlling tty to detach from anyway.
+    // tokio::process::Command exposes pre_exec directly on Unix — no
+    // trait import needed.
+    #[cfg(unix)]
+    unsafe {
+        dream_cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut dream = spawn_with_timeout("dream", move || dream_cmd.spawn()).await?;
     let dream_stdout = take_stdout(&mut dream, "dream")?;
 
     info!(

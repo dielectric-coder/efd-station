@@ -469,6 +469,7 @@ version = "0.1.0"
 dependencies = [
  "efd-iq",
  "efd-proto",
+ "libc",
  "rustfft",
  "thiserror 2.0.18",
  "tokio",

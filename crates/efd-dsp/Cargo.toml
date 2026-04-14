@@ -11,3 +11,10 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# Needed for the setsid() pre_exec call when spawning DREAM — detaches
+# DREAM from the controlling TTY so its TUI goes to our piped stdout
+# (via the 0002-consoleio-stdout-fallback patch) instead of bleeding
+# into an interactive SSH session's terminal.
+libc = "0.2"
