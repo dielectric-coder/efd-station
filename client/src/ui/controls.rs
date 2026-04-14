@@ -29,8 +29,13 @@ pub struct DisplayBar {
     smeter: LevelBar,
     smeter_label: Label,
     tx_label: Label,
-    app_mode_label: Label,
-    audio_src_label: Label,
+    /// AUD / IQ availability indicators. Each is styled either active
+    /// (`.app-mode`) or greyed-out (`.app-mode-disabled`) based on the
+    /// corresponding capability flag. Both hidden when neither source
+    /// is available; `no_device_label` takes over instead.
+    aud_avail_label: Label,
+    iq_avail_label: Label,
+    no_device_label: Label,
     /// First DRM info line — mode/bandwidth/modulation/services.
     drm_line1: Label,
     /// Second DRM info line — SNR/WMER/lock flags.
@@ -60,20 +65,12 @@ impl DisplayBar {
         container.set_margin_bottom(4);
         container.set_hexpand(true);
 
-        let (row0, disp0_left, disp0_center, disp0_right) = make_lcr_row();
+        let (row0, _disp0_left, disp0_center, disp0_right) = make_lcr_row();
         container.append(&row0);
         let (row1, disp1_left, disp1_center, _) = make_lcr_row();
         container.append(&row1);
         let (row2, _, disp2_center, _) = make_lcr_row();
         container.append(&row2);
-
-        // disp0-left: MON/SDR indicator, left-justified.
-        let app_mode_label = Label::new(Some("MON"));
-        app_mode_label.add_css_class("monospace");
-        app_mode_label.add_css_class("app-mode");
-        app_mode_label.set_width_chars(6);
-        app_mode_label.set_xalign(0.0);
-        disp0_left.append(&app_mode_label);
 
         // disp0-center: VFO, freq, mode, BW, S-meter (center-justified).
         let vfo_label = Label::new(Some("VFO A"));
@@ -131,15 +128,26 @@ impl DisplayBar {
         tx_label.set_halign(Align::End);
         disp0_right.append(&tx_label);
 
-        // disp1-left: audio source indicator. Normally "AUD" or "IQ";
-        // when AUD is requested but the server is falling back to IQ,
-        // the label switches to "AUD→IQ" with a yellow background.
-        let audio_src_label = Label::new(Some("AUD"));
-        audio_src_label.add_css_class("monospace");
-        audio_src_label.add_css_class("app-mode");
-        audio_src_label.set_width_chars(6);
-        audio_src_label.set_xalign(0.0);
-        disp1_left.append(&audio_src_label);
+        // disp1-left: two availability indicators (AUD + IQ), plus a
+        // NO-DEVICE label shown when neither source is present.
+        let aud_avail_label = Label::new(Some("AUD"));
+        aud_avail_label.add_css_class("monospace");
+        aud_avail_label.add_css_class("app-mode");
+        aud_avail_label.set_xalign(0.0);
+        disp1_left.append(&aud_avail_label);
+
+        let iq_avail_label = Label::new(Some("IQ"));
+        iq_avail_label.add_css_class("monospace");
+        iq_avail_label.add_css_class("app-mode");
+        iq_avail_label.set_xalign(0.0);
+        disp1_left.append(&iq_avail_label);
+
+        let no_device_label = Label::new(Some("NO-DEVICE"));
+        no_device_label.add_css_class("monospace");
+        no_device_label.add_css_class("app-mode-warn");
+        no_device_label.set_xalign(0.0);
+        no_device_label.set_visible(false);
+        disp1_left.append(&no_device_label);
 
         // disp1-center / disp2-center: DRM info lines (center-justified).
         // Mode-agnostic rows — today carry DRM decoder status; future
@@ -164,8 +172,9 @@ impl DisplayBar {
             smeter,
             smeter_label,
             tx_label,
-            app_mode_label,
-            audio_src_label,
+            aud_avail_label,
+            iq_avail_label,
+            no_device_label,
             drm_line1,
             drm_line2,
             prev: RefCell::new(None),
@@ -176,35 +185,20 @@ impl DisplayBar {
         &self.container
     }
 
-    /// Set the MON/SDR indicator in the top bar.
-    pub fn set_app_mode(&self, is_sdr: bool) {
-        self.app_mode_label
-            .set_text(if is_sdr { "SDR" } else { "MON" });
-    }
-
-    /// Set the audio-source indicator in disp1-left.
-    /// `is_iq` true when audio comes from the software demod (SDR mode
-    /// or MON+SW); false when it comes from the radio's USB audio.
-    /// `unavailable` true when the selected source isn't actually
-    /// serviceable (e.g. MON+AUD with no FDM-DUO hardware CAT) — paints
-    /// the indicator yellow.
-    pub fn set_audio_source(&self, is_iq: bool, unavailable: bool) {
-        // "AUD→IQ" when the requested source (AUD) isn't available and
-        // the server is silently falling back to the IQ path; plain
-        // "AUD" / "IQ" otherwise.
-        let text = if is_iq {
-            "IQ"
-        } else if unavailable {
-            "AUD\u{2192}IQ"
-        } else {
-            "AUD"
-        };
-        self.audio_src_label.set_text(text);
-        if unavailable {
-            self.audio_src_label.add_css_class("app-mode-warn");
-        } else {
-            self.audio_src_label.remove_css_class("app-mode-warn");
+    /// Paint the AUD/IQ availability indicators in disp1-left.
+    /// Each side is greyed out (`.app-mode-disabled`) when its
+    /// capability flag is false. When both are false, both are hidden
+    /// and `NO-DEVICE` appears instead.
+    pub fn set_source_availability(&self, has_aud: bool, has_iq: bool) {
+        let any = has_aud || has_iq;
+        self.aud_avail_label.set_visible(any);
+        self.iq_avail_label.set_visible(any);
+        self.no_device_label.set_visible(!any);
+        if !any {
+            return;
         }
+        apply_avail_style(&self.aud_avail_label, has_aud);
+        apply_avail_style(&self.iq_avail_label, has_iq);
     }
 
     /// Optimistic frequency update (before radio confirms).
@@ -335,11 +329,16 @@ const STEPS: &[(&str, u64)] = &[
 #[derive(Clone)]
 pub struct ControlBar {
     container: GtkBox,
-    mode_btn: ToggleButton,
+    /// Sole source selector. Untoggled = AUD (radio USB audio), toggled
+    /// = IQ (software demod). Auto-forced and hidden when only one
+    /// source is available.
     audio_btn: ToggleButton,
     ptt_btn: ToggleButton,
     agc_label: Label,
     agc_scale: Scale,
+    /// Tune controls (freq entry, step, up/down). Visible when CAT is
+    /// available.
+    sdr_box: GtkBox,
     mode_dropdown: DropDown,
     mode_list: StringList,
     /// Modes currently offered in the dropdown — filtered to server capabilities.
@@ -359,14 +358,10 @@ pub struct ControlBar {
     /// struct so a clone of `ControlBar` keeps the same shared state.
     #[allow(dead_code)]
     last_cmd: Rc<Cell<Instant>>,
-    /// Display bar handle — needed by `apply_capabilities` so the AUD
-    /// indicator can be re-painted when server capabilities arrive.
+    /// Display bar handle — needed by `apply_capabilities` so the
+    /// AUD/IQ availability indicators can be repainted when server
+    /// capabilities arrive.
     display_bar: DisplayBar,
-    /// Whether AUD (radio USB audio passthrough) is actually serviceable.
-    /// Driven by `caps.has_usb_audio`; consulted by the toggle handlers
-    /// and `apply_capabilities` to decide whether to yellow-flag the AUD
-    /// indicator.
-    aud_available: Rc<Cell<bool>>,
 }
 
 impl ControlBar {
@@ -402,15 +397,13 @@ impl ControlBar {
         let last_cmd = Rc::new(Cell::new(Instant::now() - std::time::Duration::from_secs(10)));
         let last_radio: Rc<RefCell<Option<RadioState>>> = Rc::new(RefCell::new(None));
         let sdr_params = Rc::new(RefCell::new(sdr_params::load()));
-        // Optimistic until server capabilities arrive; apply_capabilities
-        // will flip this based on `caps.has_usb_audio`.
-        let aud_available = Rc::new(Cell::new(true));
 
-        // --- SDR controls box (visible in SDR mode only) ---
+        // --- Tune controls box (freq entry + step + tune up/down) ---
+        // Visible whenever CAT is available; the mode dropdown lives
+        // outside this box because it's meaningful even in AUD mode
+        // (where it commands the radio via CAT rather than the backend).
         let sdr_box = GtkBox::new(Orientation::Horizontal, 8);
-        sdr_box.set_visible(false);
 
-        // Create SDR widgets first so mode toggle handler can reference them.
         let freq_entry = Entry::new();
         freq_entry.set_width_chars(14);
         freq_entry.set_placeholder_text(Some("Freq Hz"));
@@ -432,8 +425,13 @@ impl ControlBar {
         }
         sdr_box.append(&freq_entry);
 
-        // Dropdown is populated from `active_modes`, which defaults to all MODES
-        // and is re-filtered when server `Capabilities` arrive.
+        // Demod-mode dropdown — lives outside `sdr_box` so it stays
+        // visible in both AUD and IQ source modes.
+        //   AUD + CAT: sends CAT to the radio ("tune to this mode")
+        //   AUD + no-CAT (portable): greyed out
+        //   IQ  + ...: sends SetDemodMode to the backend (+ CAT if any)
+        // Dropdown is populated from `active_modes`, which defaults to
+        // all MODES and is re-filtered when server `Capabilities` arrive.
         let active_modes: Rc<RefCell<Vec<(&'static str, Mode)>>> =
             Rc::new(RefCell::new(MODES.to_vec()));
         let suppress_mode_notify = Rc::new(Cell::new(false));
@@ -467,9 +465,9 @@ impl ControlBar {
                 }
             });
         }
-        sdr_box.append(&mode_dropdown);
-
-        // --- Audio source toggle (MON mode only) ---
+        // --- Source toggle (sole mode selector) ---
+        // Untoggled = AUD  (radio's USB audio; radio does the demod)
+        // Toggled   = IQ   (software demod runs on the backend's IQ feed)
         let audio_btn = ToggleButton::with_label("SRC");
         audio_btn.set_valign(Align::Center);
         audio_btn.set_tooltip_text(Some(
@@ -477,49 +475,16 @@ impl ControlBar {
         ));
         {
             let tx = ws_tx.clone();
-            let db = display_bar.clone();
-            let aa = aud_available.clone();
-            audio_btn.connect_toggled(move |btn| {
-                let is_iq = btn.is_active();
-                db.set_audio_source(is_iq, !is_iq && !aa.get());
-                if is_iq {
-                    // MON+USB → MON+SW: demod mirrors radio params
-                    let _ = tx.send(ClientMsg::SetDemodMode(None));
-                    let _ = tx.send(ClientMsg::SetAudioSource(AudioSource::SoftwareDemod));
-                } else {
-                    // MON+SW → MON+USB
-                    let _ = tx.send(ClientMsg::SetAudioSource(AudioSource::RadioUsb));
-                }
-            });
-        }
-
-        // --- MON/SDR mode toggle ---
-        let mode_btn = ToggleButton::with_label("MODE");
-        mode_btn.set_valign(Align::Center);
-        {
-            let sb = sdr_box.clone();
-            let ab = audio_btn.clone();
-            let tx = ws_tx.clone();
             let lr = last_radio.clone();
             let sp = sdr_params.clone();
             let fe = freq_entry.clone();
             let md = mode_dropdown.clone();
             let am = active_modes.clone();
             let db = display_bar.clone();
-            let aa = aud_available.clone();
-            mode_btn.connect_toggled(move |btn| {
-                let is_sdr = btn.is_active();
-                db.set_app_mode(is_sdr);
-                // SDR always runs software demod (IQ); in MON, the audio
-                // source follows the SRC toggle state. Warn (yellow) only
-                // when MON+AUD is selected but AUD isn't serviceable.
-                let is_iq = is_sdr || ab.is_active();
-                db.set_audio_source(is_iq, !is_iq && !aa.get());
-                sb.set_visible(is_sdr);
-                ab.set_visible(!is_sdr);
-
-                if is_sdr {
-                    // --- MON → SDR ---
+            audio_btn.connect_toggled(move |btn| {
+                let is_iq = btn.is_active();
+                if is_iq {
+                    // --- AUD → IQ ---
                     let (freq_hz, mode) = {
                         let params = sp.borrow();
                         (params.freq_hz, params.mode())
@@ -531,7 +496,6 @@ impl ControlBar {
                     let _ = tx.send(ClientMsg::SetDemodMode(Some(mode)));
                     let _ = tx.send(ClientMsg::SetAudioSource(AudioSource::SoftwareDemod));
 
-                    // Update SDR UI controls (set_selected fires notify handler that borrows sp)
                     fe.set_text(&format!("{}", freq_hz));
                     if let Some(idx) = am.borrow().iter().position(|&(_, m)| m == mode) {
                         md.set_selected(idx as u32);
@@ -542,7 +506,7 @@ impl ControlBar {
                         db.clear_extras();
                     }
                 } else {
-                    // --- SDR → MON ---
+                    // --- IQ → AUD ---
                     db.clear_extras();
                     {
                         let mut params = sp.borrow_mut();
@@ -552,20 +516,13 @@ impl ControlBar {
                         }
                         sdr_params::save(&params);
                     }
-
                     let _ = tx.send(ClientMsg::SetDemodMode(None));
-
-                    if ab.is_active() {
-                        let _ = tx.send(ClientMsg::SetAudioSource(AudioSource::SoftwareDemod));
-                    } else {
-                        let _ = tx.send(ClientMsg::SetAudioSource(AudioSource::RadioUsb));
-                    }
+                    let _ = tx.send(ClientMsg::SetAudioSource(AudioSource::RadioUsb));
                 }
             });
         }
 
-        ctrl0_left.append(&mode_btn);
-        ctrl0_center.append(&audio_btn);
+        ctrl0_left.append(&audio_btn);
 
         // --- AGC threshold slider (always visible, 0–10) ---
         let initial_threshold = sdr_params.borrow().agc_threshold;
@@ -639,6 +596,7 @@ impl ControlBar {
             sdr_box.append(&tune_up);
         }
 
+        ctrl1_center.append(&mode_dropdown);
         ctrl1_center.append(&sdr_box);
 
         // --- Always-visible controls: PTT, Mute, Volume ---
@@ -681,11 +639,11 @@ impl ControlBar {
 
         Self {
             container,
-            mode_btn,
             audio_btn,
             ptt_btn,
             agc_label,
             agc_scale,
+            sdr_box,
             mode_dropdown,
             mode_list,
             active_modes,
@@ -695,7 +653,6 @@ impl ControlBar {
             sdr_params,
             last_cmd,
             display_bar,
-            aud_available,
         }
     }
 
@@ -711,23 +668,43 @@ impl ControlBar {
     /// Gate UI controls by server-advertised source capabilities.
     pub fn apply_capabilities(&self, caps: &Capabilities) {
         self.ptt_btn.set_visible(caps.has_tx);
-        // MON/SDR toggle is only meaningful when the source can supply IQ.
-        self.mode_btn.set_visible(caps.has_iq);
-        // SRC (audio-source) toggle is visibility-driven by MON/SDR
-        // state, not by USB-audio availability: when AUD is unavailable
-        // the indicator goes yellow (AUD→IQ) and the user still needs
-        // the SRC toggle to explicitly pick IQ and dismiss the warning.
-        self.audio_btn.set_visible(!self.mode_btn.is_active());
         // AGC threshold is a CAT command, so it keys on has_hardware_cat.
         self.agc_label.set_visible(caps.has_hardware_cat);
         self.agc_scale.set_visible(caps.has_hardware_cat);
-
-        // Re-paint the AUD indicator: yellow when MON+AUD is the current
-        // selection but the source has no USB-audio endpoint.
-        self.aud_available.set(caps.has_usb_audio);
-        let is_iq = self.mode_btn.is_active() || self.audio_btn.is_active();
+        // AUD / IQ availability indicators in the display bar.
         self.display_bar
-            .set_audio_source(is_iq, !is_iq && !caps.has_usb_audio);
+            .set_source_availability(caps.has_usb_audio, caps.has_iq);
+
+        // Source selection — the sole mode choice. Button visible only
+        // when both sources are available so the user can pick; hidden
+        // + auto-forced otherwise. Construction default is AUD, so the
+        // both-available case needs no forcing here.
+        match (caps.has_usb_audio, caps.has_iq) {
+            (true, true) => self.audio_btn.set_visible(true),
+            (true, false) => {
+                self.audio_btn.set_visible(false);
+                if self.audio_btn.is_active() {
+                    self.audio_btn.set_active(false); // force AUD
+                }
+            }
+            (false, true) => {
+                self.audio_btn.set_visible(false);
+                if !self.audio_btn.is_active() {
+                    self.audio_btn.set_active(true); // force IQ
+                }
+            }
+            (false, false) => self.audio_btn.set_visible(false),
+        }
+
+        // Demod-mode dropdown is greyed out only in the AUD+no-CAT
+        // case (portable radio): no radio to command, no backend demod
+        // to configure. Active in every other combo.
+        let is_aud = !self.audio_btn.is_active();
+        let dropdown_sensitive = !(is_aud && !caps.has_hardware_cat);
+        self.mode_dropdown.set_sensitive(dropdown_sensitive);
+
+        // Tune controls (freq entry, step, up/down) only work via CAT.
+        self.sdr_box.set_visible(caps.has_hardware_cat);
 
         // Initial AGC-threshold sync, deferred from construction so we only
         // emit it to sources that can accept the CAT command.
@@ -773,10 +750,9 @@ impl ControlBar {
         self.suppress_mode_notify.set(false);
     }
 
-    /// Save SDR params if currently in SDR mode (call on app quit).
+    /// Save SDR params if currently using the IQ source (call on app quit).
     pub fn save_on_quit(&self) {
-        if self.mode_btn.is_active() {
-            // In SDR mode — save current params
+        if self.audio_btn.is_active() {
             let mut params = self.sdr_params.borrow_mut();
             if let Some(ref state) = *self.last_radio.borrow() {
                 params.freq_hz = state.freq_hz;
@@ -820,6 +796,19 @@ fn tune_by_step(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Toggle a label between the active (blue `.app-mode`) and inactive
+/// (grey `.app-mode-disabled`) styles. Used by the AUD / IQ
+/// availability indicators in the display bar.
+fn apply_avail_style(label: &Label, available: bool) {
+    if available {
+        label.add_css_class("app-mode");
+        label.remove_css_class("app-mode-disabled");
+    } else {
+        label.remove_css_class("app-mode");
+        label.add_css_class("app-mode-disabled");
+    }
+}
 
 /// Build a horizontal row with three slots: left (start-aligned, fixed
 /// width), center (expanding, center-aligned), right (end-aligned, fixed
