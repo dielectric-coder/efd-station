@@ -263,6 +263,14 @@ async fn run_bridge(
         // DREAM consume the next token as the argument and bail with exit 1.
         dream_cmd.args(["-p", "1"]);
     }
+
+    // Log the exact argv we're about to exec so operators can paste it
+    // into a shell and reproduce DREAM's behavior outside our pipeline.
+    info!(
+        dream = %cfg.dream_binary,
+        args = ?dream_cmd.as_std().get_args().collect::<Vec<_>>(),
+        "spawning dream"
+    );
     // SAFETY: `setsid(2)` is async-signal-safe, which is the contract for
     // pre_exec (runs post-fork / pre-exec). Return value is ignored: if
     // we're already a session leader (rare — happens under some systemd
