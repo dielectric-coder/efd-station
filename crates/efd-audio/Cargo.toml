@@ -11,3 +11,4 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 alsa = "0.9"
 audiopus = "0.3.0-rc.0"
+symphonia = { version = "0.5", default-features = false, features = ["wav", "flac", "pcm"] }

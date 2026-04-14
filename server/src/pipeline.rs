@@ -189,35 +189,61 @@ impl Pipeline {
         // the USB audio card, so the device name exists but opening it
         // fails with ENOTSUPP (errno 524) — we need to learn that now,
         // so `has_usb_audio` is accurate before we advertise capabilities.
+        //
+        // `EFD_AUDIO_FILE_RX=/path/to/file.wav` substitutes a file
+        // source for USB RX (Phase 2 of the pipeline refactor — see
+        // docs/CM5-sdr-backend-pipeline.drawio). Useful for testing the
+        // whole audio pipeline without a radio. File must be 48 kHz;
+        // no resampling yet.
         let (usb_rx_tx, usb_rx_rx) = mpsc::channel::<efd_audio::PcmBlock>(64);
-        let usb_audio_live = match efd_audio::resolve_device(&config.audio.rx_device, true) {
-            Some(rx_dev) if efd_audio::probe_capture(&rx_dev) => {
-                info!(device = %rx_dev, "USB RX audio capture device");
-                let usb_rx_cfg = efd_audio::UsbRxConfig {
-                    device: rx_dev,
-                    sample_rate: config.audio.sample_rate,
-                };
-                let c = cancel.clone();
-                let handle = efd_audio::spawn_usb_rx_task(usb_rx_cfg, usb_rx_tx, c);
-                let handle = tokio::spawn(async move {
-                    match handle.await {
-                        Ok(Ok(())) => info!("USB RX capture exited cleanly"),
-                        Ok(Err(e)) => error!("USB RX capture error: {e}"),
-                        Err(e) => error!("USB RX capture panicked: {e}"),
-                    }
-                });
-                tasks.push(("usb_rx", handle));
-                true
-            }
-            Some(rx_dev) => {
-                drop(usb_rx_tx);
-                info!(device = %rx_dev, "USB RX audio unavailable (probe failed)");
-                false
-            }
-            None => {
-                drop(usb_rx_tx);
-                info!("USB RX audio disabled (device not found)");
-                false
+        let usb_audio_live = if let Ok(path) = std::env::var("EFD_AUDIO_FILE_RX") {
+            let path = std::path::PathBuf::from(&path);
+            info!(file = %path.display(), "audio source: file (EFD_AUDIO_FILE_RX)");
+            let file_cfg = efd_audio::FileSourceConfig {
+                path,
+                sample_rate: config.audio.sample_rate,
+            };
+            let c = cancel.clone();
+            let handle = efd_audio::spawn_file_source_task(file_cfg, usb_rx_tx, c);
+            let handle = tokio::spawn(async move {
+                match handle.await {
+                    Ok(Ok(())) => info!("file source exited cleanly"),
+                    Ok(Err(e)) => error!("file source error: {e}"),
+                    Err(e) => error!("file source panicked: {e}"),
+                }
+            });
+            tasks.push(("file_source", handle));
+            true
+        } else {
+            match efd_audio::resolve_device(&config.audio.rx_device, true) {
+                Some(rx_dev) if efd_audio::probe_capture(&rx_dev) => {
+                    info!(device = %rx_dev, "USB RX audio capture device");
+                    let usb_rx_cfg = efd_audio::UsbRxConfig {
+                        device: rx_dev,
+                        sample_rate: config.audio.sample_rate,
+                    };
+                    let c = cancel.clone();
+                    let handle = efd_audio::spawn_usb_rx_task(usb_rx_cfg, usb_rx_tx, c);
+                    let handle = tokio::spawn(async move {
+                        match handle.await {
+                            Ok(Ok(())) => info!("USB RX capture exited cleanly"),
+                            Ok(Err(e)) => error!("USB RX capture error: {e}"),
+                            Err(e) => error!("USB RX capture panicked: {e}"),
+                        }
+                    });
+                    tasks.push(("usb_rx", handle));
+                    true
+                }
+                Some(rx_dev) => {
+                    drop(usb_rx_tx);
+                    info!(device = %rx_dev, "USB RX audio unavailable (probe failed)");
+                    false
+                }
+                None => {
+                    drop(usb_rx_tx);
+                    info!("USB RX audio disabled (device not found)");
+                    false
+                }
             }
         };
 
