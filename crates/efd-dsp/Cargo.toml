@@ -11,6 +11,11 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+# Used by the DRM bridge to read/write the snd-aloop loopback PCMs that
+# carry audio between Rust and the DREAM subprocess. Replaces the
+# previous PipeWire null-sink + pacat/parec setup so the .deb works on
+# a fresh install with no per-user PipeWire config.
+alsa = "0.9"
 
 [target.'cfg(unix)'.dependencies]
 # Needed for the setsid() pre_exec call when spawning DREAM — detaches

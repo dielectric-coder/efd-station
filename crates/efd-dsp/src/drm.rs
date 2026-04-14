@@ -1,23 +1,27 @@
 //! DRM (Digital Radio Mondiale) decoder bridge.
 //!
 //! Pipes a **wideband-SSB audio-IF stream** (produced by `crate::demod`
-//! under `Mode::DRM`, see its [`crate::demod::spawn_demod_task`] docs)
-//! through the vendored DREAM 2.1.1 decoder by way of two PipeWire null
-//! sinks. DREAM runs in its sound-card audio-IF mode — the same path
-//! that works when manually running `paplay FILE.fla | dream` on
-//! DREAM's bundled sample set.
+//! under `Mode::DRM`, see [`crate::demod::spawn_demod_task`]) through
+//! the vendored DREAM 2.1.1 decoder over **ALSA loopback (`snd-aloop`)**.
 //!
 //! ```text
 //! AudioBlock (48 kHz mono f32, 10 kHz BW audio-IF)
-//!           ──→ pacat channels=1 → sink(drm_in)
-//!                                       │ (monitor)
-//!                   dream -I drm_in.monitor -O drm_out
+//!           ──→ alsa playback hw:Loopback,0,0
+//!                                       │
+//!                   dream -I plughw:Loopback,1,0 -O plughw:Loopback,0,1
 //!                         --sigsrate 48000 --audsrate 48000
 //!                                       │
-//!                            sink(drm_out).monitor → parec channels=1
+//!                            alsa capture hw:Loopback,1,1
 //!                                       │
 //!                            AudioBlock → pipeline audio mpsc
 //! ```
+//!
+//! Rationale for ALSA loopback over the previous PipeWire null-sink
+//! approach: snd-aloop is a kernel module with no per-user state, so
+//! the .deb runs as a dedicated `efd` user with `ProtectHome=read-only`
+//! and no `XDG_RUNTIME_DIR` / linger gymnastics. The `.deb` ships a
+//! `/etc/modules-load.d` snippet so the kernel auto-loads `snd-aloop`
+//! at boot — true zero-config DRM.
 //!
 //! Rationale for audio-IF instead of raw I/Q (`-c 6`): DREAM's most-
 //! tested input path is sound-card audio — the mode its built-in FLAC
@@ -29,7 +33,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use efd_proto::DrmStatus;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
@@ -39,20 +43,28 @@ use tracing::{debug, info, warn};
 use crate::demod::AudioBlock;
 use crate::error::DspError;
 
-/// Hard cap on how long any individual `pactl` / `pacat` / `parec` /
-/// `dream` subprocess setup step may block. If PipeWire is hung we want
-/// the whole bridge to fail loudly rather than wedge mode-switching.
+/// Hard cap on how long the `dream` subprocess spawn may block. Bounds
+/// the bridge-setup phase so a wedged dream can't stall mode-switching.
 const SUBPROC_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// snd-aloop addressing — see module docs. Subdevice 0 carries the
+/// audio-IF input to DREAM; subdevice 1 carries the decoded audio out.
+/// Each pair: `hw:Loopback,0,X` is the playback side, `hw:Loopback,1,X`
+/// is the capture side.
+///
+/// `plughw:` is used for the DREAM-facing endpoints so ALSA's plug
+/// layer adapts format/rate/channels if DREAM's negotiated params
+/// differ slightly from ours.
+const LOOPBACK_RUST_WRITE: &str = "hw:Loopback,0,0"; // Rust → DREAM (input)
+const LOOPBACK_DREAM_READ: &str = "plughw:Loopback,1,0";
+const LOOPBACK_DREAM_WRITE: &str = "plughw:Loopback,0,1"; // DREAM → Rust (output)
+const LOOPBACK_RUST_READ: &str = "hw:Loopback,1,1";
 
 /// Configuration for the DRM bridge.
 #[derive(Debug, Clone)]
 pub struct DrmConfig {
     /// Path to the vendored dream binary.
     pub dream_binary: String,
-    /// Name of the input null sink we create.
-    pub input_sink: String,
-    /// Name of the output null sink we create.
-    pub output_sink: String,
     /// Rate at which dream is driven. Must be one of 24/48/96/192 kHz
     /// (dream only accepts those). 48 kHz is the usual choice. The
     /// incoming [`AudioBlock`]s must already be at this rate — the
@@ -61,7 +73,8 @@ pub struct DrmConfig {
     pub dream_rate: u32,
     /// Pass `-p` to DREAM so it flips the input spectrum. Some DRM
     /// broadcasters transmit with inverted spectrum; DREAM has no
-    /// automatic detection for this, so it's a manual config toggle.
+    /// automatic detection for this, so it's a manual runtime toggle
+    /// (see `ClientMsg::SetDrmFlipSpectrum`).
     pub flip_spectrum: bool,
 }
 
@@ -69,8 +82,6 @@ impl Default for DrmConfig {
     fn default() -> Self {
         Self {
             dream_binary: "dream".into(),
-            input_sink: "efd_drm_in".into(),
-            output_sink: "efd_drm_out".into(),
             dream_rate: 48_000,
             flip_spectrum: false,
         }
@@ -80,16 +91,16 @@ impl Default for DrmConfig {
 /// Which input side to wire onto DREAM.
 pub enum DrmInput {
     /// Production path: the bridge subscribes to a `broadcast<AudioBlock>`
-    /// and pipes the samples into the `drm_in` null sink via `pacat`.
-    /// Expects the upstream Tier-1 demod to publish 48 kHz mono audio-IF.
+    /// and writes the samples to the `hw:Loopback,0,0` snd-aloop
+    /// playback. Expects the upstream Tier-1 demod to publish 48 kHz
+    /// mono audio-IF.
     AudioBroadcast(broadcast::Receiver<AudioBlock>),
     /// Hardware-free test path: DREAM reads the file directly via `-f`.
-    /// No Rust-side audio writer, no `drm_in` null sink, no pacat
-    /// subprocess. DREAM's `-f` handler infers format from the file
-    /// extension (`.flac`/`.wav` via libsndfile, `.iq`/`.if` raw s16
-    /// stereo, `.pcm` raw s16 mono). Intended for
-    /// `EFD_DRM_FILE_TEST` deployments and unit-test-style
-    /// validation without PipeWire involvement on the input side.
+    /// No Rust-side audio writer, no input-side loopback. DREAM's `-f`
+    /// handler infers format from the file extension (`.flac`/`.wav`
+    /// via libsndfile, `.iq`/`.if` raw s16 stereo, `.pcm` raw s16
+    /// mono). Intended for `EFD_DRM_FILE_TEST` deployments and
+    /// unit-test-style validation.
     File(std::path::PathBuf),
 }
 
@@ -105,10 +116,9 @@ pub struct DrmHandles {
 /// Spawn the DRM bridge. The returned `DrmHandles` carries the task's
 /// join handle plus a watch receiver for parsed decoder status.
 ///
-/// On entry, this function loads two `module-null-sink` modules via
-/// `pactl`, then spawns `pacat`, `parec`, and `dream` as children. On
-/// shutdown all three are killed and the sinks are unloaded in a
-/// best-effort Drop guard.
+/// On entry, this function spawns `dream` and the per-direction ALSA
+/// loopback I/O tasks. On shutdown DREAM is killed and the I/O tasks
+/// observe the cancel token to release their PCM handles cleanly.
 pub fn spawn_drm_bridge(
     cfg: DrmConfig,
     input: DrmInput,
@@ -129,25 +139,9 @@ async fn run_bridge(
     status_tx: watch::Sender<Option<DrmStatus>>,
     cancel: CancellationToken,
 ) -> Result<(), DspError> {
-    // Output sink is always needed (parec reads decoded audio from here).
-    // Input sink only exists for the AudioBroadcast path — File mode has
-    // DREAM opening the file directly.
-    let needs_input_sink = matches!(input, DrmInput::AudioBroadcast(_));
-    let _sinks = if needs_input_sink {
-        NullSinks::create(&cfg.input_sink, &cfg.output_sink, cfg.dream_rate).await?
-    } else {
-        NullSinks::create_output_only(&cfg.output_sink, cfg.dream_rate).await?
-    };
-
-    // Helper: take a Child's piped stdio handle, returning a structured error
-    // on the (vanishingly unlikely) event that the kernel didn't honor
-    // Stdio::piped(). `expect()` would panic the whole task.
-    fn take_stdin(child: &mut Child, name: &str) -> Result<tokio::process::ChildStdin, DspError> {
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| DspError::Drm(format!("{name}: stdin not piped")))
-    }
+    // Helper: take a Child's piped stdio handle, returning a structured
+    // error on the (vanishingly unlikely) event that the kernel didn't
+    // honor Stdio::piped(). `expect()` would panic the whole task.
     fn take_stdout(
         child: &mut Child,
         name: &str,
@@ -158,93 +152,38 @@ async fn run_bridge(
             .ok_or_else(|| DspError::Drm(format!("{name}: stdout not piped")))
     }
 
-    // Input side: either spawn pacat + take its stdin for the writer task,
-    // or leave it None and let DREAM's `-f` handle file reads.
-    //
-    // `--latency-msec=500` on pacat gives the PipeWire client a generous
-    // target buffer so small hiccups in our Rust-side pacer don't underrun
-    // the null-sink on the DREAM-read side. Adds ~500 ms of end-to-end
-    // latency (inaudible for DRM, which already has ~2 s of interleaver
-    // delay on top).
-    let (mut pacat_opt, pacat_stdin_opt): (
-        Option<Child>,
-        Option<tokio::process::ChildStdin>,
-    ) = if matches!(input, DrmInput::AudioBroadcast(_)) {
-        let mut pacat = spawn_with_timeout("pacat", || {
-            Command::new("pacat")
-                .args([
-                    "--playback",
-                    "--device",
-                    &cfg.input_sink,
-                    "--channels=1",
-                    "--format=s16le",
-                    &format!("--rate={}", cfg.dream_rate),
-                    "--latency-msec=500",
-                    "--raw",
-                ])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .spawn()
-        })
-        .await?;
-        let stdin = take_stdin(&mut pacat, "pacat")?;
-        (Some(pacat), Some(stdin))
-    } else {
-        (None, None)
-    };
-
-    // `parec` reads decoded audio from drm_out.monitor.
-    let mut parec = spawn_with_timeout("parec", || {
-        Command::new("parec")
-            .args([
-                "--record",
-                "--device",
-                &format!("{}.monitor", cfg.output_sink),
-                "--channels=1",
-                "--format=s16le",
-                &format!("--rate={}", cfg.dream_rate),
-                "--raw",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-    })
-    .await?;
-    let mut parec_stdout = take_stdout(&mut parec, "parec")?;
-
-    // DREAM: audio-IF input and audio output.
+    // DREAM: audio-IF input and audio output via snd-aloop.
     // No `-c 6` — we feed real-valued audio, not complex I/Q.
     // stdout is piped so the TUI parser can build a live DrmStatus.
     //
     // setsid() via pre_exec detaches DREAM from our controlling TTY (if
     // any). Without this, DREAM's curses TUI writes to /dev/tty — which
-    // means in an interactive SSH session the TUI bleeds into the user's
-    // terminal and our stdout pipe gets nothing, so DrmStatus never
-    // reaches the client. With /dev/tty gone, DREAM's open("/dev/tty")
-    // fails and the 0002-consoleio-stdout-fallback patch routes the TUI
-    // to STDOUT_FILENO (our captured pipe). Under systemd (no tty) this
-    // is already fine; setsid is a no-op or harmless EPERM there.
+    // means in an interactive SSH session the TUI bleeds into the
+    // user's terminal and our stdout pipe gets nothing, so DrmStatus
+    // never reaches the client. With /dev/tty gone, DREAM's
+    // open("/dev/tty") fails and the 0002-consoleio-stdout-fallback
+    // patch routes the TUI to STDOUT_FILENO (our captured pipe). Under
+    // systemd (no tty) this is already fine; setsid is a no-op or
+    // harmless EPERM there.
     let mut dream_cmd = Command::new(&cfg.dream_binary);
     match &input {
         DrmInput::AudioBroadcast(_) => {
             dream_cmd.args([
                 "-I",
-                &format!("{}.monitor", cfg.input_sink),
+                LOOPBACK_DREAM_READ,
                 "-O",
-                &cfg.output_sink,
+                LOOPBACK_DREAM_WRITE,
             ]);
         }
         DrmInput::File(path) => {
             // `-f` disables the sound-card input entirely; DREAM opens
             // the file via libsndfile (WAV/FLAC) or as raw s16 based on
-            // extension. Output still goes to the drm_out null sink so
-            // parec can capture decoded audio.
-            dream_cmd.arg("-f").arg(path.as_os_str()).args([
-                "-O",
-                &cfg.output_sink,
-            ]);
+            // extension. Output still goes to the loopback so the
+            // reader task can capture decoded audio.
+            dream_cmd
+                .arg("-f")
+                .arg(path.as_os_str())
+                .args(["-O", LOOPBACK_DREAM_WRITE]);
         }
     }
     dream_cmd
@@ -289,109 +228,51 @@ async fn run_bridge(
     let dream_stdout = take_stdout(&mut dream, "dream")?;
 
     info!(
-        pacat = pacat_opt.as_ref().and_then(|c| c.id()).unwrap_or(0),
-        parec = parec.id().unwrap_or(0),
         dream = dream.id().unwrap_or(0),
         input = match &input {
             DrmInput::AudioBroadcast(_) => "audio-broadcast",
             DrmInput::File(_) => "file",
         },
         flip_spectrum = cfg.flip_spectrum,
+        loopback_in = LOOPBACK_RUST_WRITE,
+        loopback_out = LOOPBACK_RUST_READ,
         "DRM bridge started"
     );
 
-    // AudioBlock → pacat writer task (only spawned in AudioBroadcast mode;
-    // in File mode DREAM's `-f` handles the input side itself).
+    // AudioBlock → snd-aloop playback writer (only in AudioBroadcast
+    // mode; File mode lets DREAM's `-f` read the file itself).
     //
     // Incoming samples are already at `dream_rate` (the demod upstream
-    // handles decimation to 48 kHz), so this task just transcodes f32 →
-    // mono s16le and streams the bytes into pacat's stdin.
-    let writer: Option<tokio::task::JoinHandle<()>> = match (input, pacat_stdin_opt) {
-        (DrmInput::AudioBroadcast(mut audio_rx), Some(mut pacat_stdin)) => {
+    // handles decimation to 48 kHz), so this task just downcasts f32 →
+    // mono s16le and writes via the alsa crate. ALSA writes are
+    // blocking, so the work runs on the spawn_blocking pool.
+    let is_file_mode = matches!(input, DrmInput::File(_));
+    let writer: Option<JoinHandle<()>> = match input {
+        DrmInput::AudioBroadcast(audio_rx) => {
             let cancel_w = cancel.clone();
-            Some(tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = cancel_w.cancelled() => {
-                            debug!("DRM writer: cancelled");
-                            break;
-                        }
-                        r = audio_rx.recv() => match r {
-                            Ok(block) => {
-                                let mut out = Vec::with_capacity(block.samples.len() * 2);
-                                for &s in &block.samples {
-                                    out.extend_from_slice(&f32_to_s16(s).to_le_bytes());
-                                }
-                                if pacat_stdin.write_all(&out).await.is_err() {
-                                    debug!("DRM writer: pacat stdin closed");
-                                    break;
-                                }
-                            }
-                            Err(broadcast::error::RecvError::Lagged(n)) => {
-                                // The demod broadcast outpaced us. DREAM handles
-                                // modest gaps gracefully; log and keep going.
-                                warn!(skipped = n, "DRM writer: audio-IF lagged");
-                            }
-                            Err(broadcast::error::RecvError::Closed) => {
-                                debug!("DRM writer: audio-IF channel closed");
-                                break;
-                            }
-                        }
-                    }
+            let rate = cfg.dream_rate;
+            Some(tokio::task::spawn_blocking(move || {
+                if let Err(e) = run_loopback_writer(LOOPBACK_RUST_WRITE, rate, audio_rx, cancel_w) {
+                    warn!(error = %e, "DRM writer (loopback) exited with error");
                 }
-                let _ = pacat_stdin.shutdown().await;
             }))
         }
-        _ => None,
+        DrmInput::File(_) => None,
     };
 
-    // parec → AudioBlock task.
+    // snd-aloop capture → AudioBlock task.
     //
-    // parec delivers mono s16le decoded audio from DREAM at `dream_rate`;
-    // we repack into f32 AudioBlocks matching the demod pipeline contract.
+    // ALSA reads are blocking; runs on spawn_blocking. Frames are
+    // batched 960-at-a-time (20 ms @ 48 kHz) to match the existing
+    // pipeline rhythm and the AudioBlock contract.
     let cancel_r = cancel.clone();
     let audio_tx_r = audio_tx.clone();
     let dream_rate_r = cfg.dream_rate;
-    let reader = tokio::spawn(async move {
-        const FRAMES_PER_CHUNK: usize = 960;                  // 20 ms @ 48 kHz
-        const BYTES_PER_CHUNK: usize = FRAMES_PER_CHUNK * 2;  // mono s16
-        let mut buf = vec![0u8; BYTES_PER_CHUNK];
-        let start = std::time::Instant::now();
-        loop {
-            tokio::select! {
-                biased;
-                _ = cancel_r.cancelled() => {
-                    debug!("DRM reader: cancelled");
-                    break;
-                }
-                res = parec_stdout.read_exact(&mut buf) => match res {
-                    Ok(_) => {
-                        let mut mono = Vec::with_capacity(FRAMES_PER_CHUNK);
-                        for chunk in buf.chunks_exact(2) {
-                            let s = i16::from_le_bytes([chunk[0], chunk[1]]);
-                            mono.push(s as f32 / 32768.0);
-                        }
-                        let blk = AudioBlock {
-                            samples: mono,
-                            sample_rate: dream_rate_r,
-                            timestamp_us: start.elapsed().as_micros() as u64,
-                        };
-                        if audio_tx_r.send(blk).await.is_err() {
-                            debug!("DRM reader: audio_tx closed");
-                            break;
-                        }
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                        debug!("DRM reader: parec stdout EOF");
-                        break;
-                    }
-                    Err(e) => {
-                        warn!("DRM reader: parec stdout: {e}");
-                        break;
-                    }
-                }
-            }
+    let reader = tokio::task::spawn_blocking(move || {
+        if let Err(e) =
+            run_loopback_reader(LOOPBACK_RUST_READ, dream_rate_r, audio_tx_r, cancel_r)
+        {
+            warn!(error = %e, "DRM reader (loopback) exited with error");
         }
     });
 
@@ -455,61 +336,36 @@ async fn run_bridge(
         );
     });
 
-    // Supervise: cancel when any child dies (including DREAM hitting
-    // end-of-file in `-f` mode — that's an expected exit, not an error)
-    // or the parent cancel fires. Pacat's branch is only live when we
-    // actually spawned it.
-    let rc: Result<(), DspError> = if let Some(pacat) = pacat_opt.as_mut() {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => Ok(()),
-            s = dream.wait() => {
-                warn!(status = ?s, "dream exited unexpectedly");
-                Err(DspError::Drm("dream subprocess exited".into()))
-            }
-            s = pacat.wait() => {
-                warn!(status = ?s, "pacat exited unexpectedly");
-                Err(DspError::Drm("pacat subprocess exited".into()))
-            }
-            s = parec.wait() => {
-                warn!(status = ?s, "parec exited unexpectedly");
-                Err(DspError::Drm("parec subprocess exited".into()))
-            }
-        }
-    } else {
-        // File mode: DREAM exiting cleanly means the file is done. Treat
-        // success as a normal completion (not an error).
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => Ok(()),
-            s = dream.wait() => {
-                match s {
-                    Ok(status) if status.success() => {
-                        info!("dream finished reading file");
-                        Ok(())
-                    }
-                    Ok(status) => {
-                        warn!(?status, "dream exited non-zero");
-                        Err(DspError::Drm("dream subprocess exited non-zero".into()))
-                    }
-                    Err(e) => Err(DspError::Drm(format!("dream wait: {e}"))),
+    // Supervise: dream is the only subprocess now (audio I/O is
+    // in-process via snd-aloop). Branch on input mode for whether a
+    // clean DREAM exit is success (file mode) or failure (live mode).
+    let rc: Result<(), DspError> = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Ok(()),
+        s = dream.wait() => {
+            match s {
+                Ok(status) if is_file_mode && status.success() => {
+                    info!("dream finished reading file");
+                    Ok(())
                 }
-            }
-            s = parec.wait() => {
-                warn!(status = ?s, "parec exited unexpectedly");
-                Err(DspError::Drm("parec subprocess exited".into()))
+                Ok(status) if is_file_mode => {
+                    warn!(?status, "dream exited non-zero (file mode)");
+                    Err(DspError::Drm("dream subprocess exited non-zero".into()))
+                }
+                Ok(status) => {
+                    warn!(?status, "dream exited unexpectedly");
+                    Err(DspError::Drm("dream subprocess exited".into()))
+                }
+                Err(e) => Err(DspError::Drm(format!("dream wait: {e}"))),
             }
         }
     };
 
-    // Teardown: fire the local cancel so the inner tasks exit, then kill
-    // any children still alive, then await everything.
+    // Teardown: fire the local cancel so the loopback I/O tasks exit
+    // (they poll the cancel token between ALSA calls), then kill DREAM
+    // if it's still alive, then await everything.
     cancel.cancel();
     let _ = dream.kill().await;
-    if let Some(mut p) = pacat_opt {
-        let _ = p.kill().await;
-    }
-    let _ = parec.kill().await;
     if let Some(w) = writer {
         let _ = w.await;
     }
@@ -518,6 +374,164 @@ async fn run_bridge(
 
     info!("DRM bridge stopped");
     rc
+}
+
+/// Open the snd-aloop playback side and stream `AudioBlock`s from the
+/// upstream broadcast as mono s16le frames. Runs on `spawn_blocking`.
+fn run_loopback_writer(
+    device: &str,
+    rate: u32,
+    mut audio_rx: broadcast::Receiver<AudioBlock>,
+    cancel: CancellationToken,
+) -> Result<(), DspError> {
+    use alsa::pcm::{Access, Format, HwParams};
+    use alsa::{Direction, PCM};
+
+    let pcm = PCM::new(device, Direction::Playback, false)
+        .map_err(|e| DspError::Drm(format!("loopback writer open {device}: {e}")))?;
+    {
+        let hwp = HwParams::any(&pcm)
+            .map_err(|e| DspError::Drm(format!("loopback writer hwparams: {e}")))?;
+        hwp.set_access(Access::RWInterleaved)
+            .map_err(|e| DspError::Drm(format!("loopback writer access: {e}")))?;
+        hwp.set_format(Format::s16())
+            .map_err(|e| DspError::Drm(format!("loopback writer format: {e}")))?;
+        hwp.set_channels(1)
+            .map_err(|e| DspError::Drm(format!("loopback writer channels: {e}")))?;
+        hwp.set_rate(rate, alsa::ValueOr::Nearest)
+            .map_err(|e| DspError::Drm(format!("loopback writer rate: {e}")))?;
+        // ~500 ms target buffer to absorb pacing jitter — same budget as
+        // the previous pacat `--latency-msec=500` setting.
+        let buf_frames = (rate / 2) as alsa::pcm::Frames;
+        hwp.set_buffer_size_near(buf_frames)
+            .map_err(|e| DspError::Drm(format!("loopback writer buffer: {e}")))?;
+        pcm.hw_params(&hwp)
+            .map_err(|e| DspError::Drm(format!("loopback writer apply hwparams: {e}")))?;
+    }
+    pcm.prepare()
+        .map_err(|e| DspError::Drm(format!("loopback writer prepare: {e}")))?;
+
+    info!(device, rate, "DRM loopback writer opened");
+
+    // Try-recv loop with short sleeps so cancel is observed within ~20 ms.
+    let mut s16: Vec<i16> = Vec::new();
+    loop {
+        if cancel.is_cancelled() {
+            break;
+        }
+        match audio_rx.try_recv() {
+            Ok(block) => {
+                s16.clear();
+                s16.extend(block.samples.iter().map(|&s| f32_to_s16(s)));
+                let io = pcm
+                    .io_i16()
+                    .map_err(|e| DspError::Drm(format!("loopback writer io_i16: {e}")))?;
+                let mut written = 0;
+                while written < s16.len() {
+                    match io.writei(&s16[written..]) {
+                        Ok(n) => written += n,
+                        Err(e) => {
+                            warn!(error = %e, "loopback writer ALSA write, recovering");
+                            if let Err(e2) = pcm.recover(e.errno() as i32, true) {
+                                return Err(DspError::Drm(format!(
+                                    "loopback writer recover: {e2}"
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(broadcast::error::TryRecvError::Empty) => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                warn!(skipped = n, "DRM loopback writer: audio-IF lagged");
+            }
+            Err(broadcast::error::TryRecvError::Closed) => break,
+        }
+    }
+    info!("DRM loopback writer stopped");
+    Ok(())
+}
+
+/// Open the snd-aloop capture side and emit `AudioBlock`s for whatever
+/// DREAM has written. Runs on `spawn_blocking`.
+fn run_loopback_reader(
+    device: &str,
+    rate: u32,
+    audio_tx: mpsc::Sender<AudioBlock>,
+    cancel: CancellationToken,
+) -> Result<(), DspError> {
+    use alsa::pcm::{Access, Format, HwParams};
+    use alsa::{Direction, PCM};
+
+    let pcm = PCM::new(device, Direction::Capture, false)
+        .map_err(|e| DspError::Drm(format!("loopback reader open {device}: {e}")))?;
+    {
+        let hwp = HwParams::any(&pcm)
+            .map_err(|e| DspError::Drm(format!("loopback reader hwparams: {e}")))?;
+        hwp.set_access(Access::RWInterleaved)
+            .map_err(|e| DspError::Drm(format!("loopback reader access: {e}")))?;
+        hwp.set_format(Format::s16())
+            .map_err(|e| DspError::Drm(format!("loopback reader format: {e}")))?;
+        hwp.set_channels(1)
+            .map_err(|e| DspError::Drm(format!("loopback reader channels: {e}")))?;
+        hwp.set_rate(rate, alsa::ValueOr::Nearest)
+            .map_err(|e| DspError::Drm(format!("loopback reader rate: {e}")))?;
+        let buf_frames = (rate / 2) as alsa::pcm::Frames;
+        hwp.set_buffer_size_near(buf_frames)
+            .map_err(|e| DspError::Drm(format!("loopback reader buffer: {e}")))?;
+        pcm.hw_params(&hwp)
+            .map_err(|e| DspError::Drm(format!("loopback reader apply hwparams: {e}")))?;
+    }
+    pcm.prepare()
+        .map_err(|e| DspError::Drm(format!("loopback reader prepare: {e}")))?;
+
+    info!(device, rate, "DRM loopback reader opened");
+
+    const FRAMES_PER_CHUNK: usize = 960; // 20 ms @ 48 kHz
+    let mut buf = vec![0i16; FRAMES_PER_CHUNK];
+    let start = std::time::Instant::now();
+    loop {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let io = pcm
+            .io_i16()
+            .map_err(|e| DspError::Drm(format!("loopback reader io_i16: {e}")))?;
+        let mut offset = 0;
+        while offset < FRAMES_PER_CHUNK {
+            if cancel.is_cancelled() {
+                break;
+            }
+            match io.readi(&mut buf[offset..]) {
+                Ok(n) => offset += n,
+                Err(e) => {
+                    warn!(error = %e, "loopback reader ALSA read, recovering");
+                    if let Err(e2) = pcm.recover(e.errno() as i32, true) {
+                        return Err(DspError::Drm(format!(
+                            "loopback reader recover: {e2}"
+                        )));
+                    }
+                }
+            }
+        }
+        if cancel.is_cancelled() {
+            break;
+        }
+        let mono: Vec<f32> = buf.iter().map(|&s| s as f32 / 32768.0).collect();
+        let blk = AudioBlock {
+            samples: mono,
+            sample_rate: rate,
+            timestamp_us: start.elapsed().as_micros() as u64,
+        };
+        if audio_tx.blocking_send(blk).is_err() {
+            debug!("DRM loopback reader: audio_tx closed");
+            break;
+        }
+    }
+    info!("DRM loopback reader stopped");
+    Ok(())
 }
 
 /// Helpers on the proto `DrmStatus` that live here because they're only
@@ -727,109 +741,6 @@ fn parse_tui_line(line: &str, acc: &mut DrmStatus) -> bool {
 fn f32_to_s16(v: f32) -> i16 {
     let scaled = (v * 32767.0).round();
     scaled.clamp(-32768.0, 32767.0) as i16
-}
-
-/// RAII guard for the PipeWire null sinks. `in_module` is `None` in
-/// file-input mode (no drm_in sink needed — DREAM opens the file directly).
-struct NullSinks {
-    in_module: Option<u32>,
-    out_module: u32,
-}
-
-impl NullSinks {
-    async fn create(in_name: &str, out_name: &str, rate: u32) -> Result<Self, DspError> {
-        let in_module = pactl_load_null_sink(in_name, rate).await?;
-        let out_module = match pactl_load_null_sink(out_name, rate).await {
-            Ok(idx) => idx,
-            Err(e) => {
-                // Don't leak the first module if the second fails.
-                let _ = pactl_unload_module(in_module).await;
-                return Err(e);
-            }
-        };
-        Ok(Self {
-            in_module: Some(in_module),
-            out_module,
-        })
-    }
-
-    /// File-input variant: only the output sink is created. The input
-    /// path is handled by DREAM's `-f` flag, not a PipeWire sink.
-    async fn create_output_only(out_name: &str, rate: u32) -> Result<Self, DspError> {
-        let out_module = pactl_load_null_sink(out_name, rate).await?;
-        Ok(Self {
-            in_module: None,
-            out_module,
-        })
-    }
-}
-
-impl Drop for NullSinks {
-    fn drop(&mut self) {
-        // Best-effort synchronous cleanup — Drop can't await, so just
-        // fire-and-forget via std::process. We spawn each child without
-        // waiting; the kernel reaps them via init when this process exits.
-        // Letting `pactl` block here would stall mode-switching teardown
-        // when PipeWire is hung.
-        let unload = |idx: u32| {
-            let _ = std::process::Command::new("pactl")
-                .args(["unload-module", &idx.to_string()])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
-        };
-        if let Some(idx) = self.in_module {
-            unload(idx);
-        }
-        unload(self.out_module);
-    }
-}
-
-async fn pactl_load_null_sink(name: &str, rate: u32) -> Result<u32, DspError> {
-    let fut = Command::new("pactl")
-        .args([
-            "load-module",
-            "module-null-sink",
-            &format!("sink_name={name}"),
-            &format!("rate={rate}"),
-            "channels=1",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output();
-    let out = tokio::time::timeout(SUBPROC_SETUP_TIMEOUT, fut)
-        .await
-        .map_err(|_| DspError::Drm(format!("pactl load-module timed out for sink {name}")))?
-        .map_err(|e| DspError::Drm(format!("pactl load-module: {e}")))?;
-    if !out.status.success() {
-        return Err(DspError::Drm(format!(
-            "pactl load-module failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    let s = String::from_utf8_lossy(&out.stdout);
-    s.trim()
-        .parse::<u32>()
-        .map_err(|_| DspError::Drm(format!("pactl load-module returned non-integer: {s:?}")))
-}
-
-async fn pactl_unload_module(idx: u32) -> Result<(), DspError> {
-    let fut = Command::new("pactl")
-        .args(["unload-module", &idx.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    let status = tokio::time::timeout(SUBPROC_SETUP_TIMEOUT, fut)
-        .await
-        .map_err(|_| DspError::Drm(format!("pactl unload-module timed out for {idx}")))?
-        .map_err(|e| DspError::Drm(format!("pactl unload-module: {e}")))?;
-    if !status.success() {
-        warn!(module = idx, "pactl unload-module returned non-zero");
-    }
-    Ok(())
 }
 
 /// Run a subprocess `spawn` closure under [`SUBPROC_SETUP_TIMEOUT`].

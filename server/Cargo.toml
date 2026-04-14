@@ -1,6 +1,6 @@
 [package]
 name = "efd-server"
-version = "0.6.7"
+version = "0.7.0"
 edition = "2021"
 description = "SDR backend for the Elad FDM-DUO transceiver"
 license = "GPL-3.0-or-later"
@@ -34,6 +34,7 @@ assets = [
     ["target/release/efd-server", "usr/bin/", "755"],
     ["../dist/config/config.toml", "etc/efd-backend/config.toml.example", "644"],
     ["../dist/udev/99-fdm-duo.rules", "lib/udev/rules.d/", "644"],
+    ["../dist/modules-load.d/efd-server.conf", "etc/modules-load.d/", "644"],
 ]
 conf-files = ["/etc/efd-backend/config.toml.example"]
 maintainer-scripts = "debian/"

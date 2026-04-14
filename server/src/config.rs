@@ -56,15 +56,11 @@ pub struct DrmConfig {
     /// Path to the dream binary. Defaults to "dream" on PATH; set to the
     /// vendored build path (e.g. "/usr/lib/efd-station/dream") when packaged.
     pub dream_binary: String,
-    /// PipeWire null-sink name for audio-IF fed to dream.
-    pub input_sink: String,
-    /// PipeWire null-sink name for dream's decoded audio output.
-    pub output_sink: String,
-    /// Pass `-p` to dream so it flips the input spectrum. Some DRM
+    /// Initial state of dream's `-p` flag. Per-runtime override comes
+    /// from the client via `ClientMsg::SetDrmFlipSpectrum`. Some DRM
     /// broadcasters transmit with inverted spectrum (one of DREAM's
     /// bundled samples is labeled `..._flipped_spectrum.flac`); DREAM
-    /// has no auto-detection, so toggle this per deploy or per test
-    /// file as needed.
+    /// has no auto-detection.
     pub flip_spectrum: bool,
 }
 
@@ -72,8 +68,6 @@ impl Default for DrmConfig {
     fn default() -> Self {
         Self {
             dream_binary: "dream".into(),
-            input_sink: "efd_drm_in".into(),
-            output_sink: "efd_drm_out".into(),
             flip_spectrum: false,
         }
     }
@@ -222,8 +216,6 @@ fn log_effective(cfg: &Config) {
     tracing::info!(
         dream = %cfg.drm.dream_binary,
         flip_spectrum = cfg.drm.flip_spectrum,
-        in_sink = %cfg.drm.input_sink,
-        out_sink = %cfg.drm.output_sink,
         "effective drm config"
     );
     tracing::debug!(?cfg, "effective config (full)");
