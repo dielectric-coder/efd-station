@@ -184,6 +184,7 @@ impl Pipeline {
 
         // --- USB RX audio capture (radio's hardware demod output) ---
         let (usb_rx_tx, usb_rx_rx) = mpsc::channel::<efd_audio::PcmBlock>(64);
+        let usb_audio_live;
         if let Some(rx_dev) = efd_audio::resolve_device(&config.audio.rx_device, true) {
             info!(device = %rx_dev, "USB RX audio capture device");
             let usb_rx_cfg = efd_audio::UsbRxConfig {
@@ -200,9 +201,11 @@ impl Pipeline {
                 }
             });
             tasks.push(("usb_rx", handle));
+            usb_audio_live = true;
         } else {
             drop(usb_rx_tx); // no producer — mux will see closed channel immediately
             info!("USB RX audio disabled (device not found)");
+            usb_audio_live = false;
         }
 
         // --- Audio source mux → Opus encoder → broadcast<AudioChunk> ---
@@ -425,12 +428,16 @@ impl Pipeline {
 
         info!(tasks = tasks.len(), "pipeline started");
 
+        // has_usb_audio reflects *runtime* availability (ALSA device
+        // resolved at startup), not just driver intent — the FDM-DUO
+        // source says it supports USB audio, but if the cable isn't
+        // plugged in the device won't resolve and the client must know.
         let capabilities = Capabilities {
             source: source_caps.kind,
             has_iq: source_caps.has_iq,
             has_tx: source_caps.has_tx,
             has_hardware_cat: source_caps.has_hardware_cat,
-            has_usb_audio: source_caps.has_usb_audio,
+            has_usb_audio: source_caps.has_usb_audio && usb_audio_live,
             supported_demod_modes: source_caps.supported_demod_modes,
         };
 
