@@ -1,4 +1,5 @@
 pub mod audio_dsp;
+pub mod audio_if;
 pub mod demod;
 pub mod drm;
 pub mod error;
@@ -7,6 +8,7 @@ pub mod filter;
 pub mod window;
 
 pub use audio_dsp::{AudioDsp, AudioDspFlags};
+pub use audio_if::AudioIfFilter;
 pub use demod::{spawn_demod_task, AudioBlock, DemodConfig, DemodTuning};
 pub use drm::{spawn_drm_bridge, DrmConfig, DrmInput};
 pub use filter::FirDecimator;

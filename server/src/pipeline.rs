@@ -252,8 +252,19 @@ impl Pipeline {
         {
             let atx = audio_tx.clone();
             let c = cancel.clone();
+            let mode_rx = demod_mode_tx.subscribe();
+            let sample_rate = config.audio.sample_rate;
             let handle = tokio::spawn(async move {
-                encode_audio_mux(demod_audio_rx, usb_rx_rx, audio_source_rx, atx, c).await;
+                encode_audio_mux(
+                    demod_audio_rx,
+                    usb_rx_rx,
+                    audio_source_rx,
+                    mode_rx,
+                    sample_rate,
+                    atx,
+                    c,
+                )
+                .await;
             });
             tasks.push(("opus_encoder", handle));
         }
@@ -586,8 +597,18 @@ impl Pipeline {
         {
             let atx = audio_tx.clone();
             let c = cancel.clone();
+            let mode_rx = demod_mode_tx.subscribe();
             let handle = tokio::spawn(async move {
-                encode_audio_mux(demod_audio_rx, usb_rx_rx, audio_source_rx, atx, c).await;
+                encode_audio_mux(
+                    demod_audio_rx,
+                    usb_rx_rx,
+                    audio_source_rx,
+                    mode_rx,
+                    48_000,
+                    atx,
+                    c,
+                )
+                .await;
             });
             tasks.push(("opus_encoder", handle));
         }
@@ -679,6 +700,8 @@ async fn encode_audio_mux(
     mut demod_rx: mpsc::Receiver<efd_dsp::AudioBlock>,
     mut usb_rx: mpsc::Receiver<efd_audio::PcmBlock>,
     mut source_rx: watch::Receiver<AudioSource>,
+    mut demod_mode_rx: watch::Receiver<Option<efd_proto::Mode>>,
+    sample_rate: u32,
     tx: broadcast::Sender<AudioChunk>,
     cancel: CancellationToken,
 ) {
@@ -696,6 +719,13 @@ async fn encode_audio_mux(
     // in a later phase. Flags are always-off by default so this is a
     // no-op today.
     let dsp = efd_dsp::AudioDsp::new();
+    // Audio-rate IF bandpass — the "Audio source → IF demod" edge in
+    // the drawio. Active only on the USB-RX / file path; the demod
+    // task already filters the IQ → audio chain. Default bypass
+    // until a narrow mode is selected.
+    let mut audio_if = efd_dsp::AudioIfFilter::new(sample_rate as f32);
+    let mut current_mode: Option<efd_proto::Mode> = *demod_mode_rx.borrow();
+    audio_if.set_mode(current_mode);
     let mut dsp_scratch: Vec<f32> = Vec::with_capacity(efd_audio::OPUS_FRAME_SIZE);
     let mut demod_alive = true;
     let mut usb_alive = true;
@@ -731,6 +761,14 @@ async fn encode_audio_mux(
                 logged_fallback = false;
                 continue;
             }
+            _ = demod_mode_rx.changed() => {
+                let new_mode = *demod_mode_rx.borrow();
+                if new_mode != current_mode {
+                    current_mode = new_mode;
+                    audio_if.set_mode(current_mode);
+                }
+                continue;
+            }
             block = demod_rx.recv(), if demod_alive => {
                 let Some(block) = block else {
                     demod_alive = false;
@@ -756,6 +794,10 @@ async fn encode_audio_mux(
                 }
                 dsp_scratch.clear();
                 dsp_scratch.extend_from_slice(&block.samples);
+                // Audio → IF demod → DSP → Audio Out.
+                // IF filter is applied only to already-audio sources;
+                // IQ → audio demod has its own filters upstream.
+                audio_if.process(&mut dsp_scratch);
                 dsp.process(&mut dsp_scratch);
                 encode_samples(&dsp_scratch, &mut frame_buf, &mut encoder, &mut seq, &tx);
             }
