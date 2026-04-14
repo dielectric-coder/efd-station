@@ -29,10 +29,13 @@ pub struct DisplayBar {
     smeter: LevelBar,
     smeter_label: Label,
     tx_label: Label,
-    /// AUD / IQ availability indicators. Each is styled either active
-    /// (`.app-mode`) or greyed-out (`.app-mode-disabled`) based on the
-    /// corresponding capability flag. Both hidden when neither source
-    /// is available; `no_device_label` takes over instead.
+    /// Currently-selected source indicator (disp0-left): "SRC: AUD" or
+    /// "SRC: IQ". Updated from the control bar's source-toggle handler.
+    selected_src_label: Label,
+    /// AUD / IQ availability indicators (disp1-left). Each is styled
+    /// either active (`.app-mode`) or greyed-out (`.app-mode-disabled`)
+    /// based on the corresponding capability flag. Both hidden when
+    /// neither source is available; `no_device_label` takes over.
     aud_avail_label: Label,
     iq_avail_label: Label,
     no_device_label: Label,
@@ -65,12 +68,20 @@ impl DisplayBar {
         container.set_margin_bottom(4);
         container.set_hexpand(true);
 
-        let (row0, _disp0_left, disp0_center, disp0_right) = make_lcr_row();
+        let (row0, disp0_left, disp0_center, disp0_right) = make_lcr_row();
         container.append(&row0);
         let (row1, disp1_left, disp1_center, _) = make_lcr_row();
         container.append(&row1);
         let (row2, _, disp2_center, _) = make_lcr_row();
         container.append(&row2);
+
+        // disp0-left: currently-selected source ("SRC: AUD" / "SRC: IQ").
+        let selected_src_label = Label::new(Some("SRC: AUD"));
+        selected_src_label.add_css_class("monospace");
+        selected_src_label.add_css_class("app-mode");
+        selected_src_label.set_width_chars(8);
+        selected_src_label.set_xalign(0.0);
+        disp0_left.append(&selected_src_label);
 
         // disp0-center: VFO, freq, mode, BW, S-meter (center-justified).
         let vfo_label = Label::new(Some("VFO A"));
@@ -172,6 +183,7 @@ impl DisplayBar {
             smeter,
             smeter_label,
             tx_label,
+            selected_src_label,
             aud_avail_label,
             iq_avail_label,
             no_device_label,
@@ -183,6 +195,12 @@ impl DisplayBar {
 
     pub fn widget(&self) -> &GtkBox {
         &self.container
+    }
+
+    /// Update the `SRC: AUD` / `SRC: IQ` indicator in disp0-left.
+    pub fn set_selected_source(&self, is_iq: bool) {
+        self.selected_src_label
+            .set_text(if is_iq { "SRC: IQ" } else { "SRC: AUD" });
     }
 
     /// Paint the AUD/IQ availability indicators in disp1-left.
@@ -511,6 +529,7 @@ impl ControlBar {
             let db = display_bar.clone();
             audio_btn.connect_toggled(move |btn| {
                 let is_iq = btn.is_active();
+                db.set_selected_source(is_iq);
                 if is_iq {
                     // --- AUD → IQ ---
                     let (freq_hz, mode) = {
