@@ -134,13 +134,13 @@ DSP:
 - [x] RF; — filter bandwidth
 - [x] RI; — RSSI in dBm
 - [x] SM; — S-meter (S-units)
-- [ ] AT; — attenuator status (P1: 0=off, 1=on)
-- [ ] LP; — low-pass filter status (P1: 0=off, 1=on)
-- [ ] GC; / GS; — AGC mode (0=auto, 1=manual) and gain settings
-- [ ] NR; — noise reduction status (P1: 0=off, 1=on)
-- [ ] NB; — noise blanker status (P1: 0=off, 1=on)
-- [ ] FA; — set VFO-A frequency
-- [ ] MD; — set operating mode
+- [x] RA; — attenuator status
+- [x] LP; — 50 MHz low-pass filter status
+- [x] GT; — AGC mode (mapped to Off/Fast/Medium/Slow)
+- [x] NR; — noise reduction status
+- [x] NB; — noise blanker status
+- [ ] FA; — set VFO-A frequency (allowlisted for WS input; poll uses IF;)
+- [ ] MD; — set operating mode (allowlisted for WS input; poll uses IF;)
 
 ### Audio improvements
 - [ ] Discover FDM-DUO USB audio device automatically (similar to CAT serial discovery)
@@ -150,7 +150,9 @@ DSP:
 
 ### DSP improvements
 - [ ] CW decoder (Goertzel or matched filter)
-- [ ] DREAM integration for DRM decoding
+- [x] DREAM integration for DRM decoding (wideband-SSB demod → audio-IF
+  → DREAM sound-card mode; `EFD_DRM_FILE_TEST` available for
+  hardware-free validation)
 - [ ] FreeDV codec integration
 - [ ] Variable FFT size from config
 - [ ] Dynamic center frequency update from RadioState

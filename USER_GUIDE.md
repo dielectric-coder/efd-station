@@ -209,6 +209,11 @@ DREAM's bundled FLAC samples manually with `paplay | dream`.
 Requirements on the CM5:
 
 - `pulseaudio-utils` installed (provides `pactl`, `pacat`, `parec`).
+- `libfaad2` installed (`sudo apt install libfaad2`). **DREAM dlopens this
+  at runtime** to decode the AAC audio payload of a DRM broadcast. Without
+  it DREAM still locks onto the OFDM signal cleanly (all flags `O`, MSC:O,
+  good SNR) but produces silence — the startup message
+  `No usable FAAD2 aac decoder library found` is the tell.
 - The efd-server service runs under a user that has a working PipeWire
   session. See §2 for how that's enforced.
 - Mode set to `DRM`. The mode must be SDR — MON-mode DRM isn't supported
@@ -219,6 +224,24 @@ Requirements on the CM5:
 
 When DREAM locks, the DisplayBar rows populate — FAC/SDC/MSC go from `✗` to
 `O`, and you'll see SNR / WMER / IF Level numbers.
+
+### Hardware-free DRM smoke test
+
+For validating a deploy without a radio signal — or sanity-checking after
+touching the DREAM subprocess wiring — the server supports a file-test
+pipeline triggered by an env var:
+
+```bash
+EFD_DRM_FILE_TEST=/path/to/dream/samples/VoiceOfRussia_ModeB_10kHz.flac \
+  /usr/bin/efd-server
+```
+
+This replaces the normal IQ → demod path with a FLAC/WAV reader that
+publishes mono 48 kHz audio-IF samples onto the same internal channel the
+demod would write. DREAM runs the same way it does against live signal;
+the client sees the full DrmStatus + decoded audio chain. On EOF the
+server exits cleanly. Bundled FLAC samples under
+`third_party/dream/samples/` are audio-IF recordings known to decode.
 
 ---
 
@@ -243,6 +266,24 @@ Either the signal isn't actually a DRM broadcast (common during off-air
 periods on many frequencies), or the tuning is off — the wideband-SSB
 demod pass needs the radio's center frequency within a few kHz of the
 DRM carrier, so re-check your VFO setting against the known DRM channel.
+
+### DRM locks (all flags ✓) but no audio
+
+Missing `libfaad2`. DREAM decodes the OFDM carrier fine but can't decode
+the AAC audio payload. Install with `sudo apt install libfaad2` and
+restart the service. Confirm with
+`journalctl -u efd-server | grep FAAD2` — the
+`No usable FAAD2 aac decoder library found` line disappears once the
+library is present.
+
+### DRM rows on the client stay blank even though server is decoding
+
+DREAM's TUI writes to `/dev/tty` by default when one is available, which
+bleeds the TUI into interactive shell sessions and starves our stdout
+parser. The server detaches DREAM via `setsid(2)` to work around this,
+but a stale DREAM binary built before that fix won't have the
+`0002-consoleio-stdout-fallback` patch and can still misbehave. Rebuild
+with `third_party/dream/build.sh` and redeploy.
 
 ### Client shows "connection refused"
 

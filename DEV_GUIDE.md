@@ -124,17 +124,59 @@ journalctl -u efd-server -f
 journalctl -u efd-server --since '10 min ago' --no-pager | grep -iE 'DRM|dream|bridge'
 ```
 
-### Capturing DREAM's stderr
+### DRM bridge diagnostics
 
-`crates/efd-dsp/src/drm.rs` spawns DREAM with `stderr(Stdio::null())` today —
-if you're debugging DRM lock failures, swap that to `Stdio::piped()` and tee
-it to a file during the investigation. Don't commit that change.
+The bridge already publishes a TUI activity line every 5 s at `info`
+level:
+```
+efd_dsp::drm: DRM TUI: activity lines_read=… frames_published=…
+```
+If `lines_read` climbs but `frames_published` doesn't, DREAM is
+outputting but our `parse_tui_line` match for the frame terminator
+(`"Received time - date:"`) isn't firing — probably a DREAM version
+change. If neither climbs, DREAM isn't writing to our piped stdout at
+all: likely a stale DREAM build without the `0002-consoleio-stdout-
+fallback` patch, or `setsid` isn't taking effect and DREAM has found a
+controlling tty to write to.
+
+`crates/efd-dsp/src/drm.rs` spawns DREAM with `stderr(Stdio::null())` —
+if you're debugging deeper DRM lock failures, swap that to
+`Stdio::piped()` temporarily and tee it to a file. Don't commit that
+change.
 
 ### Client UI without the backend
 
 `examples/ws_test` is the fastest feedback loop for WS-side debugging. For
 UI work without a live radio, the client has mock-data plumbing in `client/`
 — grep for `mock_` to find the affordances.
+
+### DRM chain without a radio
+
+```bash
+EFD_DRM_FILE_TEST=third_party/dream/samples/VoiceOfRussia_ModeB_10kHz.flac \
+  cargo run --release -p efd-server
+```
+
+Server picks a minimal pipeline (`Pipeline::start_drm_file_test` in
+`server/src/pipeline.rs`): no IQ capture, no demod, no CAT, no FFT. A
+FLAC/WAV reader (`server/src/drm_file_source.rs`) publishes audio-IF
+samples onto the same `drm_if` broadcast the wideband-SSB demod writes
+under `Mode::DRM`. From there the production DRM bridge + Opus encoder
++ WS downstream run unchanged, so a real `efd-client` connected to
+`ws://localhost:8080/ws` exercises the full client-side chain.
+
+A synthetic `RadioState { mode: DRM, bw: "10.0k" }` is emitted every
+500 ms so the client gates its DRM display rows on. Capabilities are
+advertised as `has_iq=false, has_tx=false, supported_demod_modes=[DRM]`.
+On FLAC EOF the pipeline fires its cancel token and the server exits.
+
+Useful for: validating DREAM subprocess wiring after a refactor,
+confirming the client renders DRM status correctly, reproducing an
+audio-chopping bug without tying up the radio.
+
+**Runtime deps**: vendored DREAM built via `third_party/dream/build.sh`,
+`pulseaudio-utils`, `libfaad2` (DREAM dlopens it for AAC decode;
+without it DREAM locks cleanly but produces silence).
 
 ---
 

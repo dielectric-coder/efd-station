@@ -4,6 +4,94 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-04-13
+
+### Changed (BREAKING — wire format)
+- **WebSocket wire format now carries a version byte.** Every frame is
+  prefixed with `PROTO_VERSION = 1`; receivers reject mismatched peers
+  cleanly rather than producing garbled bincode state. Old clients /
+  servers cannot talk to new ones — upgrade in lockstep.
+
+### Changed (BREAKING — DRM pipeline)
+- **DRM now decodes via a wideband-SSB audio-IF path, not raw I/Q.**
+  - `efd-dsp::drm::spawn_drm_bridge` signature changed from
+    `iq_rx: broadcast<Arc<IqBlock>>` to
+    `audio_rx: broadcast<AudioBlock>`.
+  - `DrmConfig` lost `iq_input_rate` and `decim_taps`.
+  - DREAM is launched without `-c 6` (no complex-IQ mode); it reads the
+    real-valued audio-IF stream from `drm_in.monitor` as if coming from
+    a sound card — the same path its bundled FLAC samples exercise.
+  - Rationale: matches DREAM's best-tested input format and mirrors the
+    working `paplay FILE | dream` manual flow. The prior I/Q path was
+    never validated decoding cleanly.
+- **`efd-dsp::demod::spawn_demod_task` signature changed** — takes an
+  additional `drm_if_tx: Option<broadcast::Sender<AudioBlock>>`. Under
+  `Mode::DRM` the demod emits a 10 kHz symmetric audio-IF stream to
+  this channel instead of listenable audio on `audio_tx`. The DRM
+  bridge subscribes to feed DREAM.
+
+### Added
+- **`EFD_DRM_FILE_TEST` env var** — hardware-free DRM smoke test.
+  When set at server startup, builds a minimal pipeline that replaces
+  IQ capture + demod + CAT with a FLAC/WAV reader writing audio-IF
+  samples onto the DRM input channel. The production DRM bridge, Opus
+  encoder, and WS downstream run unchanged so a real `efd-client` can
+  verify the full client-side chain. Exits cleanly on file EOF. See
+  `DEV_GUIDE.md` §4 for the workflow and `USER_GUIDE.md` §7 for the
+  operator-facing version.
+- **`server/src/drm_file_source.rs`** — small claxon/hound-based reader
+  that paces output at wall-clock. Supports mono 16-bit WAV and FLAC.
+- **Configurable rigctld responder bind addresses.**
+  `config.cat.responder_fdmduo_bind` and `responder_demod_bind` (defaults
+  `127.0.0.1:4532` and `:4533`) now driven from config instead of
+  hardcoded.
+- **CAT input allowlist on WS upstream.** WS clients can only send CAT
+  commands whose two-letter prefix is on an explicit allowlist (FA / FB /
+  MD / RF / RA / LP / GT / TH / NR / NB / RT / XT / RC / RU / RD / TX /
+  RX / IF / RI / SM / FR / FT / AI). Embedded `;` rejected to prevent
+  command smuggling.
+- **Real ATT / LP / NR / NB / AGC state queries** in `efd-cat`'s poll —
+  `RA;` / `LP;` / `NR;` / `NB;` / `GT;` responses parsed and merged
+  into `RadioState` (were hardcoded defaults before).
+- **DRM bridge robustness** — 5 s subprocess setup timeouts (pactl /
+  pacat / parec / dream), post-lag audio-resync purge so stale audio
+  doesn't blend into fresh audio after an IQ gap, non-blocking
+  `NullSinks::drop`, `setsid()` on DREAM spawn to detach from the
+  controlling TTY (required for the TUI parser to capture DrmStatus
+  from under an interactive SSH session).
+- **Graceful server shutdown** — bounded `pipeline.shutdown()`
+  (5 s cap), structured `run() -> Result<…>` in `main.rs` so bind /
+  signal-handler failures surface with a log instead of panic.
+
+### Fixed
+- Client audio ring buffer grown from 200 ms to 1.5 s. Absorbs DREAM's
+  frame-aligned ~400–500 ms output bursts without dropping samples,
+  eliminating the periodic "1 s on / 1 s off" chopping that appeared
+  with the new DRM pipeline.
+
+### Runtime dep (not a source change)
+- **DRM decoding now requires `libfaad2` installed on the CM5**
+  (`sudo apt install libfaad2`). DREAM dlopens it at runtime to decode
+  AAC audio. Without it the OFDM layer still locks fine (all flags `O`,
+  MSC:O, good SNR) but produces silence — watch for the
+  `No usable FAAD2 aac decoder library found` line in the server log.
+
+### Docs
+- `CLAUDE.md`, `README.md`, `USER_GUIDE.md` updated to reflect the new
+  DRM pipeline (wideband-SSB demod → audio-IF → DREAM sound-card mode).
+- `DEV_GUIDE.md` adds the `EFD_DRM_FILE_TEST` hardware-free dev loop
+  and DRM bridge diagnostic-log guidance.
+
+## [0.5.0] - skipped
+
+Version number burned by a reset-then-deployed binary (a `--version`
+flag commit was built and dpkg'd to the CM5, then the commit was reset
+locally but the binary stayed installed). Jumped past it to avoid
+confusion with the phantom deployed build. See memory note
+`feedback_deployed_vs_source_skew.md`.
+
+## [Pre-0.6.0 docs work]
+
 ### Docs
 - New `USER_GUIDE.md` — end-user walkthrough: hardware setup, install,
   configuration, UI tour, operating modes (including DRM prerequisites on

@@ -84,11 +84,12 @@ Both consumption modes can run simultaneously.
     │           ├── hackrf.rs   # feature="hackrf"   libhackrf
     │           ├── rspdx.rs    # feature="rspdx"    SDRplay API
     │           └── rtl.rs      # feature="rtl"      librtlsdr
-    ├── efd-dsp/                # Three tiers: FFT (orthogonal), analog demod, IQ codecs, audio decoders
+    ├── efd-dsp/                # Three tiers: FFT (orthogonal), analog demod, codecs, audio decoders
     │   └── src/
     │       ├── fft/            # orthogonal — spectrum producer (IQ or audio source)
-    │       ├── demod/          # Tier 1: analog IQ demod — ONE task, mode param (AM/SAM/USB/LSB/CW±/NFM/WFM)
-    │       ├── codec/          # Tier 2: IQ-domain codecs — drm.rs (DREAM bridge), freedv.rs
+    │       ├── demod/          # Tier 1: analog IQ demod — ONE task, mode param (AM/SAM/USB/LSB/CW±/NFM/WFM,
+    │       │                   #         plus a wideband-SSB DRM config feeding Tier-2 via drm_if broadcast)
+    │       ├── codec/          # Tier 2: codecs — drm.rs (DREAM bridge, audio-IF in), freedv.rs
     │       └── decoder/        # Tier 3: audio-domain decoders — cw/rtty/psk/wspr/ft8/aprs/wefax
     ├── efd-audio/              # ALSA HAT / USB dongle output + USB audio TX
     ├── efd-cat/                # direct USB serial CAT (FDM-DUO) + rigctld-compatible responder for external apps
@@ -294,7 +295,8 @@ Channel type summary:
 - **Vendor SDR libraries**: `libhackrf`, `SDRplay API`, `librtlsdr` — linked in per the active device.
 - **ALSA**: HAT and/or USB-dongle audio output.
 - **PipeWire**: present on the CM5 (Trixie ships it) — used for the two virtual null sinks that bridge the `efd-dsp` DRM task to the DREAM subprocess. Also required on *client* machines for the virtual audio device that feeds digital-mode apps.
-- **DREAM (2.1.1 console build)**: DRM decoder subprocess. Vendored under `third_party/dream/` because the in-distro `dream-drm` (2.2) has known decoding regressions and the build needs `qmake CONFIG+=console` plus a one-line `rig_model_t` cast patch to compile against modern hamlib. The subprocess reads a mono real-valued audio-IF stream from one PipeWire null sink and writes decoded audio to another; the Rust pipeline feeds a wideband-SSB-demodulated IF signal in, and consumes decoded audio from the output monitor.
+- **DREAM (2.1.1 console build)**: DRM decoder subprocess. Vendored under `third_party/dream/` because the in-distro `dream-drm` (2.2) has known decoding regressions and the build needs `qmake CONFIG+=console` plus patches (`0001-hamlib-cast-rig_model_t-to-int.patch` for modern hamlib, `0002-consoleio-stdout-fallback.patch` so the TUI is captureable when `/dev/tty` isn't available). The subprocess reads a mono real-valued audio-IF stream from one PipeWire null sink and writes decoded audio to another; the Rust pipeline feeds a wideband-SSB-demodulated IF signal in, and consumes decoded audio from the output monitor. `efd-dsp::drm` spawns DREAM with `setsid(2)` via `pre_exec` to detach from any controlling TTY, so the TUI is guaranteed to land on the captured stdout pipe instead of bleeding into an interactive SSH session.
+- **libfaad2**: runtime-loaded (dlopen) by DREAM to decode DRM's AAC audio payload. Must be installed on the CM5 (`sudo apt install libfaad2`); without it the OFDM layer still locks cleanly but DREAM outputs silence. The `No usable FAAD2 aac decoder library found` line in the server log is the tell.
 - **FreeDV**: codec, runs on CM5. Same audio path as DREAM (virtual sink bridge pattern is the template).
 
 ---
@@ -351,6 +353,24 @@ UI wireframe controls (for reference when designing RadioState and CatCommand ty
 - Spectrum panel + waterfall panel (freq axis + filter passband overlay)
 
 UI design itself comes after the backend architecture settles.
+
+---
+
+## Hardware-free validation
+
+`EFD_DRM_FILE_TEST=/path/to/file.flac` at server startup selects
+`Pipeline::start_drm_file_test` (in `server/src/pipeline.rs`) — a minimal
+pipeline that skips IQ capture / FFT / demod / CAT and uses
+`server/src/drm_file_source.rs` (claxon + hound) to publish audio-IF
+samples onto the same `drm_if_tx` broadcast that `demod.rs` writes under
+`Mode::DRM`. The production DRM bridge, Opus encoder, and WS downstream
+then run unchanged; a real `efd-client` exercises the full client-side
+chain. A synthetic `RadioState { mode: DRM, bw: "10.0k" }` keeps the
+client UI gated on correctly. Exits cleanly on file EOF.
+
+Bundled FLAC samples under `third_party/dream/samples/` are audio-IF
+recordings known to decode. This path is the canonical smoke test for
+any DRM-related refactor before touching live radio code.
 
 ---
 
