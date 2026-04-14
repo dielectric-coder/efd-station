@@ -176,6 +176,8 @@ impl Pipeline {
             // fresh and runtime-toggleable.
             let drm_cfg = efd_dsp::DrmConfig {
                 dream_binary: config.drm.dream_binary.clone(),
+                input_sink: config.drm.input_sink.clone(),
+                output_sink: config.drm.output_sink.clone(),
                 dream_rate: config.audio.sample_rate,
                 flip_spectrum: false,
             };
@@ -578,13 +580,14 @@ impl Pipeline {
         // --- DRM bridge in File mode ---
         //
         // DREAM reads the audio-IF file directly via `-f`; no Rust-side
-        // file reader, no `drm_if` broadcast, no input-side ALSA writer
-        // — all eliminated relative to the AudioBroadcast path. The
-        // output side still goes through snd-aloop so the bridge can
-        // receive decoded audio. When DREAM hits EOF the bridge exits
-        // cleanly and we propagate cancel so axum shuts down.
+        // file reader, no `drm_if` broadcast, no `drm_in` null sink, no
+        // pacat — all eliminated relative to the AudioBroadcast path.
+        // When DREAM hits EOF the bridge exits cleanly and we propagate
+        // cancel so axum shuts down.
         let drm_cfg = efd_dsp::DrmConfig {
             dream_binary: config.drm.dream_binary.clone(),
+            input_sink: config.drm.input_sink.clone(),
+            output_sink: config.drm.output_sink.clone(),
             dream_rate: config.audio.sample_rate,
             flip_spectrum: config.drm.flip_spectrum,
         };
@@ -915,7 +918,7 @@ async fn decode_audio_for_alsa(
 /// Watches `mode_rx` and brings the DRM bridge subprocess up/down.
 ///
 /// When the client selects Mode::DRM, spawn the bridge (which loads its
-/// own snd-aloop reader/writer tasks and launches dream). When the client changes
+/// own PipeWire null sinks and launches dream). When the client changes
 /// away, cancel the bridge and await it. One bridge instance at a time.
 ///
 /// While a bridge is active, a forwarder task copies its per-bridge

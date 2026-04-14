@@ -18,10 +18,6 @@ chown -R efd:efd /home/efd/.config/efd-backend
 udevadm control --reload-rules 2>/dev/null || true
 udevadm trigger 2>/dev/null || true
 
-# Load snd-aloop now so DRM works without a reboot. /etc/modules-load.d
-# handles the boot path; this covers fresh installs on a running system.
-modprobe snd-aloop 2>/dev/null || true
-
 #DEBHELPER#
 
 echo ""
