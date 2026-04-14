@@ -57,6 +57,14 @@ fn load_css() {
             background-color: #fff176;
             color: #5d4037;
         }
+        .app-mode-disabled {
+            background-color: #eeeeee;
+            color: #9e9e9e;
+            font-size: 13pt;
+            font-weight: bold;
+            border-radius: 4px;
+            padding: 2px 8px;
+        }
         .spectrum-controls {
             background-color: rgba(0, 0, 0, 0.5);
             border-radius: 4px;
