@@ -19,6 +19,10 @@ chown -R efd:efd /home/efd/.config/efd-backend
 # can bind-mount it. We also keep a `-` prefix in the unit for upgrade
 # safety, but creating it here makes first-boot behaviour clean.
 mkdir -p /home/efd/.local/state/efd-backend
+# Phase 4 REC: default recordings directory. Lives under state so
+# persistence + recordings share one ReadWritePath. Config can point
+# somewhere else; if so, that path needs its own writable slot.
+mkdir -p /home/efd/.local/state/efd-backend/recordings
 chown -R efd:efd /home/efd/.local
 
 # Reload udev rules for FDM-DUO symlink

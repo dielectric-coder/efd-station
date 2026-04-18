@@ -2,6 +2,7 @@ mod config;
 mod discovery;
 mod persistence;
 mod pipeline;
+mod recording;
 mod ws;
 
 use std::sync::Arc;

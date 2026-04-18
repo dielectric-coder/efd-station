@@ -4,7 +4,8 @@ use std::time::Duration;
 use axum::extract::ws::{Message, WebSocket};
 use bytes::Bytes;
 use efd_proto::{
-    AudioChunk, Capabilities, DeviceList, DrmStatus, FftBins, RadioState, ServerMsg, StateSnapshot,
+    AudioChunk, Capabilities, DeviceList, DrmStatus, FftBins, RadioState, RecordingStatus,
+    ServerMsg, StateSnapshot,
 };
 use futures_util::SinkExt;
 use tokio::sync::{broadcast, watch};
@@ -30,6 +31,7 @@ pub async fn run(
     mut drm_status_rx: watch::Receiver<Option<DrmStatus>>,
     mut device_list_rx: watch::Receiver<DeviceList>,
     mut snapshot_rx: watch::Receiver<StateSnapshot>,
+    mut rec_status_rx: watch::Receiver<RecordingStatus>,
     cancel: CancellationToken,
 ) {
     let mut fft_rx = fft_rx;
@@ -129,6 +131,10 @@ pub async fn run(
             result = snapshot_rx.changed() => {
                 if result.is_err() { break; }
                 Some(ServerMsg::StateSnapshot(snapshot_rx.borrow_and_update().clone()))
+            }
+            result = rec_status_rx.changed() => {
+                if result.is_err() { break; }
+                Some(ServerMsg::RecordingStatus(rec_status_rx.borrow_and_update().clone()))
             }
         };
 

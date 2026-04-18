@@ -71,6 +71,8 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
     let snapshot_rx = state.pipeline.snapshot_tx.subscribe();
     let snapshot_tx_for_up = state.pipeline.snapshot_tx.clone();
     let restart_requested_tx = state.pipeline.restart_requested_tx.clone();
+    let rec_cmd_tx = state.pipeline.recorder.cmd_tx.clone();
+    let rec_status_rx = state.pipeline.rec_status_tx.subscribe();
     let cancel = state.cancel.clone();
 
     info!("WS client connected");
@@ -86,6 +88,7 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
             drm_status_rx,
             device_list_rx,
             snapshot_rx,
+            rec_status_rx,
             cancel2,
         )
         .await;
@@ -102,6 +105,7 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
             device_list_tx_for_up,
             snapshot_tx_for_up,
             restart_requested_tx,
+            rec_cmd_tx,
             cancel,
         )
         .await;

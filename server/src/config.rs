@@ -11,6 +11,7 @@ pub struct Config {
     pub cat: CatConfig,
     pub audio: AudioConfig,
     pub drm: DrmConfig,
+    pub recording: RecordingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +79,22 @@ impl Default for DrmConfig {
             input_sink: "efd_drm_in".into(),
             output_sink: "efd_drm_out".into(),
             flip_spectrum: false,
+        }
+    }
+}
+
+/// Where REC writes captured files. Resolved with `~` expansion
+/// relative to the service user's home. Created if absent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RecordingConfig {
+    pub directory: String,
+}
+
+impl Default for RecordingConfig {
+    fn default() -> Self {
+        Self {
+            directory: "~/.local/state/efd-backend/recordings".into(),
         }
     }
 }
@@ -230,6 +247,10 @@ fn log_effective(cfg: &Config) {
         in_sink = %cfg.drm.input_sink,
         out_sink = %cfg.drm.output_sink,
         "effective drm config"
+    );
+    tracing::info!(
+        directory = %cfg.recording.directory,
+        "effective recording config"
     );
     tracing::debug!(?cfg, "effective config (full)");
 }

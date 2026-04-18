@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use efd_proto::{
-    AudioChunk, Capabilities, CatCommand, DeviceList, FftBins, RadioState, SourceClass,
-    StateSnapshot, TxAudio,
+    AudioChunk, Capabilities, CatCommand, DeviceList, FftBins, RadioState, RecordingStatus,
+    SourceClass, StateSnapshot, TxAudio,
 };
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
@@ -11,6 +11,23 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
+use crate::recording::{self, RecorderHandle};
+
+/// Expand a leading `~` in a config-supplied path using the service
+/// user's `HOME`. `PathBuf::from` doesn't do this automatically;
+/// systemd gives us `HOME=/home/efd` when running as `User=efd`.
+/// Falls back to `/tmp/efd-recordings` if `HOME` isn't set.
+fn expand_home(raw: &str) -> std::path::PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            let mut p = std::path::PathBuf::from(home);
+            p.push(rest);
+            return p;
+        }
+        return std::path::PathBuf::from("/tmp/efd-recordings");
+    }
+    std::path::PathBuf::from(raw)
+}
 
 /// Internal audio-routing selector driving `encode_audio_mux`. Maps
 /// 1:1 onto the client-facing `SourceClass` today (Audio → RadioUsb,
@@ -88,6 +105,14 @@ pub struct Pipeline {
     /// hot-swap is phase 3f.
     pub restart_requested_tx: watch::Sender<bool>,
 
+    /// Phase 4 REC: command sink for the rec-controller. WS upstream
+    /// clones this and sends `StartRecording` / `StopRecording`.
+    pub recorder: RecorderHandle,
+    /// Latest `RecordingStatus` published by the active recorder
+    /// (or the "inactive" default when nothing is recording).
+    /// Downstream subscribes and pushes on change.
+    pub rec_status_tx: watch::Sender<RecordingStatus>,
+
     pub(crate) cancel: CancellationToken,
     tasks: Vec<(&'static str, JoinHandle<()>)>,
 }
@@ -113,11 +138,15 @@ impl Pipeline {
         // iq_tx carries raw IQ from the capture driver; iq_clean_tx is
         // the post-noise-blanker stream the demod consumes. FFT stays
         // on the raw feed so the waterfall shows the actual spectrum.
+        // pcm_tx carries post-DSP audio samples from encode_audio_mux,
+        // so the REC recorder can write raw PCM without an Opus
+        // decoder round-trip.
         let (iq_tx, _) = broadcast::channel::<Arc<efd_iq::IqBlock>>(16);
         let (iq_clean_tx, _) = broadcast::channel::<Arc<efd_iq::IqBlock>>(16);
         let (fft_tx, _) = broadcast::channel::<Arc<FftBins>>(8);
         let (state_tx, _) = broadcast::channel::<RadioState>(16);
         let (audio_tx, _) = broadcast::channel::<AudioChunk>(32);
+        let (pcm_tx, _) = broadcast::channel::<Arc<Vec<f32>>>(32);
 
         // -- mpsc channels (single consumer) --
         let (cat_tx, cat_rx) = mpsc::channel::<CatCommand>(64);
@@ -365,6 +394,7 @@ impl Pipeline {
         let (audio_source_tx, audio_source_rx) = watch::channel(AudioRouting::RadioUsb);
         {
             let atx = audio_tx.clone();
+            let ptx = pcm_tx.clone();
             let c = cancel.clone();
             let mode_rx = demod_mode_tx.subscribe();
             let sample_rate = config.audio.sample_rate;
@@ -378,6 +408,7 @@ impl Pipeline {
                     flags_rx,
                     sample_rate,
                     atx,
+                    ptx,
                     c,
                 )
                 .await;
@@ -618,6 +649,30 @@ impl Pipeline {
         // Phase 3e: process-respawn swap signal.
         let (restart_requested_tx, _restart_requested_rx) = watch::channel(false);
 
+        // --- Phase 4 REC: rec-controller ---
+        let (rec_status_tx, _rec_status_rx) = watch::channel::<RecordingStatus>(
+            RecordingStatus {
+                active: false,
+                kind: None,
+                path: None,
+                bytes_written: 0,
+                duration_s: None,
+            },
+        );
+        let rec_dir = expand_home(&config.recording.directory);
+        let (recorder, rec_ctrl_handle) = recording::spawn_controller(
+            iq_tx.clone(),
+            pcm_tx.clone(),
+            rec_status_tx.clone(),
+            rec_dir,
+            recording::RecorderRates {
+                iq_sample_rate: config.dsp.sample_rate,
+                audio_sample_rate: config.audio.sample_rate,
+            },
+            cancel.clone(),
+        );
+        tasks.push(("rec_controller", rec_ctrl_handle));
+
         // snapshot_tx holds the live session snapshot. Seeded from the
         // persisted snapshot the caller loaded/validated, then kept
         // current by the snapshot-tracker task below.
@@ -734,6 +789,8 @@ impl Pipeline {
             device_list_tx,
             snapshot_tx,
             restart_requested_tx,
+            recorder,
+            rec_status_tx,
             cancel,
             tasks,
         }
@@ -831,8 +888,13 @@ impl Pipeline {
         // seed the flags watch with all-off and never mutate it.
         let (_file_test_dsp_flags_tx, file_test_dsp_flags_rx) =
             watch::channel::<efd_dsp::AudioDspFlags>(Default::default());
+        // File-test PCM broadcast is there for API parity; no recorder
+        // is wired up on this path, so the subscriber count is always 0
+        // and `send` just returns Err (ignored).
+        let (file_test_pcm_tx, _) = broadcast::channel::<Arc<Vec<f32>>>(4);
         {
             let atx = audio_tx.clone();
+            let ptx = file_test_pcm_tx.clone();
             let c = cancel.clone();
             let mode_rx = demod_mode_tx.subscribe();
             let flags_rx = file_test_dsp_flags_rx.clone();
@@ -845,6 +907,7 @@ impl Pipeline {
                     flags_rx,
                     48_000,
                     atx,
+                    ptx,
                     c,
                 )
                 .await;
@@ -922,6 +985,21 @@ impl Pipeline {
         let (snapshot_tx, _) = watch::channel(crate::persistence::default_snapshot());
         let (restart_requested_tx, _) = watch::channel(false);
 
+        // File-test pipeline: no live IQ source, so REC has nothing
+        // to record. Provide a stub handle so the struct shape matches
+        // the live pipeline; the mpsc receiver is dropped and any
+        // StartRecording command sent through it simply fails
+        // silently (send returns Err immediately).
+        let (stub_cmd_tx, _stub_cmd_rx) = mpsc::channel::<recording::RecCmd>(1);
+        let recorder = recording::RecorderHandle { cmd_tx: stub_cmd_tx };
+        let (rec_status_tx, _) = watch::channel::<RecordingStatus>(RecordingStatus {
+            active: false,
+            kind: None,
+            path: None,
+            bytes_written: 0,
+            duration_s: None,
+        });
+
         info!(
             file = %file_path.display(),
             tasks = tasks.len(),
@@ -942,6 +1020,8 @@ impl Pipeline {
             device_list_tx,
             snapshot_tx,
             restart_requested_tx,
+            recorder,
+            rec_status_tx,
             cancel,
             tasks,
         }
@@ -973,6 +1053,7 @@ async fn encode_audio_mux(
     mut dsp_flags_rx: watch::Receiver<efd_dsp::AudioDspFlags>,
     sample_rate: u32,
     tx: broadcast::Sender<AudioChunk>,
+    pcm_tx: broadcast::Sender<Arc<Vec<f32>>>,
     cancel: CancellationToken,
 ) {
     let mut encoder = match efd_audio::OpusEncoder::new() {
@@ -1057,6 +1138,10 @@ async fn encode_audio_mux(
                 dsp_scratch.clear();
                 dsp_scratch.extend_from_slice(&block.samples);
                 dsp.process(&mut dsp_scratch);
+                // Phase 4 REC: publish post-DSP PCM for the recorder.
+                // `send` returns Err only when there are no subscribers,
+                // which is the common case; ignore.
+                let _ = pcm_tx.send(Arc::new(dsp_scratch.clone()));
                 encode_samples(&dsp_scratch, &mut frame_buf, &mut encoder, &mut seq, &tx);
             }
             block = usb_rx.recv(), if usb_alive => {
@@ -1075,6 +1160,7 @@ async fn encode_audio_mux(
                 // IQ → audio demod has its own filters upstream.
                 audio_if.process(&mut dsp_scratch);
                 dsp.process(&mut dsp_scratch);
+                let _ = pcm_tx.send(Arc::new(dsp_scratch.clone()));
                 encode_samples(&dsp_scratch, &mut frame_buf, &mut encoder, &mut seq, &tx);
             }
         }

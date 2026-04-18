@@ -4,6 +4,47 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Added (server 0.9.0 — phase 4: REC feature goes live)
+- **Disk recording of IQ or audio.** The phase-1
+  `ClientMsg::StartRecording` / `ClientMsg::StopRecording` stubs are
+  now real. Client triggers `StartRecording { kind: Iq | Audio,
+  path: Option<String> }`; the server writes until `StopRecording`
+  or clean shutdown. `ServerMsg::RecordingStatus` published every
+  ~1 s while active (active / path / bytes / duration) so any
+  connected client sees the recorder's progress.
+- **File formats**: deliberately simple so a future in-pipeline
+  replayer can consume them without a decoder:
+  - **IQ** → raw `f32` interleaved `[I, Q]` pairs at the capture
+    rate. Extension `.iq.f32`.
+  - **Audio** → raw `f32` mono PCM at the audio output rate,
+    captured *before* Opus encode (no server-side decoder needed).
+    Extension `.pcm.f32`.
+  Files are little-endian native. IQ samples are already normalised
+  to `[-1, 1]` upstream.
+- **Where files land**: `~/.local/state/efd-backend/recordings/` by
+  default (new `[recording] directory` config key). Filenames
+  default to `YYYYMMDD-HHMMSS-<kind>.<ext>`; clients can supply a
+  path but it's sandboxed — absolute roots are stripped and
+  `..` components dropped before joining to the recordings dir.
+- **Pipeline changes**: new `pcm_tx: broadcast<Arc<Vec<f32>>>`
+  channel inside `encode_audio_mux`, publishing post-DSP audio
+  alongside the existing Opus-encode path. Recorder subscribes.
+  Zero cost when nothing's recording (broadcast has no
+  subscribers → `send` returns `Err` which the hot path ignores).
+- **`postinst` pre-creates** the recordings directory with
+  `efd:efd` ownership so first-boot recording works under the
+  hardened systemd unit without manual setup.
+- 5 new unit tests in `recording.rs` covering timestamp-breakdown,
+  leap-year handling, path sandboxing, and default-filename logic.
+
+### Deliberately deferred
+- **WAV/Opus/FLAC output**. Raw f32 is the smallest viable format;
+  users who want WAV for a media player can convert with
+  `sox -r 48000 -e float -b 32 -c 1 <in>.pcm.f32 <out>.wav` or
+  ffmpeg. A native-WAV recorder is a future commit.
+- **Auto-rotation at size/time limits**. Recordings run until
+  `StopRecording` or process shutdown.
+
 ### Fixed (server 0.8.4 — phase 3e systemd namespace regression)
 - **`status=226/NAMESPACE` on upgrade to 0.8.3.** The phase 3e
   `ReadWritePaths=... /home/efd/.local/state/efd-backend` entry

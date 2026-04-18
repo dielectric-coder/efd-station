@@ -8,6 +8,7 @@ use tracing::{debug, info, trace, warn};
 use crate::discovery;
 use crate::persistence;
 use crate::pipeline::AudioRouting;
+use crate::recording::RecCmd;
 
 /// Maximum WS frame size we'll decode (4 KB — plenty for any valid message).
 const MAX_WS_FRAME: usize = 4096;
@@ -30,6 +31,7 @@ pub async fn run(
     device_list_tx: watch::Sender<DeviceList>,
     snapshot_tx: watch::Sender<StateSnapshot>,
     restart_requested_tx: watch::Sender<bool>,
+    rec_cmd_tx: mpsc::Sender<RecCmd>,
     cancel: CancellationToken,
 ) {
     loop {
@@ -201,10 +203,23 @@ pub async fn run(
                 snapshot_tx.send_modify(|s| s.apf_on = on);
             }
             ClientMsg::StartRecording(rec) => {
-                debug!(?rec, "upstream: StartRecording (phase-4 stub)");
+                debug!(?rec, "upstream: StartRecording");
+                if rec_cmd_tx
+                    .send(RecCmd::Start {
+                        kind: rec.kind,
+                        path: rec.path,
+                    })
+                    .await
+                    .is_err()
+                {
+                    warn!("REC controller closed; StartRecording dropped");
+                }
             }
             ClientMsg::StopRecording => {
-                debug!("upstream: StopRecording (phase-4 stub)");
+                debug!("upstream: StopRecording");
+                if rec_cmd_tx.send(RecCmd::Stop).await.is_err() {
+                    warn!("REC controller closed; StopRecording dropped");
+                }
             }
             ClientMsg::SaveState => {
                 let snap = snapshot_tx.borrow().clone();
