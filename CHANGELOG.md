@@ -4,6 +4,42 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Added (server 0.9.1 — phase 3c: DNR / DNF / APF filters go live)
+- **`DNR`** (`efd_dsp::audio_dsp`) — 2-pole IIR lowpass at 2.5 kHz,
+  Butterworth Q. Voice sits at 300–2800 Hz; HF hiss lives above.
+  Chop the hiss, keep voice intelligible. Not spectral-subtraction
+  "noise reduction" in the literature sense, but the effect HF
+  operators actually ask for under the DNR label, and zero
+  artifacts (no FFT smearing, no noise-profile learning glitch).
+- **`DNF`** — narrow biquad notch at 1 kHz, Q=15. Targets the
+  classic single-tone heterodyne whistle. A future phase wires
+  this to a user-settable centre (most SDR apps expose a draggable
+  notch); 1 kHz is a sensible default for casual HF.
+- **`APF`** — RBJ peaking EQ at 700 Hz, Q=3, +6 dB. Lifts the CW
+  sidetone / voice-fundamental band so weak signals stand out.
+- All three share an RBJ-cookbook `Biquad` (copied from
+  `audio_if.rs` — when a second shared consumer appears, promote
+  to a dedicated module). State resets on toggle-on so stale
+  history doesn't ring.
+- **6 new unit tests** in `audio_dsp.rs` covering the three
+  filters' pass/reject characteristics at voice-band and
+  off-centre frequencies. The pre-existing DNB tests (phase 3b)
+  all still pass.
+- **Flag flip resets filter state**. Toggling a filter on after
+  it's been off resets its x1/x2/y1/y2 history so the transient
+  sample boundary doesn't audibly click.
+
+### Not in this commit (future phase)
+- **True spectral-subtraction DNR** (FFT-based, noise-profile
+  learning). The current lowpass is the pragmatic first-pass;
+  spectral subtraction can land as a `DnrMode` proto field when
+  the UI gains a selector.
+- **User-tunable notch / peak centres**. Both DNF and APF are
+  fixed today; a future phase adds click-to-tune or slider UI
+  plus matching `ClientMsg::SetDnfCentre` / `SetApfCentre`.
+- **Adaptive tone tracking** for DNF (auto-move the notch to
+  whatever tone is currently whining).
+
 ### Added (client 0.8.3 — phase 5d: WSJT-X launcher + dynamic device chips + status line)
 - **WSJT-X launcher** — `ctrl0-right` button now actually spawns
   `wsjtx` as a detached child process. Stdio is redirected to
