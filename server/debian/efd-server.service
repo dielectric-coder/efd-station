@@ -22,7 +22,12 @@ ProtectSystem=strict
 ProtectHome=read-only
 # Phase 2 persistence writes to $XDG_STATE_HOME (~/.local/state/efd-backend);
 # config still lives under ~/.config/efd-backend. Both must be writable.
-ReadWritePaths=/home/efd/.config/efd-backend /home/efd/.local/state/efd-backend
+# The `-` prefix on the state path tolerates it not existing yet — systemd
+# fails to set up the mount namespace (status=226/NAMESPACE) otherwise,
+# because ReadWritePaths bind-mounts the source directory. The path *is*
+# created by postinst for fresh installs; the prefix guards upgrade paths
+# where the old package version never had a chance to create it.
+ReadWritePaths=/home/efd/.config/efd-backend -/home/efd/.local/state/efd-backend
 NoNewPrivileges=true
 PrivateTmp=true
 

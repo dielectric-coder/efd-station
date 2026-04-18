@@ -14,6 +14,13 @@ if [ ! -f /home/efd/.config/efd-backend/config.toml ]; then
 fi
 chown -R efd:efd /home/efd/.config/efd-backend
 
+# Ensure state directory exists (XDG_STATE_HOME — phase 2 persistence).
+# Must exist at first service start so the hardened unit's ReadWritePaths
+# can bind-mount it. We also keep a `-` prefix in the unit for upgrade
+# safety, but creating it here makes first-boot behaviour clean.
+mkdir -p /home/efd/.local/state/efd-backend
+chown -R efd:efd /home/efd/.local
+
 # Reload udev rules for FDM-DUO symlink
 udevadm control --reload-rules 2>/dev/null || true
 udevadm trigger 2>/dev/null || true

@@ -4,6 +4,19 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Fixed (server 0.8.4 — phase 3e systemd namespace regression)
+- **`status=226/NAMESPACE` on upgrade to 0.8.3.** The phase 3e
+  `ReadWritePaths=... /home/efd/.local/state/efd-backend` entry
+  made systemd try to bind-mount a directory that the old (pre-
+  phase-2) service user never had a chance to create, so namespace
+  setup failed and the service refused to start. Two fixes:
+  - `postinst` creates `~/.local/state/efd-backend` with the right
+    ownership, so fresh installs + upgrades from any prior version
+    land with the directory in place.
+  - Unit prefixes the state path with `-` so a missing source
+    directory is tolerated rather than failing the whole namespace
+    (defensive for any box where postinst didn't run).
+
 ### Added (server 0.8.3 — phase 3e: process-respawn hot-swap + systemd fixes)
 - **`SelectDevice` now actually switches.** Client-initiated
   `SelectDevice` writes the new device into the snapshot and
