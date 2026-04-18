@@ -506,7 +506,7 @@ dependencies = [
 
 [[package]]
 name = "efd-server"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "axum",
  "bincode",

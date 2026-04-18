@@ -1,10 +1,12 @@
 use axum::extract::ws::{Message, WebSocket};
-use efd_proto::{CatCommand, ClientMsg, Mode, TxAudio};
+use efd_proto::{CatCommand, ClientMsg, DeviceList, Mode, StateSnapshot, TxAudio};
 use futures_util::StreamExt;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
+use crate::discovery;
+use crate::persistence;
 use crate::pipeline::AudioRouting;
 
 /// Maximum WS frame size we'll decode (4 KB — plenty for any valid message).
@@ -17,6 +19,7 @@ const MAX_CAT_CMD_LEN: usize = 64;
 const MAX_TX_AUDIO_LEN: usize = 2048;
 
 /// Upstream task: read WS binary frames, deserialize ClientMsg, route to mpsc channels.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     mut stream: futures_util::stream::SplitStream<WebSocket>,
     cat_tx: mpsc::Sender<CatCommand>,
@@ -24,6 +27,8 @@ pub async fn run(
     demod_mode_tx: watch::Sender<Option<Mode>>,
     audio_source_tx: watch::Sender<AudioRouting>,
     flip_spectrum_tx: watch::Sender<bool>,
+    device_list_tx: watch::Sender<DeviceList>,
+    snapshot_tx: watch::Sender<StateSnapshot>,
     cancel: CancellationToken,
 ) {
     loop {
@@ -113,11 +118,6 @@ pub async fn run(
                     break;
                 }
             }
-            ClientMsg::SelectSource(src) => {
-                let routing = AudioRouting::from(src);
-                debug!(?src, ?routing, "upstream: source class selection");
-                let _ = audio_source_tx.send(routing);
-            }
             ClientMsg::SetDemodMode(mode) => {
                 debug!(?mode, "upstream: demod mode override");
                 let _ = demod_mode_tx.send(mode);
@@ -126,31 +126,91 @@ pub async fn run(
                 debug!(flip, "upstream: DRM flip_spectrum toggle");
                 let _ = flip_spectrum_tx.send(flip);
             }
-            // Phase-1 stubs: the proto shape is here, the backend
-            // implementation lands in phase 2 (device model) and
-            // phase 4 (recording). Log + ignore for now so clients
-            // can send these without the connection dying.
+            // Phase-2: device enumeration + session-snapshot control.
+            // These three reach into the pipeline's shared watch
+            // channels; downstream fans the updated view to every
+            // connected client.
             ClientMsg::EnumerateDevices => {
-                debug!("upstream: EnumerateDevices (phase-2 stub)");
+                debug!("upstream: EnumerateDevices");
+                let mut fresh = discovery::enumerate();
+                // Preserve whatever was marked active (which reflects
+                // the current live pipeline source) so the client
+                // UI doesn't lose the checkmark on the re-enumeration.
+                fresh.active = device_list_tx.borrow().active.clone();
+                let _ = device_list_tx.send(fresh);
             }
             ClientMsg::SelectDevice(dev) => {
-                debug!(?dev, "upstream: SelectDevice (phase-2 stub)");
+                // Phase-2 semantics: record the selection into the
+                // persisted snapshot so next startup picks it up;
+                // real hot-swap into the running pipeline is phase 3.
+                // We still update `device_list.active` and
+                // `snapshot.active_device` so the client UI reflects
+                // the pending choice.
+                info!(?dev, "upstream: SelectDevice — persisted; takes effect on next restart");
+                snapshot_tx.send_modify(|s| s.active_device = Some(dev.clone()));
+                device_list_tx.send_modify(|d| d.active = Some(dev));
+            }
+            ClientMsg::SelectSource(src) => {
+                // Phase-1 kept this as a direct AudioRouting change so
+                // the existing AUD/IQ mux keeps working. Phase 2 also
+                // stores the intent in the snapshot (via the active
+                // device whose class matches `src` once selected),
+                // but for now we just flip the routing and log.
+                let routing = AudioRouting::from(src);
+                debug!(?src, ?routing, "upstream: source class selection");
+                let _ = audio_source_tx.send(routing);
             }
             ClientMsg::SetDecoder { decoder, enabled } => {
-                debug!(?decoder, enabled, "upstream: SetDecoder (phase-3 stub)");
+                // Pipeline doesn't drive decoders yet (phase 3), but
+                // the client's intent belongs in the snapshot so
+                // SaveState / shutdown persist it.
+                debug!(?decoder, enabled, "upstream: SetDecoder (persist-only until phase 3)");
+                snapshot_tx.send_modify(|s| {
+                    if enabled {
+                        if !s.enabled_decoders.contains(&decoder) {
+                            s.enabled_decoders.push(decoder);
+                        }
+                    } else {
+                        s.enabled_decoders.retain(|d| *d != decoder);
+                    }
+                });
             }
-            ClientMsg::SetDnb(on) => debug!(on, "upstream: SetDnb (phase-3 stub)"),
-            ClientMsg::SetDnr(on) => debug!(on, "upstream: SetDnr (phase-3 stub)"),
-            ClientMsg::SetDnf(on) => debug!(on, "upstream: SetDnf (phase-3 stub)"),
-            ClientMsg::SetApf(on) => debug!(on, "upstream: SetApf (phase-3 stub)"),
+            ClientMsg::SetDnb(on) => {
+                debug!(on, "upstream: SetDnb (persist-only until phase 3)");
+                snapshot_tx.send_modify(|s| s.dnb_on = on);
+            }
+            ClientMsg::SetDnr(on) => {
+                debug!(on, "upstream: SetDnr (persist-only until phase 3)");
+                snapshot_tx.send_modify(|s| s.dnr_on = on);
+            }
+            ClientMsg::SetDnf(on) => {
+                debug!(on, "upstream: SetDnf (persist-only until phase 3)");
+                snapshot_tx.send_modify(|s| s.dnf_on = on);
+            }
+            ClientMsg::SetApf(on) => {
+                debug!(on, "upstream: SetApf (persist-only until phase 3)");
+                snapshot_tx.send_modify(|s| s.apf_on = on);
+            }
             ClientMsg::StartRecording(rec) => {
                 debug!(?rec, "upstream: StartRecording (phase-4 stub)");
             }
             ClientMsg::StopRecording => {
                 debug!("upstream: StopRecording (phase-4 stub)");
             }
-            ClientMsg::SaveState => debug!("upstream: SaveState (phase-2 stub)"),
-            ClientMsg::LoadState => debug!("upstream: LoadState (phase-2 stub)"),
+            ClientMsg::SaveState => {
+                let snap = snapshot_tx.borrow().clone();
+                info!("upstream: SaveState (explicit)");
+                persistence::save(&snap);
+            }
+            ClientMsg::LoadState => {
+                let Some(mut snap) = persistence::load() else {
+                    warn!("upstream: LoadState — no saved state on disk");
+                    continue;
+                };
+                persistence::validate(&mut snap, &device_list_tx.borrow());
+                info!(?snap.active_device, "upstream: LoadState");
+                let _ = snapshot_tx.send(snap);
+            }
         }
     }
 }

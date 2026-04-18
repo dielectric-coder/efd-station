@@ -63,6 +63,13 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
     let flip_spectrum_tx = state.pipeline.flip_spectrum_tx.clone();
     let capabilities = state.pipeline.capabilities.clone();
     let drm_status_rx = state.pipeline.drm_status_rx.clone();
+    // Phase-2: per-client subscriptions to the shared device list and
+    // session snapshot. Downstream pushes on change; upstream mutates
+    // them in response to client commands.
+    let device_list_rx = state.pipeline.device_list_tx.subscribe();
+    let device_list_tx_for_up = state.pipeline.device_list_tx.clone();
+    let snapshot_rx = state.pipeline.snapshot_tx.subscribe();
+    let snapshot_tx_for_up = state.pipeline.snapshot_tx.clone();
     let cancel = state.cancel.clone();
 
     info!("WS client connected");
@@ -76,6 +83,8 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
             state_rx,
             audio_rx,
             drm_status_rx,
+            device_list_rx,
+            snapshot_rx,
             cancel2,
         )
         .await;
@@ -89,6 +98,8 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
             demod_mode_tx,
             audio_source_tx,
             flip_spectrum_tx,
+            device_list_tx_for_up,
+            snapshot_tx_for_up,
             cancel,
         )
         .await;

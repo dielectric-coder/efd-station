@@ -1,7 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use efd_proto::{AudioChunk, Capabilities, CatCommand, FftBins, RadioState, SourceClass, TxAudio};
+use efd_proto::{
+    AudioChunk, Capabilities, CatCommand, DeviceList, FftBins, RadioState, SourceClass,
+    StateSnapshot, TxAudio,
+};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -63,13 +66,38 @@ pub struct Pipeline {
     /// (mode isn't DRM) or the bridge hasn't produced a frame yet.
     pub drm_status_rx: watch::Receiver<Option<efd_proto::DrmStatus>>,
 
+    /// Current view of discovered devices (phase 2). Updated by the
+    /// upstream `EnumerateDevices` handler when it re-runs discovery.
+    /// Downstream subscribes and pushes `ServerMsg::DeviceList` on
+    /// change.
+    pub device_list_tx: watch::Sender<DeviceList>,
+
+    /// Current session snapshot (phase 2). Mirrors the tuning state
+    /// that will be persisted on shutdown. Updated by the internal
+    /// "snapshot tracker" task as `RadioState` ticks in, and by the
+    /// upstream handler when the client changes selections / DSP
+    /// toggles / active decoders.
+    pub snapshot_tx: watch::Sender<StateSnapshot>,
+
     pub(crate) cancel: CancellationToken,
     tasks: Vec<(&'static str, JoinHandle<()>)>,
 }
 
 impl Pipeline {
     /// Create all channels, spawn all tasks.
-    pub fn start(config: &Config) -> Self {
+    ///
+    /// `devices` is the set of devices discovery turned up at startup;
+    /// it's exposed to clients via `EnumerateDevices` / the downstream
+    /// push. `initial_snapshot` is the persisted session state
+    /// (validated against `devices` by the caller) — the pipeline uses
+    /// it to seed the live snapshot but does not yet honour its
+    /// `active_device` for pipeline routing; that's phase 3's
+    /// hot-swap work.
+    pub fn start(
+        config: &Config,
+        devices: DeviceList,
+        initial_snapshot: StateSnapshot,
+    ) -> Self {
         let cancel = CancellationToken::new();
 
         // -- broadcast channels (fan-out) --
@@ -533,6 +561,47 @@ impl Pipeline {
             }
         }
 
+        // --- Phase 2 state plumbing ---
+        // device_list_tx publishes the current enumeration; upstream
+        // `EnumerateDevices` can re-run discovery into this sender.
+        let (device_list_tx, _device_list_rx) = watch::channel(devices);
+
+        // snapshot_tx holds the live session snapshot. Seeded from the
+        // persisted snapshot the caller loaded/validated, then kept
+        // current by the snapshot-tracker task below.
+        let (snapshot_tx, _snapshot_rx) = watch::channel(initial_snapshot);
+
+        // Snapshot tracker — subscribes to `state_tx` so the persisted
+        // snapshot's freq / mode / filter_bw_hz match whatever the
+        // radio is actually doing when we save on shutdown.
+        {
+            let mut state_sub = state_tx.subscribe();
+            let snap_tx = snapshot_tx.clone();
+            let c = cancel.clone();
+            let handle = tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = c.cancelled() => break,
+                        r = state_sub.recv() => match r {
+                            Ok(st) => {
+                                snap_tx.send_modify(|s| {
+                                    s.freq_hz = st.freq_hz;
+                                    s.mode = st.mode;
+                                    s.filter_bw_hz = st.filter_bw_hz;
+                                    s.rit_hz = st.rit_hz;
+                                    s.xit_hz = st.xit_hz;
+                                    s.if_offset_hz = st.if_offset_hz;
+                                });
+                            }
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Closed) => break,
+                        },
+                    }
+                }
+            });
+            tasks.push(("snapshot_tracker", handle));
+        }
+
         info!(tasks = tasks.len(), "pipeline started");
 
         // has_usb_audio reflects *runtime* availability (ALSA device
@@ -564,6 +633,8 @@ impl Pipeline {
             flip_spectrum_tx,
             capabilities,
             drm_status_rx,
+            device_list_tx,
+            snapshot_tx,
             cancel,
             tasks,
         }
@@ -735,6 +806,16 @@ impl Pipeline {
         // decides its own flip from the file contents.
         let (flip_spectrum_tx, _) = watch::channel::<bool>(false);
 
+        // File-test path carries no real device list or persisted
+        // state; seed the watches with empty / default values so the
+        // struct shape matches the live pipeline.
+        let (device_list_tx, _) = watch::channel(DeviceList {
+            audio_devices: Vec::new(),
+            iq_devices: Vec::new(),
+            active: None,
+        });
+        let (snapshot_tx, _) = watch::channel(crate::persistence::default_snapshot());
+
         info!(
             file = %file_path.display(),
             tasks = tasks.len(),
@@ -752,6 +833,8 @@ impl Pipeline {
             flip_spectrum_tx,
             capabilities,
             drm_status_rx,
+            device_list_tx,
+            snapshot_tx,
             cancel,
             tasks,
         }

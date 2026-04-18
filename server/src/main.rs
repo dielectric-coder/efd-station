@@ -1,4 +1,6 @@
 mod config;
+mod discovery;
+mod persistence;
 mod pipeline;
 mod ws;
 
@@ -67,13 +69,29 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         );
     }
 
+    // Phase 2 — run device discovery, load persisted state, validate
+    // the persisted active_device against the discovered list, and
+    // pass both to the pipeline so the session picks up where it
+    // left off.
+    let mut devices = discovery::enumerate();
+    let mut snapshot = persistence::load().unwrap_or_else(persistence::default_snapshot);
+    persistence::validate(&mut snapshot, &devices);
+    devices.active = snapshot.active_device.clone();
+    info!(
+        iq_devices = devices.iq_devices.len(),
+        audio_devices = devices.audio_devices.len(),
+        snapshot_freq = snapshot.freq_hz,
+        snapshot_mode = ?snapshot.mode,
+        "discovery + persisted state loaded"
+    );
+
     let cancel = CancellationToken::new();
     let pipeline = match std::env::var("EFD_DRM_FILE_TEST").ok() {
         Some(path) if !path.is_empty() => {
             info!(file = %path, "EFD_DRM_FILE_TEST set — starting DRM file-test pipeline");
             pipeline::Pipeline::start_drm_file_test(&cfg, path.into(), cancel.clone())
         }
-        _ => pipeline::Pipeline::start(&cfg),
+        _ => pipeline::Pipeline::start(&cfg, devices, snapshot),
     };
 
     let state = Arc::new(AppState {
@@ -118,6 +136,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     };
 
+    // Grab the current snapshot before tasks are joined (the
+    // snapshot-tracker task stops updating once cancel fires, so this
+    // captures the last-seen live state).
+    let final_snapshot = pipeline.snapshot_tx.borrow().clone();
+
     match tokio::time::timeout(SHUTDOWN_TIMEOUT, pipeline.shutdown()).await {
         Ok(()) => info!("efd-backend stopped cleanly"),
         Err(_) => warn!(
@@ -125,6 +148,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             SHUTDOWN_TIMEOUT
         ),
     }
+
+    // Persist the snapshot last — after all tasks have drained so the
+    // freq/mode/BW it carries isn't racing a late CAT poll response.
+    persistence::save(&final_snapshot);
 
     Ok(())
 }

@@ -4,6 +4,56 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Added (server 0.7.1 — phase 2 of rework, additive)
+- **Device discovery at startup.** New `server/src/discovery.rs`
+  walks `/sys/bus/usb/devices` for the known IQ USB VID/PIDs
+  (FDM-DUO, HackRF, RTL-SDR RTL2832U, SDRplay RSPdx) and combines
+  it with the existing `efd_audio::discover` + `/proc/asound/cards`
+  sweep for audio-in devices. Results surface as the
+  `efd_proto::DeviceList` pushed on WS connect and refreshed on
+  client-initiated `EnumerateDevices`. Only FDM-DUO has a live
+  driver in `efd-iq` today; other kinds are enumerated so the UI
+  surfaces them honestly as "present but not yet supported".
+- **Session-snapshot persistence.** New `server/src/persistence.rs`
+  reads/writes an `efd_proto::StateSnapshot` as TOML at
+  `$XDG_STATE_HOME/efd-backend/state.toml` (default
+  `~/.local/state/efd-backend/state.toml`). Snapshot is loaded at
+  startup, validated against the discovered device list (a gone
+  device clears `active_device`), and used to seed the pipeline's
+  session state. Saved at clean shutdown — freq / mode / BW follow
+  the live `RadioState` automatically, so "where you were" is
+  where you come back.
+- **Live snapshot tracker.** New task inside `pipeline::start`
+  subscribes to `state_tx` and keeps `snapshot_tx.freq_hz /
+  mode / filter_bw_hz / rit_hz / xit_hz / if_offset_hz` in sync
+  with the radio, so shutdown persistence captures real values.
+- **Phase-1 stubs are now real**. `EnumerateDevices` re-runs
+  discovery and pushes the updated list.  `SelectDevice`
+  updates `snapshot.active_device` + `device_list.active`.
+  `SetDecoder` / `SetDnb` / `SetDnr` / `SetDnf` / `SetApf`
+  update the snapshot so their intent survives a restart.
+  `SaveState` writes the current snapshot to disk. `LoadState`
+  reads + validates the on-disk state back into the live
+  `snapshot_tx`.
+- **Connect-time hydration.** Downstream pushes `Capabilities`,
+  `DeviceList`, and `StateSnapshot` before the first `FftBins` /
+  `RadioState` so clients can pre-fill their UI without waiting
+  for the first poll.
+- **Downstream watches.** `device_list_tx` and `snapshot_tx` are
+  now watch channels the downstream task subscribes to, so any
+  client-initiated mutation propagates to every connected session.
+
+### Not yet (phase 3+)
+- **Hot-swap** is deferred. A `SelectDevice` call today persists
+  the choice to the snapshot and updates the client-visible
+  `active` marker, but the pipeline itself keeps running the
+  device it was started with. To switch devices, restart the
+  server (systemd `Restart=always` will pick up the new snapshot
+  automatically). Phase 3's pipeline-topology rewrite is the
+  natural home for in-process swap.
+- **SAM / DSB demods** still fall through to envelope AM.
+- **DSP block** (DNB/DNR/DNF/APF) is still a pass-through stub.
+
 ### Changed (server 0.7.0, client 0.6.0 — **wire break**, phase 1 of rework)
 - **Proto version 1 → 2.** Old server/client pairs cannot talk to the
   new ones; the existing `WireError::VersionMismatch` handshake

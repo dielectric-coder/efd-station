@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
 use bytes::Bytes;
-use efd_proto::{AudioChunk, Capabilities, DrmStatus, FftBins, RadioState, ServerMsg};
+use efd_proto::{
+    AudioChunk, Capabilities, DeviceList, DrmStatus, FftBins, RadioState, ServerMsg, StateSnapshot,
+};
 use futures_util::SinkExt;
 use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
@@ -26,6 +28,8 @@ pub async fn run(
     state_rx: broadcast::Receiver<RadioState>,
     audio_rx: broadcast::Receiver<AudioChunk>,
     mut drm_status_rx: watch::Receiver<Option<DrmStatus>>,
+    mut device_list_rx: watch::Receiver<DeviceList>,
+    mut snapshot_rx: watch::Receiver<StateSnapshot>,
     cancel: CancellationToken,
 ) {
     let mut fft_rx = fft_rx;
@@ -33,26 +37,37 @@ pub async fn run(
     let mut audio_rx = audio_rx;
     let mut last_drm_sent = tokio::time::Instant::now() - DRM_STATUS_MIN_INTERVAL;
 
-    // Send capabilities as the very first message so clients can gate UI
-    // before any state arrives.
-    match efd_proto::encode_msg(&ServerMsg::Capabilities(capabilities)) {
-        Ok(bytes) => {
-            let send_fut = sink.send(Message::Binary(Bytes::from(bytes)));
-            match tokio::time::timeout(SEND_TIMEOUT, send_fut).await {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) => {
-                    debug!("WS client disconnected before capabilities sent");
-                    let _ = sink.close().await;
-                    return;
-                }
-                Err(_) => {
-                    debug!("WS client timed out on capabilities send");
-                    let _ = sink.close().await;
-                    return;
-                }
+    // Connect-time push: capabilities first (clients gate UI on it),
+    // then the current device list + persisted snapshot so the client
+    // can hydrate its source / device / tuning state before any live
+    // RadioState arrives.
+    let initial: &[ServerMsg] = &[
+        ServerMsg::Capabilities(capabilities),
+        ServerMsg::DeviceList(device_list_rx.borrow_and_update().clone()),
+        ServerMsg::StateSnapshot(snapshot_rx.borrow_and_update().clone()),
+    ];
+    for msg in initial {
+        let bytes = match efd_proto::encode_msg(msg) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("bincode encode error (initial): {e}");
+                continue;
+            }
+        };
+        let send_fut = sink.send(Message::Binary(Bytes::from(bytes)));
+        match tokio::time::timeout(SEND_TIMEOUT, send_fut).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                debug!("WS client disconnected during initial push");
+                let _ = sink.close().await;
+                return;
+            }
+            Err(_) => {
+                debug!("WS client timed out on initial push");
+                let _ = sink.close().await;
+                return;
             }
         }
-        Err(e) => warn!("bincode encode error (capabilities): {e}"),
     }
 
     loop {
@@ -106,6 +121,14 @@ pub async fn run(
                     // status and hides it itself after a staleness timeout.
                     None => continue,
                 }
+            }
+            result = device_list_rx.changed() => {
+                if result.is_err() { break; }
+                Some(ServerMsg::DeviceList(device_list_rx.borrow_and_update().clone()))
+            }
+            result = snapshot_rx.changed() => {
+                if result.is_err() { break; }
+                Some(ServerMsg::StateSnapshot(snapshot_rx.borrow_and_update().clone()))
             }
         };
 
