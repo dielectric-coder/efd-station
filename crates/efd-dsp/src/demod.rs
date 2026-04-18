@@ -324,10 +324,24 @@ impl DcBlock {
     }
 }
 
-/// DRM wideband audio-IF: 10 kHz symmetric passband centered at DC so
-/// both sidebands of the OFDM block are preserved. Same filter slot as
-/// the narrow SSB filter but rebuilt on mode transitions into/out of DRM.
+/// DRM wideband audio-IF passband. 10 kHz wide symmetric around DC at
+/// the channel-filter stage, then shifted up by [`DRM_USB_OFFSET_HZ`]
+/// so the USB-demodulated real-audio output lands at a positive
+/// baseband the downstream DREAM subprocess can consume.
 const DRM_IF_BW_HZ: f64 = 10_000.0;
+
+/// Frequency offset applied post-filter to turn the centered 10 kHz
+/// IQ block into a single-USB real audio-IF stream: shifting up by
+/// +5 kHz moves `(-5 .. +5) kHz` baseband content to `(0 .. +10) kHz`,
+/// so taking the real part gives a real 0–10 kHz audio-IF without
+/// folding the two sidebands onto each other.
+///
+/// Equivalent to "USB-demodulate with the LO placed 5 kHz below
+/// the DRM block's centre" — the phrasing in `rework-architecture.md`.
+/// Prior implementation took `Re(filtered_buf)` with no shift, which
+/// self-aliased the OFDM block's LSB and USB halves onto the same
+/// 0–5 kHz audio range.
+const DRM_USB_OFFSET_HZ: f64 = 5_000.0;
 
 fn run_demod(
     mut iq_rx: broadcast::Receiver<Arc<IqBlock>>,
@@ -360,6 +374,11 @@ fn run_demod(
 
     let mut tuning = *tuning_rx.borrow_and_update();
     let mut nco = Nco::new(-tuning.vfo_offset_hz, config.input_rate);
+    // Post-filter NCO for the DRM branch — moves the centered
+    // 10 kHz block up to the positive baseband so USB-demod (real
+    // part) gives 0..+10 kHz audio without sideband folding.
+    // Runs at the output rate since it sits after decimation.
+    let mut drm_shift_nco = Nco::new(DRM_USB_OFFSET_HZ, config.output_rate);
     let initial_bw = if tuning.mode == Mode::DRM {
         DRM_IF_BW_HZ
     } else {
@@ -378,6 +397,7 @@ fn run_demod(
     let mut shifted_buf: Vec<[f32; 2]> = Vec::new();
     let mut decimated_iq: Vec<[f32; 2]> = Vec::new();
     let mut filtered_buf: Vec<[f32; 2]> = Vec::new();
+    let mut drm_shifted_buf: Vec<[f32; 2]> = Vec::new();
 
     debug!(
         mode = ?tuning.mode,
@@ -457,13 +477,18 @@ fn run_demod(
         // 3. Channel filter at 48kHz (sharp selectivity: 127 taps ≈ 375Hz transition)
         chan_filter.process(&decimated_iq, &mut filtered_buf);
 
-        // DRM branch: emit the filtered real part as wideband audio-IF and
-        // loop. No demodulation, no DC block, no AGC — DREAM does its own
-        // signal processing on the raw IF, and AGC here would corrupt OFDM
+        // DRM branch: single-USB audio-IF. The channel filter passes a
+        // 10 kHz block symmetric around baseband DC (both OFDM sidebands).
+        // We shift that up by `DRM_USB_OFFSET_HZ` so the block sits at
+        // 0..+10 kHz and then take the real part — a classic USB-demod
+        // move. No DC block, no AGC: DREAM does its own signal
+        // processing on the raw IF, and AGC here would corrupt OFDM
         // amplitude statistics.
         if tuning.mode == Mode::DRM {
             if let Some(tx) = &drm_if_tx {
-                let samples: Vec<f32> = filtered_buf.iter().map(|&[i, _q]| i).collect();
+                drm_shift_nco.shift(&filtered_buf, &mut drm_shifted_buf);
+                let samples: Vec<f32> =
+                    drm_shifted_buf.iter().map(|&[i, _q]| i).collect();
                 if !samples.is_empty() {
                     let block = AudioBlock {
                         samples,

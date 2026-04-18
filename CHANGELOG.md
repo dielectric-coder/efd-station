@@ -4,6 +4,21 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Changed (server 0.8.2 — phase 3d: DRM single-USB IF feed)
+- **DRM audio-IF is now a real USB-demod.** The demod's DRM branch
+  used to `Re(filtered_buf)` with no post-filter shift, which
+  folded the `-5 .. 0 kHz` and `0 .. +5 kHz` baseband halves onto
+  the same `0..5 kHz` audio range — both sidebands of the OFDM
+  block self-aliasing and degrading what DREAM received. Now a
+  second NCO at +5 kHz (post-decimation, 48 kHz rate) shifts the
+  filtered IQ block up to `(0 .. +10) kHz` before the real-part
+  extraction, so the audio-IF stream DREAM consumes is a clean
+  single-USB representation of the entire 10 kHz DRM block. Matches
+  the "USB demodulation, LO at -5 kHz, 10 kHz BW" intent captured
+  in `rework-architecture.md §3.3 / §8`. Offset lives as
+  `DRM_USB_OFFSET_HZ`; if DREAM needs a different audio-IF placement
+  (e.g. carrier at 12 kHz audio) the constant can move.
+
 ### Added (server 0.8.1 — phase 3b: NB + DNB impulse blankers go live)
 - **Pre-IF `NB` does real work now.** `efd_dsp::nb::blank` is an
   envelope-threshold impulse blanker: EWMA-smoothed magnitude
