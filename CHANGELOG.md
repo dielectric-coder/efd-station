@@ -4,6 +4,27 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Changed (server 0.6.12)
+- **rigctld `F` (set-frequency) sanity bounds.** The responder now
+  rejects frequencies outside `[1 kHz, 99_999_999_999 Hz]` with
+  `RPRT -11` (invalid parameter) before the value hits the native
+  CAT command builder. Native CAT is `FA<11-digit-hz>;`, so values
+  ≥ 100 GHz would have produced a malformed frame; the lower bound
+  catches 0 and absurd typos. This is a wire-sanity check, not a
+  per-device capability check — device-specific rejection still comes
+  from the radio's firmware.
+- **WS `validate_cat_command` returns a reason.** Rejected client CAT
+  commands now log *why* (length, missing terminator, non-uppercase
+  prefix, prefix not on allowlist, or non-printable payload) alongside
+  the offending string. Diagnostic-only; the set of accepted commands
+  is unchanged.
+- Skipped **slow-consumer lag disconnect** (originally on the Batch D
+  list): the existing `SEND_TIMEOUT = 2s` on `sink.send` already
+  closes any client that actually wedges a broadcast, and broadcast
+  `Lagged` on a healthy-but-slow client is self-healing. Adding a
+  separate lag-count threshold would be speculative and risked
+  spurious disconnects on transient network stalls.
+
 ### Changed (client 0.5.3)
 - **Audio ring buffer switches to drop-newest.** `AudioPlayer::push_audio`
   previously drained the oldest samples when the ring overflowed,

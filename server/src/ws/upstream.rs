@@ -76,8 +76,8 @@ pub async fn run(
 
         match msg {
             ClientMsg::CatCommand(cmd) => {
-                if !validate_cat_command(&cmd.raw) {
-                    warn!(cmd = %cmd.raw, "invalid CAT command rejected");
+                if let Err(reason) = validate_cat_command(&cmd.raw) {
+                    warn!(cmd = %cmd.raw, reason, "invalid CAT command rejected");
                     continue;
                 }
                 trace!(cmd = %cmd.raw, "upstream: CAT command");
@@ -158,28 +158,32 @@ const ALLOWED_CAT_PREFIXES: &[&str] = &[
 ///     destructive commands by guessing prefixes);
 ///   - restrict the payload to printable ASCII without `;` (which would
 ///     allow stuffing a second command into one frame).
-fn validate_cat_command(cmd: &str) -> bool {
+fn validate_cat_command(cmd: &str) -> Result<(), &'static str> {
     if cmd.len() < 3 || cmd.len() > MAX_CAT_CMD_LEN {
-        return false;
+        return Err("length out of range");
     }
     if !cmd.ends_with(';') {
-        return false;
+        return Err("missing trailing ';'");
     }
     let bytes = cmd.as_bytes();
     if !bytes[0].is_ascii_uppercase() || !bytes[1].is_ascii_uppercase() {
-        return false;
+        return Err("prefix not ASCII uppercase");
     }
     let prefix = &cmd[..2];
     if !ALLOWED_CAT_PREFIXES.contains(&prefix) {
-        return false;
+        return Err("prefix not on allowlist");
     }
     // Payload between the prefix and the trailing ';' must be
     // printable-ASCII and free of an embedded ';' (which would let a
     // client smuggle a second command).
     let payload = &cmd[2..cmd.len() - 1];
-    payload
+    if !payload
         .bytes()
         .all(|b| (0x20..=0x7E).contains(&b) && b != b';')
+    {
+        return Err("payload has non-printable or embedded ';'");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -188,42 +192,45 @@ mod tests {
 
     #[test]
     fn accepts_well_formed_commands() {
-        assert!(validate_cat_command("FA00007100000;"));
-        assert!(validate_cat_command("MD2;"));
-        assert!(validate_cat_command("TX;"));
-        assert!(validate_cat_command("RX;"));
-        assert!(validate_cat_command("IF;"));
+        assert!(validate_cat_command("FA00007100000;").is_ok());
+        assert!(validate_cat_command("MD2;").is_ok());
+        assert!(validate_cat_command("TX;").is_ok());
+        assert!(validate_cat_command("RX;").is_ok());
+        assert!(validate_cat_command("IF;").is_ok());
     }
 
     #[test]
     fn rejects_unknown_prefix() {
-        assert!(!validate_cat_command("ZZ00;"));
+        assert_eq!(validate_cat_command("ZZ00;"), Err("prefix not on allowlist"));
     }
 
     #[test]
     fn rejects_lowercase_prefix() {
-        assert!(!validate_cat_command("fa12345;"));
+        assert_eq!(validate_cat_command("fa12345;"), Err("prefix not ASCII uppercase"));
     }
 
     #[test]
     fn rejects_missing_terminator() {
-        assert!(!validate_cat_command("FA00007100000"));
+        assert_eq!(validate_cat_command("FA00007100000"), Err("missing trailing ';'"));
     }
 
     #[test]
     fn rejects_embedded_semicolon() {
-        assert!(!validate_cat_command("FA;TX;"));
+        assert_eq!(
+            validate_cat_command("FA;TX;"),
+            Err("payload has non-printable or embedded ';'")
+        );
     }
 
     #[test]
     fn rejects_oversize() {
         let big = format!("FA{};", "0".repeat(MAX_CAT_CMD_LEN));
-        assert!(!validate_cat_command(&big));
+        assert_eq!(validate_cat_command(&big), Err("length out of range"));
     }
 
     #[test]
     fn rejects_too_short() {
-        assert!(!validate_cat_command(";"));
-        assert!(!validate_cat_command("F;"));
+        assert_eq!(validate_cat_command(";"), Err("length out of range"));
+        assert_eq!(validate_cat_command("F;"), Err("length out of range"));
     }
 }

@@ -24,6 +24,16 @@ use tracing::{debug, info, warn};
 /// local starts opening connections in a loop.
 const MAX_CONCURRENT_CONNS: usize = 16;
 
+/// Sanity bounds for rigctld `F` (set-frequency). The native CAT format
+/// is `FA<11-digit-hz>;`, so values ≥ 100 GHz would produce malformed
+/// frames. We also reject absurdly low values. This is a *wire sanity*
+/// check, not a per-device capability check — the radio's firmware
+/// still filters to its own band (e.g. 9 kHz – 54 MHz on the FDM-DUO)
+/// and a too-high-for-this-device value just comes back as a radio
+/// error, not a jammed command queue.
+const MIN_FREQ_HZ: u64 = 1_000;
+const MAX_FREQ_HZ: u64 = 99_999_999_999;
+
 use crate::error::CatError;
 
 #[derive(Debug, Clone)]
@@ -226,6 +236,11 @@ async fn handle_command(
             let Some(hz) = parts.next().and_then(|s| s.parse::<u64>().ok()) else {
                 return Reply::Response("RPRT -1\n".into());
             };
+            if !(MIN_FREQ_HZ..=MAX_FREQ_HZ).contains(&hz) {
+                warn!(hz, "rigctld F: frequency out of sanity range");
+                // RPRT -11 = invalid parameter, per hamlib convention.
+                return Reply::Response("RPRT -11\n".into());
+            }
             let vfo = state_rx
                 .borrow()
                 .as_ref()
