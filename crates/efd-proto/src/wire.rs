@@ -20,7 +20,11 @@ use crate::upstream::{CatCommand, Ptt, StartRecording, TxAudio};
 /// block toggles (DNB/DNR/DNF/APF), recording control, and
 /// state save/load. RadioState gains parsed numeric fields (RIT/XIT
 /// /IF shift / SNR). Capabilities gains `supported_decoders`.
-pub const PROTO_VERSION: u8 = 2;
+///
+/// Version 3 — rework phase 3a. Adds `ClientMsg::SetNb(bool)` for
+/// the pre-IF noise blanker (distinct from the audio-domain DNB)
+/// and the matching `StateSnapshot.nb_on` field.
+pub const PROTO_VERSION: u8 = 3;
 
 /// Envelope for all server → client WebSocket messages.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Encode, Decode)]
@@ -68,6 +72,13 @@ pub enum ClientMsg {
 
     /// Enable or disable a single audio-domain decoder.
     SetDecoder { decoder: DecoderKind, enabled: bool },
+
+    /// Pre-IF noise blanker on the IQ stream (`NB` button in the
+    /// client's `ctrl1-left`). Distinct from `SetDnb` — DNB is the
+    /// audio-domain impulse blanker on the Audio-Out path, while
+    /// this one runs on raw IQ before the IF demod, per the
+    /// pipeline drawio.
+    SetNb(bool),
 
     /// Toggle a DSP-block filter on the audio-out path. Each flag is
     /// independent; the block chain is DNB → DNR → DNF → APF.

@@ -4,6 +4,33 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Changed (server 0.8.0, client 0.7.0 — **wire break**, phase 3a: pipeline topology)
+- **Proto version 2 → 3.** Adds `ClientMsg::SetNb(bool)` (pre-IF
+  noise blanker, the `NB` button in the UI) and
+  `StateSnapshot.nb_on`. Server and client must be upgraded
+  together; `WireError::VersionMismatch` flags skew cleanly.
+- **Noise blanker moves pre-IF**, per the pipeline drawio. New
+  `efd_dsp::nb` module with a `spawn_noise_blanker` task that
+  sits between IQ capture and demod on its own broadcast channel
+  (`iq_clean_tx`). The FFT task keeps subscribing to the raw
+  `iq_tx` so the waterfall still shows the real spectrum; only
+  the demod consumes the post-NB stream. Today's NB is a
+  pass-through stub with an enable flag — the impulse-blanker
+  math lands in a follow-up. The `NB` button in the UI and the
+  `nb_on` snapshot field now have somewhere to go.
+- **Audio-DSP flags wired end-to-end.** `AudioDsp` in
+  `encode_audio_mux` now takes a `watch::Receiver<AudioDspFlags>`;
+  a new pipeline task (`snapshot_dsp_propagator`) watches the
+  session snapshot and pushes `nb_on` / `dnb_on` / `dnr_on` /
+  `dnf_on` / `apf_on` out to the live pipeline. Stage
+  implementations are still pass-through (phase 3b) but the
+  toggle signal now reaches them and would take effect the
+  instant a real filter lands.
+- **Snapshot seeds the pipeline.** `initial_snapshot.nb_on` and
+  `*_on` flags are honoured at startup so a user's persisted
+  preferences (e.g. "I always want DNR on") come up before the
+  first client connects.
+
 ### Fixed (server 0.7.2, client 0.6.1 — phase 2 noise cleanup)
 - **Snapshot storm.** The snapshot tracker was calling
   `snapshot_tx.send_modify(...)` every CAT poll (~5 Hz) regardless

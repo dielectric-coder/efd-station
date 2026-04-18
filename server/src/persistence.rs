@@ -43,6 +43,7 @@ pub fn default_snapshot() -> StateSnapshot {
         xit_hz: 0,
         if_offset_hz: 0,
         enabled_decoders: Vec::new(),
+        nb_on: false,
         dnb_on: false,
         dnr_on: false,
         dnf_on: false,

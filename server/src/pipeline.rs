@@ -8,7 +8,7 @@ use efd_proto::{
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 
@@ -101,8 +101,11 @@ impl Pipeline {
         let cancel = CancellationToken::new();
 
         // -- broadcast channels (fan-out) --
-        // efd-dsp now uses efd_iq::IqBlock directly — no forwarder needed
+        // iq_tx carries raw IQ from the capture driver; iq_clean_tx is
+        // the post-noise-blanker stream the demod consumes. FFT stays
+        // on the raw feed so the waterfall shows the actual spectrum.
         let (iq_tx, _) = broadcast::channel::<Arc<efd_iq::IqBlock>>(16);
+        let (iq_clean_tx, _) = broadcast::channel::<Arc<efd_iq::IqBlock>>(16);
         let (fft_tx, _) = broadcast::channel::<Arc<FftBins>>(8);
         let (state_tx, _) = broadcast::channel::<RadioState>(16);
         let (audio_tx, _) = broadcast::channel::<AudioChunk>(32);
@@ -138,6 +141,28 @@ impl Pipeline {
                 }
             });
             tasks.push(("iq_capture", handle));
+        }
+
+        // --- Pre-IF noise blanker (NB box in the pipeline drawio) ---
+        // Runs on every IQ block regardless of `nb_on`; the flag just
+        // selects pass-through-vs-blank inside the task. Seeded from
+        // the loaded snapshot so the persisted toggle takes effect
+        // before any client connects.
+        let (nb_enabled_tx, nb_enabled_rx) =
+            tokio::sync::watch::channel::<bool>(initial_snapshot.nb_on);
+        if source_caps.has_iq {
+            let iq_in = iq_tx.subscribe();
+            let iq_out = iq_clean_tx.clone();
+            let c = cancel.clone();
+            let handle = efd_dsp::spawn_noise_blanker(iq_in, iq_out, nb_enabled_rx, c);
+            let handle = tokio::spawn(async move {
+                match handle.await {
+                    Ok(Ok(())) => info!("NB task exited cleanly"),
+                    Ok(Err(e)) => error!("NB task error: {e}"),
+                    Err(e) => error!("NB task panicked: {e}"),
+                }
+            });
+            tasks.push(("nb", handle));
         }
 
         // --- FFT task ---
@@ -177,7 +202,9 @@ impl Pipeline {
         let (drm_if_tx, _drm_if_rx) =
             broadcast::channel::<efd_dsp::AudioBlock>(16);
         {
-            let iq_rx = iq_tx.subscribe();
+            // Demod consumes the *post-NB* stream, per the pipeline
+            // drawio: IQ source → NB → IQ→IF → IF demod.
+            let iq_rx = iq_clean_tx.subscribe();
             let demod_cfg = efd_dsp::DemodConfig {
                 input_rate: config.dsp.sample_rate,
                 output_rate: config.audio.sample_rate,
@@ -314,6 +341,17 @@ impl Pipeline {
             }
         };
 
+        // --- Audio-domain DSP flags (DNB / DNR / DNF / APF) ---
+        // Seeded from the loaded snapshot; updated by the snapshot
+        // DSP propagator below whenever the client toggles a stage.
+        let (dsp_flags_tx, dsp_flags_rx) =
+            watch::channel::<efd_dsp::AudioDspFlags>(efd_dsp::AudioDspFlags {
+                dnb: initial_snapshot.dnb_on,
+                dnr: initial_snapshot.dnr_on,
+                dnf: initial_snapshot.dnf_on,
+                apf: initial_snapshot.apf_on,
+            });
+
         // --- Audio source mux → Opus encoder → broadcast<AudioChunk> ---
         let (audio_source_tx, audio_source_rx) = watch::channel(AudioRouting::RadioUsb);
         {
@@ -321,12 +359,14 @@ impl Pipeline {
             let c = cancel.clone();
             let mode_rx = demod_mode_tx.subscribe();
             let sample_rate = config.audio.sample_rate;
+            let flags_rx = dsp_flags_rx.clone();
             let handle = tokio::spawn(async move {
                 encode_audio_mux(
                     demod_audio_rx,
                     usb_rx_rx,
                     audio_source_rx,
                     mode_rx,
+                    flags_rx,
                     sample_rate,
                     atx,
                     c,
@@ -610,6 +650,44 @@ impl Pipeline {
             tasks.push(("snapshot_tracker", handle));
         }
 
+        // Snapshot → DSP-flag propagator — watches the session
+        // snapshot and pushes any change to `nb_on` / `dnb_on` /
+        // `dnr_on` / `dnf_on` / `apf_on` out to the live pipeline's
+        // derived watches. One place to read the canonical toggle
+        // state, so future writers (LoadState, startup seed, WS
+        // SetNb/SetDnb/...) stay consistent without duplicating
+        // derive-logic across handlers.
+        {
+            let mut snap_sub = snapshot_tx.subscribe();
+            let nb_tx = nb_enabled_tx.clone();
+            let flags_tx = dsp_flags_tx.clone();
+            let c = cancel.clone();
+            let handle = tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = c.cancelled() => break,
+                        r = snap_sub.changed() => {
+                            if r.is_err() { break; }
+                            let s = snap_sub.borrow_and_update();
+                            nb_tx.send_if_modified(|cur| {
+                                if *cur != s.nb_on { *cur = s.nb_on; true } else { false }
+                            });
+                            let new_flags = efd_dsp::AudioDspFlags {
+                                dnb: s.dnb_on,
+                                dnr: s.dnr_on,
+                                dnf: s.dnf_on,
+                                apf: s.apf_on,
+                            };
+                            flags_tx.send_if_modified(|cur| {
+                                if *cur != new_flags { *cur = new_flags; true } else { false }
+                            });
+                        }
+                    }
+                }
+            });
+            tasks.push(("snapshot_dsp_propagator", handle));
+        }
+
         info!(tasks = tasks.len(), "pipeline started");
 
         // has_usb_audio reflects *runtime* availability (ALSA device
@@ -736,16 +814,22 @@ impl Pipeline {
         tasks.push(("drm_bridge", bridge_handle));
 
         // --- Opus encoder mux (unchanged from real pipeline) ---
+        // File-test mode doesn't expose DSP toggles to a client yet —
+        // seed the flags watch with all-off and never mutate it.
+        let (_file_test_dsp_flags_tx, file_test_dsp_flags_rx) =
+            watch::channel::<efd_dsp::AudioDspFlags>(Default::default());
         {
             let atx = audio_tx.clone();
             let c = cancel.clone();
             let mode_rx = demod_mode_tx.subscribe();
+            let flags_rx = file_test_dsp_flags_rx.clone();
             let handle = tokio::spawn(async move {
                 encode_audio_mux(
                     demod_audio_rx,
                     usb_rx_rx,
                     audio_source_rx,
                     mode_rx,
+                    flags_rx,
                     48_000,
                     atx,
                     c,
@@ -865,11 +949,13 @@ impl Pipeline {
 ///
 /// Both sources are always drained to prevent backpressure on the idle one.
 /// Only the active source (selected by `source_rx`) feeds the Opus encoder.
+#[allow(clippy::too_many_arguments)]
 async fn encode_audio_mux(
     mut demod_rx: mpsc::Receiver<efd_dsp::AudioBlock>,
     mut usb_rx: mpsc::Receiver<efd_audio::PcmBlock>,
     mut source_rx: watch::Receiver<AudioRouting>,
     mut demod_mode_rx: watch::Receiver<Option<efd_proto::Mode>>,
+    mut dsp_flags_rx: watch::Receiver<efd_dsp::AudioDspFlags>,
     sample_rate: u32,
     tx: broadcast::Sender<AudioChunk>,
     cancel: CancellationToken,
@@ -884,10 +970,11 @@ async fn encode_audio_mux(
     let mut seq: u32 = 0;
     let mut frame_buf: Vec<f32> = Vec::with_capacity(efd_audio::OPUS_FRAME_SIZE);
     // Audio-domain DSP block — sits on every path to Audio Out per the
-    // pipeline drawio. Pass-through stub in Phase 1; real filters land
-    // in a later phase. Flags are always-off by default so this is a
-    // no-op today.
-    let dsp = efd_dsp::AudioDsp::new();
+    // pipeline drawio. Stage implementations are still pass-through
+    // stubs (phase 3b); phase 3a just wires the flags from the
+    // session snapshot so client-side toggles actually reach here.
+    let mut dsp = efd_dsp::AudioDsp::new();
+    dsp.set_flags(*dsp_flags_rx.borrow());
     // Audio-rate IF bandpass — the "Audio source → IF demod" edge in
     // the drawio. Active only on the USB-RX / file path; the demod
     // task already filters the IQ → audio chain. Default bypass
@@ -936,6 +1023,11 @@ async fn encode_audio_mux(
                     current_mode = new_mode;
                     audio_if.set_mode(current_mode);
                 }
+                continue;
+            }
+            _ = dsp_flags_rx.changed() => {
+                dsp.set_flags(*dsp_flags_rx.borrow());
+                debug!(flags = ?dsp.flags(), "audio DSP flags updated");
                 continue;
             }
             block = demod_rx.recv(), if demod_alive => {

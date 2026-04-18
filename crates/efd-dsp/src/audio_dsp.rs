@@ -10,7 +10,7 @@
 
 /// Flags selecting which audio-domain DSP stages are active. Default
 /// is all-off, which is indistinguishable from the block being absent.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AudioDspFlags {
     /// Digital Noise Blanker — short-impulse-noise removal.
     pub dnb: bool,

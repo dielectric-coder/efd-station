@@ -184,6 +184,8 @@ pub struct StateSnapshot {
     pub xit_hz: i32,
     pub if_offset_hz: i32,
     pub enabled_decoders: Vec<DecoderKind>,
+    /// Pre-IF noise blanker (IQ domain), the `NB` UI toggle.
+    pub nb_on: bool,
     pub dnb_on: bool,
     pub dnr_on: bool,
     pub dnf_on: bool,

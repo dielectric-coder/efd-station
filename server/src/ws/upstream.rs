@@ -175,6 +175,10 @@ pub async fn run(
                     }
                 });
             }
+            ClientMsg::SetNb(on) => {
+                debug!(on, "upstream: SetNb (pre-IF noise blanker)");
+                snapshot_tx.send_modify(|s| s.nb_on = on);
+            }
             ClientMsg::SetDnb(on) => {
                 debug!(on, "upstream: SetDnb (persist-only until phase 3)");
                 snapshot_tx.send_modify(|s| s.dnb_on = on);
