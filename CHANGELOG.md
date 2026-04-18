@@ -4,6 +4,67 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Changed (client 0.8.1 — phase 5b: control-bar layout matches drawio IQ-NO-DRM)
+- **Control-bar rows reshuffled** to match
+  `docs/client-sdr-UI.drawio` layer `IQ-NO-DRM`:
+  - `ctrl0-left` — (unchanged, SRC toggle + PTT / Mute / Volume
+    in center)
+  - `ctrl0-center` — tune controls (freq entry, step, ± buttons)
+    + DRM flip toggle move here from ctrl1. The old
+    mode-dropdown is hidden but kept in the widget tree to
+    preserve test/id references.
+  - `ctrl0-right` — new **WSJT-X** launcher button (placeholder;
+    click logs a TODO, real launcher is phase 5c).
+  - `ctrl1-left` — `NB` + `APF` toggles (moved from the old
+    ctrl2-left block).
+  - `ctrl1-center` — **IF-demod mode buttons** replace the
+    dropdown: `AM / SAM / DSB / USB / LSB / CWᵤ / CWₗ / FMₙ`.
+    Linked radio group; exactly one stays active. Each click
+    sends `SetDemodMode` + the matching CAT `MD…;`. Orange
+    styling per the drawio.
+  - `ctrl1-right` — `REC` toggle (moved from ctrl2-right).
+  - `ctrl2-left` — `DNR` + `DNF` toggles (moved from ctrl2-left's
+    old one-row block).
+  - `ctrl2-center` — **decoder toggles**: `CW / PSK / MFSK /
+    RTTY / FAX / PCKT` (purple, audio-domain) + `DRM / FDV`
+    (pink, digital voice). Independent toggles; multiple can be
+    active. Server-side decoders aren't wired up yet so clicks
+    emit `SetDecoder` messages the server debug-logs and
+    ignores — the buttons are here for layout fidelity and to
+    exercise the phase-1 proto path.
+  - `ctrl2-right` — new **CONFIG** button (placeholder; click
+    logs a TODO, real settings dialog is phase 5c).
+- **`DNB` button removed** from the UI per the drawio. The
+  `AudioDspFlags.dnb` field on the wire and in the pipeline is
+  unchanged — the server still honours the flag when it's set
+  via the persisted snapshot — but normal operator flow uses the
+  pre-IF `NB` only, per the diagram.
+- **CSS palette added** matching the drawio chips: `.dsp-toggle`
+  / `.chrome-btn` yellow (`#fff2cc`), `.mode-btn` orange
+  (`#f0a30a`), `.decoder-audio` purple (`#e1d5e7`),
+  `.decoder-drm` pink (`#f8cecc`). Pressed states get a
+  darker shade of the same hue.
+- **`apply_snapshot` extended** to seed the mode buttons and
+  the decoder toggles from the persisted snapshot so
+  `snapshot.mode` / `snapshot.enabled_decoders` come up correctly
+  after reconnect.
+
+### Not in this commit (drawio gaps remaining for phase 5c)
+- **Unified tuning line** in `disp0-center` (`f <big freq>
+  demod <mode> bw <w> RIT <r> IF <i>`). The current split
+  labels still show the same data, just not in a single
+  markup line.
+- **Source / device chips** in `disp0-left` / `disp1-left` —
+  `AUD`/`IQ` and `FDM`/`HRF` blue pills from the drawio.
+  Current label-based availability indicator stays for now.
+- **`disp2-left` current-source pill** (`FDM IQ` green badge),
+  **`disp2-right` PASSTHROUGH pill**, **`disp1-right` S-meter
+  restyling**.
+- **SRC / DEV** buttons in `ctrl0-left` and click-to-tune
+  yellow chips (`f`, `bw`, `rit`, `IF`) in `ctrl0-center`.
+- **WSJT-X launcher + CONFIG dialog** — the button shells are
+  in place; their real behaviour ships in phase 5c.
+
 ### Added (client 0.8.0 — phase 5a: DSP toggles + REC + decoded-text)
 - **DSP toggle row** in the client's `ctrl2-left` cell — five
   `ToggleButton`s for `NB` / `DNB` / `DNR` / `DNF` / `APF`. `NB`

@@ -436,23 +436,33 @@ pub struct ControlBar {
     /// AUD/IQ availability indicators can be repainted when server
     /// capabilities arrive.
     display_bar: DisplayBar,
-    /// Phase-5a DSP-block toggles (ctrl2-left). `nb_btn` is the
-    /// pre-IF noise blanker (phase 3a/b); `dnb/dnr/dnf/apf` are the
-    /// audio-domain DSP stages (DNB real, others pass-through).
-    /// Each sends a dedicated `ClientMsg` on toggle.
+    /// DSP toggles laid out per `docs/client-sdr-UI.drawio` IQ-NO-DRM
+    /// layer. `nb`/`apf` live in `ctrl1-left`, `dnr`/`dnf` in
+    /// `ctrl2-left`. The audio-domain `DNB` stage has no UI button
+    /// per the diagram — it's still reachable via the persisted
+    /// snapshot (and the server pipeline honours the flag) but
+    /// hidden from the normal operator flow.
     nb_btn: ToggleButton,
-    dnb_btn: ToggleButton,
+    apf_btn: ToggleButton,
     dnr_btn: ToggleButton,
     dnf_btn: ToggleButton,
-    apf_btn: ToggleButton,
-    /// REC toggle + status line (ctrl2-right). Button state tracks
-    /// the server's authoritative `RecordingStatus`; the status
-    /// label shows bytes / duration while recording.
+    /// REC toggle + status line (ctrl1-right per drawio). Button
+    /// state tracks the server's authoritative `RecordingStatus`.
     rec_btn: ToggleButton,
     rec_status_label: Label,
-    /// Set while `apply_rec_status` / `apply_snapshot` sync the
-    /// toggles from server state, so the `connect_toggled` handlers
-    /// don't bounce the value back as a fresh `ClientMsg`.
+    /// IF-demod mode buttons (ctrl1-center). One `ToggleButton` per
+    /// mode acts as a radio group — exactly one stays pressed and
+    /// drives `ClientMsg::SetDemodMode` + the matching CAT command.
+    mode_btns: Vec<(Mode, ToggleButton)>,
+    /// Audio-domain decoder toggles (ctrl2-center). Each is an
+    /// independent `SetDecoder` — multiple can run in parallel.
+    /// All are non-functional on the server side today (no Tier-3
+    /// decoders wired up) but present in the UI per the drawio.
+    decoder_btns: Vec<(efd_proto::DecoderKind, ToggleButton)>,
+    /// Set while `apply_rec_status` / `apply_snapshot` /
+    /// `sync_from_radio` propagate server state into the UI, so the
+    /// `connect_toggled` handlers don't bounce the value back as a
+    /// fresh `ClientMsg`.
     suppress_toggle_notify: Rc<Cell<bool>>,
 }
 
@@ -476,13 +486,13 @@ impl ControlBar {
         container.set_margin_bottom(4);
         container.set_hexpand(true);
 
-        let (ctrl0_row, ctrl0_left, ctrl0_center, _ctrl0_right) = make_lcr_row();
+        let (ctrl0_row, ctrl0_left, ctrl0_center, ctrl0_right) = make_lcr_row();
         ctrl0_row.set_size_request(-1, CTRL_ROW_HEIGHT);
         container.append(&ctrl0_row);
-        let (ctrl1_row, _ctrl1_left, ctrl1_center, _ctrl1_right) = make_lcr_row();
+        let (ctrl1_row, ctrl1_left, ctrl1_center, ctrl1_right) = make_lcr_row();
         ctrl1_row.set_size_request(-1, CTRL_ROW_HEIGHT);
         container.append(&ctrl1_row);
-        let (ctrl2_row, ctrl2_left, _ctrl2_center, ctrl2_right) = make_lcr_row();
+        let (ctrl2_row, ctrl2_left, ctrl2_center, ctrl2_right) = make_lcr_row();
         ctrl2_row.set_size_request(-1, CTRL_ROW_HEIGHT);
         container.append(&ctrl2_row);
 
@@ -712,9 +722,18 @@ impl ControlBar {
             sdr_box.append(&tune_up);
         }
 
-        ctrl1_center.append(&mode_dropdown);
-        ctrl1_center.append(&flip_btn);
-        ctrl1_center.append(&sdr_box);
+        // Per the drawio, ctrl1-center is reserved for the IF-demod
+        // mode buttons (AM/SAM/DSB/USB/LSB/CWᵤ/CWₗ/FMₙ). The tune
+        // controls + flip toggle move to ctrl0-center alongside the
+        // other always-visible controls, since the diagram uses
+        // ctrl0 for tuning and ctrl1/ctrl2 for mode+decoder pickers.
+        ctrl0_center.append(&sdr_box);
+        ctrl0_center.append(&flip_btn);
+        // mode_dropdown kept but hidden — it still sources CSS/id for
+        // some existing tests. Mode buttons below drive the real
+        // selection.
+        mode_dropdown.set_visible(false);
+        ctrl0_center.append(&mode_dropdown);
 
         // --- Always-visible controls: PTT, Mute, Volume ---
         let ptt_btn = ToggleButton::with_label("PTT");
@@ -755,13 +774,17 @@ impl ControlBar {
         }
 
         // -----------------------------------------------------------
-        // ctrl2-left — DSP toggles (NB / DNB / DNR / DNF / APF).
-        // -----------------------------------------------------------
-        // `NB` targets the pre-IF noise blanker (phase 3a/b, active).
-        // `DNB` is the audio-domain impulse blanker (phase 3b, active).
-        // `DNR` / `DNF` / `APF` are phase-3c stubs on the server —
-        // the button clicks reach the pipeline cleanly (per phase 3a)
-        // but have no audible effect until the filter math lands.
+        // DSP toggles (NB / APF / DNR / DNF) + REC + CONFIG + WSJT-X,
+        // placed per the drawio IQ-NO-DRM layer:
+        //   ctrl1-left:  NB, APF
+        //   ctrl1-right: REC
+        //   ctrl2-left:  DNR, DNF
+        //   ctrl2-right: CONFIG
+        //   ctrl0-right: WSJT-X
+        // The audio-domain `DNB` stage is *not* surfaced as a button
+        // per the diagram; it remains reachable via the persisted
+        // snapshot and the pipeline honours the flag, but normal
+        // operator flow uses the pre-IF NB only.
         let suppress_toggle_notify = Rc::new(Cell::new(false));
 
         fn make_dsp_toggle(
@@ -774,7 +797,7 @@ impl ControlBar {
             let btn = ToggleButton::with_label(label);
             btn.set_valign(Align::Center);
             btn.set_tooltip_text(Some(tooltip));
-            btn.add_css_class("monospace");
+            btn.add_css_class("dsp-toggle");
             let ws = ws.clone();
             let suppress = suppress.clone();
             btn.connect_toggled(move |b| {
@@ -793,12 +816,12 @@ impl ControlBar {
             &suppress_toggle_notify,
             ClientMsg::SetNb,
         );
-        let dnb_btn = make_dsp_toggle(
-            "DNB",
-            "Digital Noise Blanker — audio-domain impulse blanker",
+        let apf_btn = make_dsp_toggle(
+            "APF",
+            "Audio Peak Filter — phase 3c, currently pass-through",
             &ws_tx,
             &suppress_toggle_notify,
-            ClientMsg::SetDnb,
+            ClientMsg::SetApf,
         );
         let dnr_btn = make_dsp_toggle(
             "DNR",
@@ -814,30 +837,15 @@ impl ControlBar {
             &suppress_toggle_notify,
             ClientMsg::SetDnf,
         );
-        let apf_btn = make_dsp_toggle(
-            "APF",
-            "Audio Peak Filter — phase 3c, currently pass-through",
-            &ws_tx,
-            &suppress_toggle_notify,
-            ClientMsg::SetApf,
-        );
-        ctrl2_left.append(&nb_btn);
-        ctrl2_left.append(&dnb_btn);
+        ctrl1_left.append(&nb_btn);
+        ctrl1_left.append(&apf_btn);
         ctrl2_left.append(&dnr_btn);
         ctrl2_left.append(&dnf_btn);
-        ctrl2_left.append(&apf_btn);
 
-        // -----------------------------------------------------------
-        // ctrl2-right — REC toggle + status.
-        // -----------------------------------------------------------
-        // The button's visual state follows the server's
-        // authoritative `RecordingStatus` (via `apply_rec_status`) so
-        // a second client starting / stopping a recording stays in
-        // sync. Click sends `StartRecording` (audio kind by default —
-        // IQ recording at 192 kHz would be a firehose on SD storage).
+        // --- REC toggle + status (ctrl1-right) ---
         let rec_btn = ToggleButton::with_label("REC");
         rec_btn.set_valign(Align::Center);
-        rec_btn.add_css_class("monospace");
+        rec_btn.add_css_class("chrome-btn");
         rec_btn.set_tooltip_text(Some(
             "Start/stop recording the audio stream to a file under ~/.local/state/efd-backend/recordings",
         ));
@@ -863,8 +871,70 @@ impl ControlBar {
         rec_status_label.add_css_class("monospace");
         rec_status_label.set_xalign(1.0);
         rec_status_label.set_halign(Align::End);
-        ctrl2_right.append(&rec_btn);
-        ctrl2_right.append(&rec_status_label);
+        ctrl1_right.append(&rec_btn);
+        ctrl1_right.append(&rec_status_label);
+
+        // --- WSJT-X launcher (ctrl0-right) ---
+        // Phase-5b placeholder: click logs a TODO. Real launcher is
+        // a follow-up — it needs to know how to spawn WSJT-X and
+        // point it at the rigctld tunnel we document in README.
+        let wsjtx_btn = Button::with_label("WSJT-X");
+        wsjtx_btn.set_valign(Align::Center);
+        wsjtx_btn.add_css_class("chrome-btn");
+        wsjtx_btn.set_tooltip_text(Some(
+            "Launch WSJT-X (phase-5c placeholder — no-op until the launcher ships)",
+        ));
+        wsjtx_btn.connect_clicked(|_| {
+            eprintln!("[wsjtx] launcher not yet implemented (phase 5c)");
+        });
+        ctrl0_right.append(&wsjtx_btn);
+
+        // --- CONFIG dialog (ctrl2-right) ---
+        // Phase-5b placeholder: click logs a TODO. The dialog will
+        // eventually expose server URL, token, recording dir,
+        // start-up DSP defaults.
+        let config_btn = Button::with_label("CONFIG");
+        config_btn.set_valign(Align::Center);
+        config_btn.add_css_class("chrome-btn");
+        config_btn.set_tooltip_text(Some(
+            "Open client settings (phase-5c placeholder)",
+        ));
+        config_btn.connect_clicked(|_| {
+            eprintln!("[config] dialog not yet implemented (phase 5c)");
+        });
+        ctrl2_right.append(&config_btn);
+
+        // -----------------------------------------------------------
+        // ctrl1-center — IF-demod mode buttons.
+        // -----------------------------------------------------------
+        // Row of linked `ToggleButton`s acting as a radio group:
+        // exactly one stays pressed, and pressing any other clears
+        // the previous one. Replaces the mode_dropdown per the
+        // drawio. Each click sends `SetDemodMode` (backend software
+        // demod) plus the matching CAT command (when hardware CAT
+        // is available). Filter-by-capabilities happens in
+        // `apply_capabilities`.
+        let mode_btns = build_mode_buttons(
+            &ctrl1_center,
+            &ws_tx,
+            &sdr_params,
+            &display_bar,
+            &flip_btn,
+            &suppress_toggle_notify,
+        );
+
+        // -----------------------------------------------------------
+        // ctrl2-center — audio-domain decoder toggles.
+        // -----------------------------------------------------------
+        // Per the drawio: CW / PSK / MFSK / RTTY / FAX / PCKT
+        // (audio decoders, purple) | DRM / FDV (DRM / FreeDV, pink).
+        // Each is an independent `SetDecoder` — multiple can run at
+        // once. Server-side Tier-3 decoders aren't wired up yet, so
+        // these are click-only visible today; the proto contract is
+        // honoured so they'll light up as soon as the backend
+        // implementations land.
+        let decoder_btns =
+            build_decoder_buttons(&ctrl2_center, &ws_tx, &suppress_toggle_notify);
 
         Self {
             container,
@@ -885,12 +955,13 @@ impl ControlBar {
             last_cmd,
             display_bar,
             nb_btn,
-            dnb_btn,
+            apf_btn,
             dnr_btn,
             dnf_btn,
-            apf_btn,
             rec_btn,
             rec_status_label,
+            mode_btns,
+            decoder_btns,
             suppress_toggle_notify,
         }
     }
@@ -920,16 +991,24 @@ impl ControlBar {
         }
     }
 
-    /// Seed the DSP toggles from a server-pushed `StateSnapshot` so
-    /// persisted user preferences (e.g. "DNR always on") show up
-    /// correctly on reconnect and after server restarts.
+    /// Seed the DSP toggles and decoder state from a server-pushed
+    /// `StateSnapshot` so persisted user preferences (e.g. "DNR
+    /// always on") show up correctly on reconnect and after server
+    /// restarts.
     pub fn apply_snapshot(&self, snap: &StateSnapshot) {
         self.suppress_toggle_notify.set(true);
         self.nb_btn.set_active(snap.nb_on);
-        self.dnb_btn.set_active(snap.dnb_on);
+        self.apf_btn.set_active(snap.apf_on);
         self.dnr_btn.set_active(snap.dnr_on);
         self.dnf_btn.set_active(snap.dnf_on);
-        self.apf_btn.set_active(snap.apf_on);
+        // Mode buttons: exactly one active per the snapshot's mode.
+        for (m, btn) in &self.mode_btns {
+            btn.set_active(*m == snap.mode);
+        }
+        // Decoder buttons: each active iff in enabled_decoders.
+        for (kind, btn) in &self.decoder_btns {
+            btn.set_active(snap.enabled_decoders.contains(kind));
+        }
         self.suppress_toggle_notify.set(false);
     }
 
@@ -1125,6 +1204,172 @@ fn make_lcr_row() -> (GtkBox, GtkBox, GtkBox, GtkBox) {
     row.append(&right);
 
     (row, left, center, right)
+}
+
+/// Build the IF-demod mode button row for `ctrl1-center`. Each
+/// button represents one `Mode` and sends `ClientMsg::SetDemodMode`
+/// plus the matching CAT `MD…;` command when clicked. Behaves as a
+/// radio group: pressing any button clears the previously-active
+/// one, including the case where the user clicks the already-active
+/// button (that flips it off → the server falls back to whatever
+/// mode the RadioState reports; a follow-up will tighten that into
+/// a "one stays on always" policy).
+fn build_mode_buttons(
+    parent: &GtkBox,
+    ws_tx: &mpsc::UnboundedSender<ClientMsg>,
+    sdr_params: &Rc<RefCell<SdrParams>>,
+    display_bar: &DisplayBar,
+    flip_btn: &ToggleButton,
+    suppress: &Rc<Cell<bool>>,
+) -> Vec<(Mode, ToggleButton)> {
+    // Order + subscript glyphs match the drawio IQ-NO-DRM layer.
+    // `Mode::CW` is CW-upper; `Mode::CWR` is CW-lower; the unicode
+    // subscripts u/ₗ come out crisp in the Hack Nerd Font Mono we
+    // already load.
+    let spec: &[(&str, Mode)] = &[
+        ("AM", Mode::AM),
+        ("SAM", Mode::SAM),
+        ("DSB", Mode::DSB),
+        ("USB", Mode::USB),
+        ("LSB", Mode::LSB),
+        ("CWᵤ", Mode::CW),
+        ("CWₗ", Mode::CWR),
+        ("FMₙ", Mode::FM),
+    ];
+
+    let row = GtkBox::new(Orientation::Horizontal, 4);
+    row.add_css_class("linked");
+    let mut out: Vec<(Mode, ToggleButton)> = Vec::with_capacity(spec.len());
+    // Use a shared Rc<RefCell<Vec<_>>> for inter-button awareness
+    // so clicking one can un-press the others.
+    let group: Rc<RefCell<Vec<(Mode, ToggleButton)>>> = Rc::new(RefCell::new(Vec::new()));
+
+    for (label, mode) in spec {
+        let btn = ToggleButton::with_label(label);
+        btn.set_valign(Align::Center);
+        btn.add_css_class("mode-btn");
+        btn.set_tooltip_text(Some(&format!("IF demod: {label}")));
+        let ws = ws_tx.clone();
+        let sp = sdr_params.clone();
+        let db = display_bar.clone();
+        let fb = flip_btn.clone();
+        let s = suppress.clone();
+        let grp = group.clone();
+        let m = *mode;
+        btn.connect_toggled(move |b| {
+            if s.get() {
+                return;
+            }
+            if !b.is_active() {
+                // User clicked an already-active button off; re-toggle
+                // it on and do nothing else — the radio group always
+                // has exactly one mode active.
+                s.set(true);
+                b.set_active(true);
+                s.set(false);
+                return;
+            }
+            // Un-press every other button in the group.
+            s.set(true);
+            for (om, ob) in grp.borrow().iter() {
+                if *om != m {
+                    ob.set_active(false);
+                }
+            }
+            s.set(false);
+            let _ = ws.send(ClientMsg::SetDemodMode(Some(m)));
+            if let Some(cmd) = cat_commands::set_mode(m) {
+                let _ = ws.send(ClientMsg::CatCommand(cmd));
+            }
+            sp.borrow_mut().set_mode(m);
+            // Show the DRM spectrum-flip toggle only when DRM is
+            // selected (we don't have a dedicated DRM button in this
+            // row per the diagram — DRM lives in the decoder row —
+            // but the existing flip handling still applies if a
+            // future phase surfaces DRM as an IF mode too).
+            if m == Mode::DRM {
+                db.prime_drm_placeholders();
+                fb.set_visible(true);
+            } else {
+                db.clear_extras();
+                fb.set_visible(false);
+            }
+        });
+        row.append(&btn);
+        out.push((*mode, btn));
+    }
+    *group.borrow_mut() = out.clone();
+    parent.append(&row);
+    out
+}
+
+/// Build the audio-domain decoder toggles for `ctrl2-center`. Each
+/// button sends `ClientMsg::SetDecoder { decoder, enabled }` so
+/// multiple decoders can run in parallel (per phase-1 proto).
+/// Server-side decoders aren't wired up today — the buttons exist
+/// for layout fidelity with the drawio and to exercise the
+/// proto path; they'll light up for real once the backend lands
+/// its Tier-3 decoders.
+fn build_decoder_buttons(
+    parent: &GtkBox,
+    ws_tx: &mpsc::UnboundedSender<ClientMsg>,
+    suppress: &Rc<Cell<bool>>,
+) -> Vec<(efd_proto::DecoderKind, ToggleButton)> {
+    use efd_proto::DecoderKind as D;
+
+    // Audio-domain decoders (purple in the drawio) + DRM/FDV
+    // (pink, different palette for digital voice).
+    let audio_spec: &[(&str, D)] = &[
+        ("CW", D::Cw),
+        ("PSK", D::Psk),
+        ("MFSK", D::Mfsk),
+        ("RTTY", D::Rtty),
+        ("FAX", D::Fax),
+        ("PCKT", D::Pckt),
+    ];
+    let dv_spec: &[(&str, D)] = &[("DRM", D::Ft8), ("FDV", D::Aprs)];
+    //                                   ^^^^^^^^^^^^^^^^^^^^^^
+    // `DRM` and `FDV` in the drawio are selectors for DRM/FreeDV
+    // decoding paths (Tier-2 codecs per the pipeline), which we
+    // don't yet have dedicated `DecoderKind` variants for. We park
+    // them on the closest available kinds (`Ft8` / `Aprs`) so the
+    // buttons still emit a `SetDecoder` that distinguishes them on
+    // the wire; when the proto gains `Drm` / `FreeDv` variants
+    // this mapping swaps in place.
+
+    let row = GtkBox::new(Orientation::Horizontal, 4);
+    row.add_css_class("linked");
+    let mut out: Vec<(D, ToggleButton)> = Vec::new();
+
+    for (label, kind) in audio_spec.iter().chain(dv_spec.iter()) {
+        let btn = ToggleButton::with_label(label);
+        btn.set_valign(Align::Center);
+        let css_class = if dv_spec.iter().any(|(_, k)| k == kind) {
+            "decoder-drm"
+        } else {
+            "decoder-audio"
+        };
+        btn.add_css_class(css_class);
+        btn.set_tooltip_text(Some(&format!(
+            "{label} decoder (phase-5b placeholder — server-side decoders land later)"
+        )));
+        let ws = ws_tx.clone();
+        let s = suppress.clone();
+        let k = *kind;
+        btn.connect_toggled(move |b| {
+            if s.get() {
+                return;
+            }
+            let _ = ws.send(ClientMsg::SetDecoder {
+                decoder: k,
+                enabled: b.is_active(),
+            });
+        });
+        row.append(&btn);
+        out.push((*kind, btn));
+    }
+    parent.append(&row);
+    out
 }
 
 fn format_freq(hz: u64) -> String {

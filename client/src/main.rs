@@ -79,6 +79,63 @@ fn load_css() {
             color: white;
             border: none;
         }
+        /* Phase 5b: drawio IQ-NO-DRM control-bar colour palette. */
+        /* DSP / chrome toggles (NB, APF, DNR, DNF, REC, CONFIG,
+         * WSJT-X, SRC, DEV) share the yellow chip look. */
+        .dsp-toggle, .chrome-btn {
+            background: #fff2cc;
+            color: #333;
+            border: 1px solid #d6b656;
+            border-radius: 4px;
+            padding: 2px 10px;
+            min-width: 36px;
+        }
+        .dsp-toggle:checked, .chrome-btn:checked {
+            background: #ffd54f;
+            color: #000;
+        }
+        /* IF-demod mode buttons — orange, per drawio. */
+        .mode-btn {
+            background: #f0a30a;
+            color: #000;
+            border: 1px solid #bd7000;
+            border-radius: 4px;
+            padding: 2px 10px;
+            min-width: 40px;
+        }
+        .mode-btn:checked {
+            background: #ffb300;
+            color: #000;
+            font-weight: bold;
+        }
+        /* Audio-domain decoders — purple. */
+        .decoder-audio {
+            background: #e1d5e7;
+            color: #3a214b;
+            border: 1px solid #9673a6;
+            border-radius: 4px;
+            padding: 2px 10px;
+            min-width: 40px;
+        }
+        .decoder-audio:checked {
+            background: #b39ddb;
+            color: #000;
+            font-weight: bold;
+        }
+        /* DRM / FreeDV decoders — pink. */
+        .decoder-drm {
+            background: #f8cecc;
+            color: #6a1f1f;
+            border: 1px solid #b85450;
+            border-radius: 4px;
+            padding: 2px 10px;
+            min-width: 40px;
+        }
+        .decoder-drm:checked {
+            background: #ef9a9a;
+            color: #000;
+            font-weight: bold;
+        }
         ",
     );
     gtk4::style_context_add_provider_for_display(
