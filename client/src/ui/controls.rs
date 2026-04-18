@@ -601,10 +601,12 @@ impl ControlBar {
         }
         ctrl0_center.append(&agc_scale);
 
-        // Audio-source initial sync is always safe; the AGC-threshold initial
-        // sync is deferred to `apply_capabilities` so it's gated on
-        // has_hardware_cat and not emitted to sources that can't accept it.
-        let _ = ws_tx.send(ClientMsg::SelectSource(SourceClass::Audio));
+        // No unconditional `SelectSource` on init — the server seeds
+        // its own default (via StateSnapshot / AudioRouting) and a
+        // blind "Audio" send here caused a noisy fallback loop when
+        // USB audio wasn't available (RadioUsb → fallback to
+        // SoftwareDemod → two log lines per connect). The client's
+        // source toggle fires `SelectSource` on user click.
 
         // Step size dropdown
         let step_list = StringList::new(&STEPS.iter().map(|(s, _)| *s).collect::<Vec<_>>());

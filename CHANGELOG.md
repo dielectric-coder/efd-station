@@ -4,6 +4,22 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Fixed (server 0.7.2, client 0.6.1 — phase 2 noise cleanup)
+- **Snapshot storm.** The snapshot tracker was calling
+  `snapshot_tx.send_modify(...)` every CAT poll (~5 Hz) regardless
+  of whether any tracked field had changed, which meant every
+  connected client received a `ServerMsg::StateSnapshot` push on
+  every tick. Switched to `send_if_modified` with per-field
+  equality checks so notifications fire only on real change. The
+  client's log spam (`state snapshot: freq=… mode=… device=None`)
+  quiets to the actual edit rate.
+- **Double "audio source changed" on connect.** Removed the client
+  UI's unconditional `ClientMsg::SelectSource(Audio)` on init — a
+  blind send that, when USB audio wasn't available, produced a
+  noisy `RadioUsb → fallback to SoftwareDemod` pair in the server
+  log. The server now keeps its own default; `SelectSource` only
+  fires on explicit user click.
+
 ### Added (server 0.7.1 — phase 2 of rework, additive)
 - **Device discovery at startup.** New `server/src/discovery.rs`
   walks `/sys/bus/usb/devices` for the known IQ USB VID/PIDs

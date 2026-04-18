@@ -574,6 +574,12 @@ impl Pipeline {
         // Snapshot tracker — subscribes to `state_tx` so the persisted
         // snapshot's freq / mode / filter_bw_hz match whatever the
         // radio is actually doing when we save on shutdown.
+        //
+        // Uses `send_if_modified` so the watch only notifies when a
+        // tuning field *actually* changed. Without this, the CAT
+        // poll cadence (~5 Hz) would fan `ServerMsg::StateSnapshot`
+        // to every connected client every tick, even when the radio
+        // is sitting still.
         {
             let mut state_sub = state_tx.subscribe();
             let snap_tx = snapshot_tx.clone();
@@ -584,13 +590,15 @@ impl Pipeline {
                         _ = c.cancelled() => break,
                         r = state_sub.recv() => match r {
                             Ok(st) => {
-                                snap_tx.send_modify(|s| {
-                                    s.freq_hz = st.freq_hz;
-                                    s.mode = st.mode;
-                                    s.filter_bw_hz = st.filter_bw_hz;
-                                    s.rit_hz = st.rit_hz;
-                                    s.xit_hz = st.xit_hz;
-                                    s.if_offset_hz = st.if_offset_hz;
+                                snap_tx.send_if_modified(|s| {
+                                    let mut changed = false;
+                                    if s.freq_hz != st.freq_hz { s.freq_hz = st.freq_hz; changed = true; }
+                                    if s.mode != st.mode { s.mode = st.mode; changed = true; }
+                                    if s.filter_bw_hz != st.filter_bw_hz { s.filter_bw_hz = st.filter_bw_hz; changed = true; }
+                                    if s.rit_hz != st.rit_hz { s.rit_hz = st.rit_hz; changed = true; }
+                                    if s.xit_hz != st.xit_hz { s.xit_hz = st.xit_hz; changed = true; }
+                                    if s.if_offset_hz != st.if_offset_hz { s.if_offset_hz = st.if_offset_hz; changed = true; }
+                                    changed
                                 });
                             }
                             Err(broadcast::error::RecvError::Lagged(_)) => continue,
