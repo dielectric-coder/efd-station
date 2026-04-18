@@ -4,6 +4,34 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Added (server 0.8.1 — phase 3b: NB + DNB impulse blankers go live)
+- **Pre-IF `NB` does real work now.** `efd_dsp::nb::blank` is an
+  envelope-threshold impulse blanker: EWMA-smoothed magnitude
+  estimate, samples above `5×` the running mean get zeroed out,
+  check-before-update so a single impulse doesn't poison the
+  envelope for the next sample. Runs at 192 kHz on the IQ stream,
+  ~5 ops/sample. Tunables (`ENV_ALPHA`, `BLANK_THRESHOLD`) are
+  compile-time today; exposing a threshold slider is a future
+  UI concern.
+- **`DNB` does real work now.** `efd_dsp::audio_dsp::dnb` applies
+  the same algorithm shape to the audio stream (mono f32 at 48 kHz
+  post-demod / post-USB-capture / post-DRM) — absolute value, EWMA,
+  zero on threshold. `AudioDsp` carries the envelope state across
+  calls so `process` doesn't re-converge every frame.
+- **`AudioDsp::process` is now `&mut self`.** Needed to mutate the
+  stateful envelope tracker. Pipeline wires this through; the
+  `encode_audio_mux` function holds a mutable `AudioDsp` instance
+  and runs it on every outgoing audio block.
+- 9 new unit tests covering pass-through, impulse blanking,
+  sub-threshold survival, and envelope-bias behaviour.
+
+### Not yet (phase 3c)
+- **`DNR`** (spectral-subtraction denoise): needs an FFT + noise
+  profile, likely wants a "learn noise floor now" button on the UI.
+- **`DNF`** (adaptive notch): needs a notch-centre control; simple
+  cases (single-tone heterodyne) can start with a fixed frequency.
+- **`APF`** (audio peak filter): needs centre + width parameters.
+
 ### Changed (server 0.8.0, client 0.7.0 — **wire break**, phase 3a: pipeline topology)
 - **Proto version 2 → 3.** Adds `ClientMsg::SetNb(bool)` (pre-IF
   noise blanker, the `NB` button in the UI) and
