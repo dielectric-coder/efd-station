@@ -222,6 +222,18 @@ impl Drop for FdmDuo {
 /// Returns a Vec of [I, Q] pairs.
 pub fn convert_samples(usb_data: &[u8]) -> Vec<[f32; 2]> {
     const BYTES_PER_SAMPLE: usize = 8;
+    // `count` floors to the last whole IQ pair, so the loop below can
+    // never index past the end. A non-multiple length would mean the
+    // device gave us a torn packet — log once and drop the trailing
+    // bytes rather than corrupt the stream.
+    let leftover = usb_data.len() % BYTES_PER_SAMPLE;
+    if leftover != 0 {
+        warn!(
+            len = usb_data.len(),
+            leftover,
+            "fdm-duo convert_samples: buffer not a multiple of {BYTES_PER_SAMPLE} bytes, dropping tail"
+        );
+    }
     let count = usb_data.len() / BYTES_PER_SAMPLE;
     let mut out = Vec::with_capacity(count);
 

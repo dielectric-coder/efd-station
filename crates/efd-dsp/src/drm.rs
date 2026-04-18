@@ -122,6 +122,24 @@ pub fn spawn_drm_bridge(
     DrmHandles { join, status_rx }
 }
 
+/// PipeWire accepts `[a-zA-Z0-9._-]` in sink names, but we restrict to
+/// `[a-z0-9_]` with a reasonable length cap so operators can't slip
+/// `sink_name=foo bar` or other argument-boundary confusions into
+/// `pactl load-module`.
+fn validate_sink_name(name: &str) -> Result<(), DspError> {
+    if name.is_empty() || name.len() > 63 {
+        return Err(DspError::Drm(format!(
+            "invalid sink name {name:?}: must be 1..=63 chars"
+        )));
+    }
+    if !name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') {
+        return Err(DspError::Drm(format!(
+            "invalid sink name {name:?}: only [a-z0-9_] allowed"
+        )));
+    }
+    Ok(())
+}
+
 async fn run_bridge(
     cfg: DrmConfig,
     input: DrmInput,
@@ -133,6 +151,26 @@ async fn run_bridge(
     // Input sink only exists for the AudioBroadcast path — File mode has
     // DREAM opening the file directly.
     let needs_input_sink = matches!(input, DrmInput::AudioBroadcast(_));
+
+    // Validate user-controlled inputs before spawning any subprocess so
+    // operators get a clear error instead of a cryptic pactl/DREAM
+    // failure three steps later.
+    validate_sink_name(&cfg.output_sink)?;
+    if needs_input_sink {
+        validate_sink_name(&cfg.input_sink)?;
+    }
+    if let DrmInput::File(path) = &input {
+        let meta = std::fs::metadata(path).map_err(|e| {
+            DspError::Drm(format!("DRM input file {}: {e}", path.display()))
+        })?;
+        if !meta.is_file() {
+            return Err(DspError::Drm(format!(
+                "DRM input {} is not a regular file",
+                path.display()
+            )));
+        }
+    }
+
     let _sinks = if needs_input_sink {
         NullSinks::create(&cfg.input_sink, &cfg.output_sink, cfg.dream_rate).await?
     } else {

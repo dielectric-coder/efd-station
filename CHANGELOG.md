@@ -5,6 +5,19 @@ All notable changes to efd-station are documented in this file.
 ## [Unreleased]
 
 ### Added
+- **DRM bridge pre-flight validation.** `run_bridge` now rejects
+  invalid PipeWire sink names (`[a-z0-9_]`, 1..=63 chars) and a
+  missing / non-regular `DrmInput::File` path before spawning any
+  subprocess. Operators see a clear `DspError::Drm` instead of a
+  downstream `pactl` or DREAM failure. Sink-name validation also closes
+  the `pactl load-module` argument-boundary confusion surface (e.g.
+  `sink_name=foo bar`).
+- **Noisier IF-parser + IQ convert.** `parse_if_response` uses
+  `str::get(..)` so a short frame or non-ASCII byte returns `None`
+  instead of panicking at a UTF-8 char boundary. `fdm-duo`
+  `convert_samples` logs a `warn!` when the USB buffer isn't a
+  multiple of 8 bytes (torn packet); prior code silently dropped the
+  tail.
 - **Optional WebSocket auth via shared token.** New
   `[server] auth_token` in `config.toml`; when set, clients must pass
   `?token=<value>` on the WS URL or the upgrade is rejected with 401

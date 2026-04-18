@@ -45,14 +45,16 @@ pub struct IfResponse {
 ///   Minimum 32 chars before the trailing `;`.
 pub fn parse_if_response(response: &str) -> Option<IfResponse> {
     let s = response.trim();
-    if s.len() < 32 || !s.starts_with("IF") {
+    if !s.starts_with("IF") {
         return None;
     }
 
-    let freq_hz: u64 = s[2..13].parse().ok()?;
-    let tx_digit: u8 = s[28..29].parse().ok().unwrap_or(0);
-    let mode_digit: u8 = s[29..30].parse().ok()?;
-    let vfo_digit: u8 = s[30..31].parse().ok()?;
+    // `.get(..)` instead of raw indexing so a short frame or non-ASCII
+    // byte at a char boundary returns None rather than panicking.
+    let freq_hz: u64 = s.get(2..13)?.parse().ok()?;
+    let tx_digit: u8 = s.get(28..29)?.parse().ok().unwrap_or(0);
+    let mode_digit: u8 = s.get(29..30)?.parse().ok()?;
+    let vfo_digit: u8 = s.get(30..31)?.parse().ok()?;
 
     let mode = kenwood_mode(mode_digit);
     let vfo = if vfo_digit == 0 { Vfo::A } else { Vfo::B };
