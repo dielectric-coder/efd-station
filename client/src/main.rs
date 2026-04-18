@@ -199,8 +199,9 @@ fn build_ui(app: &Application, url: &str) {
                 ServerMsg::Error(err) => {
                     eprintln!("server error: [{}] {}", err.code, err.message);
                 }
-                // Phase-1 stubs: the proto shape is wired up; full UI
-                // handling lands with the grid rewrite (phase 5).
+                // Phase-5a wiring: phase-1 stubs become real UI
+                // handlers. DeviceList stays eprintln-only until the
+                // source/device-picker UI lands (phase 5b).
                 ServerMsg::DeviceList(list) => {
                     eprintln!(
                         "device list: audio={} iq={} active={:?}",
@@ -210,19 +211,13 @@ fn build_ui(app: &Application, url: &str) {
                     );
                 }
                 ServerMsg::DecodedText(dt) => {
-                    eprintln!("decoded[{:?}]: {}", dt.decoder, dt.text);
+                    display_bar2.push_decoded(dt.decoder, &dt.text);
                 }
                 ServerMsg::RecordingStatus(rs) => {
-                    eprintln!(
-                        "recording: active={} kind={:?} path={:?} bytes={}",
-                        rs.active, rs.kind, rs.path, rs.bytes_written,
-                    );
+                    control_bar2.apply_rec_status(&rs);
                 }
                 ServerMsg::StateSnapshot(snap) => {
-                    eprintln!(
-                        "state snapshot: freq={}Hz mode={:?} device={:?}",
-                        snap.freq_hz, snap.mode, snap.active_device,
-                    );
+                    control_bar2.apply_snapshot(&snap);
                 }
             }
         }

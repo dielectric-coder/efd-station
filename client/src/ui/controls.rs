@@ -3,7 +3,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use efd_proto::{Capabilities, ClientMsg, DrmStatus, Mode, Ptt, RadioState, SourceClass};
+use efd_proto::{
+    Capabilities, ClientMsg, DrmStatus, Mode, Ptt, RadioState, RecKind, RecordingStatus,
+    SourceClass, StartRecording, StateSnapshot,
+};
 use gtk4::prelude::*;
 use gtk4::{
     Adjustment, Align, Box as GtkBox, Button, DropDown, Entry, Label, LevelBar, Orientation,
@@ -43,8 +46,20 @@ pub struct DisplayBar {
     drm_line1: Label,
     /// Second DRM info line — SNR/WMER/lock flags.
     drm_line2: Label,
+    /// Scrolling decoded-text output (CW / RTTY / PSK / …). Shown in
+    /// `disp2-center` alongside the DRM info lines; each incoming
+    /// `DecodedText` message appends a line, keeping at most
+    /// `DECODED_LINES_KEPT` so the widget doesn't grow unbounded.
+    decoded_text_label: Label,
+    decoded_lines: Rc<RefCell<std::collections::VecDeque<String>>>,
     prev: RefCell<Option<CachedState>>,
 }
+
+/// Rolling log cap for the decoded-text view. 6 fits nicely in the
+/// `disp2-center` cell at the default font size and matches the
+/// diagram's "QST DE WA1W ... 15 WPM TEST" style of recent-activity
+/// display.
+const DECODED_LINES_KEPT: usize = 6;
 
 #[derive(Clone, PartialEq)]
 struct CachedState {
@@ -174,6 +189,19 @@ impl DisplayBar {
         drm_line2.set_xalign(0.5);
         disp2_center.append(&drm_line2);
 
+        // disp2-center also carries the decoded-text log (phase 5a).
+        // Stays below drm_line2 so DRM sessions aren't crowded;
+        // renders empty until the first `DecodedText` arrives.
+        let decoded_text_label = Label::new(None);
+        decoded_text_label.add_css_class("monospace");
+        decoded_text_label.set_xalign(0.5);
+        decoded_text_label.set_wrap(true);
+        decoded_text_label.set_lines(DECODED_LINES_KEPT as i32);
+        disp2_center.append(&decoded_text_label);
+        let decoded_lines = Rc::new(RefCell::new(std::collections::VecDeque::with_capacity(
+            DECODED_LINES_KEPT,
+        )));
+
         Self {
             container,
             freq_label,
@@ -189,8 +217,29 @@ impl DisplayBar {
             no_device_label,
             drm_line1,
             drm_line2,
+            decoded_text_label,
+            decoded_lines,
             prev: RefCell::new(None),
         }
+    }
+
+    /// Append a decoded-text line to the disp2-center log, capping
+    /// history at `DECODED_LINES_KEPT` so the widget doesn't grow
+    /// unbounded under a chatty decoder.
+    pub fn push_decoded(&self, decoder: efd_proto::DecoderKind, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+        let mut lines = self.decoded_lines.borrow_mut();
+        while lines.len() >= DECODED_LINES_KEPT {
+            lines.pop_front();
+        }
+        // Tag with decoder kind so CW / RTTY / PSK etc. are visually
+        // distinct. Keeps the log scannable when multiple decoders
+        // are active simultaneously.
+        lines.push_back(format!("[{:?}] {}", decoder, text.trim()));
+        let joined: Vec<&str> = lines.iter().map(String::as_str).collect();
+        self.decoded_text_label.set_text(&joined.join("\n"));
     }
 
     pub fn widget(&self) -> &GtkBox {
@@ -387,6 +436,24 @@ pub struct ControlBar {
     /// AUD/IQ availability indicators can be repainted when server
     /// capabilities arrive.
     display_bar: DisplayBar,
+    /// Phase-5a DSP-block toggles (ctrl2-left). `nb_btn` is the
+    /// pre-IF noise blanker (phase 3a/b); `dnb/dnr/dnf/apf` are the
+    /// audio-domain DSP stages (DNB real, others pass-through).
+    /// Each sends a dedicated `ClientMsg` on toggle.
+    nb_btn: ToggleButton,
+    dnb_btn: ToggleButton,
+    dnr_btn: ToggleButton,
+    dnf_btn: ToggleButton,
+    apf_btn: ToggleButton,
+    /// REC toggle + status line (ctrl2-right). Button state tracks
+    /// the server's authoritative `RecordingStatus`; the status
+    /// label shows bytes / duration while recording.
+    rec_btn: ToggleButton,
+    rec_status_label: Label,
+    /// Set while `apply_rec_status` / `apply_snapshot` sync the
+    /// toggles from server state, so the `connect_toggled` handlers
+    /// don't bounce the value back as a fresh `ClientMsg`.
+    suppress_toggle_notify: Rc<Cell<bool>>,
 }
 
 impl ControlBar {
@@ -415,7 +482,7 @@ impl ControlBar {
         let (ctrl1_row, _ctrl1_left, ctrl1_center, _ctrl1_right) = make_lcr_row();
         ctrl1_row.set_size_request(-1, CTRL_ROW_HEIGHT);
         container.append(&ctrl1_row);
-        let (ctrl2_row, _ctrl2_left, _ctrl2_center, _ctrl2_right) = make_lcr_row();
+        let (ctrl2_row, ctrl2_left, _ctrl2_center, ctrl2_right) = make_lcr_row();
         ctrl2_row.set_size_request(-1, CTRL_ROW_HEIGHT);
         container.append(&ctrl2_row);
 
@@ -687,6 +754,118 @@ impl ControlBar {
             ctrl0_center.append(&vol_scale);
         }
 
+        // -----------------------------------------------------------
+        // ctrl2-left — DSP toggles (NB / DNB / DNR / DNF / APF).
+        // -----------------------------------------------------------
+        // `NB` targets the pre-IF noise blanker (phase 3a/b, active).
+        // `DNB` is the audio-domain impulse blanker (phase 3b, active).
+        // `DNR` / `DNF` / `APF` are phase-3c stubs on the server —
+        // the button clicks reach the pipeline cleanly (per phase 3a)
+        // but have no audible effect until the filter math lands.
+        let suppress_toggle_notify = Rc::new(Cell::new(false));
+
+        fn make_dsp_toggle(
+            label: &str,
+            tooltip: &str,
+            ws: &mpsc::UnboundedSender<ClientMsg>,
+            suppress: &Rc<Cell<bool>>,
+            mk_msg: impl Fn(bool) -> ClientMsg + 'static,
+        ) -> ToggleButton {
+            let btn = ToggleButton::with_label(label);
+            btn.set_valign(Align::Center);
+            btn.set_tooltip_text(Some(tooltip));
+            btn.add_css_class("monospace");
+            let ws = ws.clone();
+            let suppress = suppress.clone();
+            btn.connect_toggled(move |b| {
+                if suppress.get() {
+                    return;
+                }
+                let _ = ws.send(mk_msg(b.is_active()));
+            });
+            btn
+        }
+
+        let nb_btn = make_dsp_toggle(
+            "NB",
+            "Pre-IF noise blanker (envelope-threshold impulse blanker on raw IQ)",
+            &ws_tx,
+            &suppress_toggle_notify,
+            ClientMsg::SetNb,
+        );
+        let dnb_btn = make_dsp_toggle(
+            "DNB",
+            "Digital Noise Blanker — audio-domain impulse blanker",
+            &ws_tx,
+            &suppress_toggle_notify,
+            ClientMsg::SetDnb,
+        );
+        let dnr_btn = make_dsp_toggle(
+            "DNR",
+            "Digital Noise Reduction (spectral subtraction) — phase 3c, currently pass-through",
+            &ws_tx,
+            &suppress_toggle_notify,
+            ClientMsg::SetDnr,
+        );
+        let dnf_btn = make_dsp_toggle(
+            "DNF",
+            "Digital Notch Filter — phase 3c, currently pass-through",
+            &ws_tx,
+            &suppress_toggle_notify,
+            ClientMsg::SetDnf,
+        );
+        let apf_btn = make_dsp_toggle(
+            "APF",
+            "Audio Peak Filter — phase 3c, currently pass-through",
+            &ws_tx,
+            &suppress_toggle_notify,
+            ClientMsg::SetApf,
+        );
+        ctrl2_left.append(&nb_btn);
+        ctrl2_left.append(&dnb_btn);
+        ctrl2_left.append(&dnr_btn);
+        ctrl2_left.append(&dnf_btn);
+        ctrl2_left.append(&apf_btn);
+
+        // -----------------------------------------------------------
+        // ctrl2-right — REC toggle + status.
+        // -----------------------------------------------------------
+        // The button's visual state follows the server's
+        // authoritative `RecordingStatus` (via `apply_rec_status`) so
+        // a second client starting / stopping a recording stays in
+        // sync. Click sends `StartRecording` (audio kind by default —
+        // IQ recording at 192 kHz would be a firehose on SD storage).
+        let rec_btn = ToggleButton::with_label("REC");
+        rec_btn.set_valign(Align::Center);
+        rec_btn.add_css_class("monospace");
+        rec_btn.set_tooltip_text(Some(
+            "Start/stop recording the audio stream to a file under ~/.local/state/efd-backend/recordings",
+        ));
+        {
+            let ws = ws_tx.clone();
+            let suppress = suppress_toggle_notify.clone();
+            rec_btn.connect_toggled(move |b| {
+                if suppress.get() {
+                    return;
+                }
+                let msg = if b.is_active() {
+                    ClientMsg::StartRecording(StartRecording {
+                        kind: RecKind::Audio,
+                        path: None,
+                    })
+                } else {
+                    ClientMsg::StopRecording
+                };
+                let _ = ws.send(msg);
+            });
+        }
+        let rec_status_label = Label::new(Some(""));
+        rec_status_label.add_css_class("monospace");
+        rec_status_label.set_xalign(1.0);
+        rec_status_label.set_halign(Align::End);
+        ctrl2_right.append(&rec_btn);
+        ctrl2_right.append(&rec_status_label);
+
         Self {
             container,
             audio_btn,
@@ -705,7 +884,53 @@ impl ControlBar {
             sdr_params,
             last_cmd,
             display_bar,
+            nb_btn,
+            dnb_btn,
+            dnr_btn,
+            dnf_btn,
+            apf_btn,
+            rec_btn,
+            rec_status_label,
+            suppress_toggle_notify,
         }
+    }
+
+    /// Mirror server-authoritative `RecordingStatus` into the REC
+    /// toggle + status label. Called from the WS dispatch.
+    pub fn apply_rec_status(&self, status: &RecordingStatus) {
+        self.suppress_toggle_notify.set(true);
+        self.rec_btn.set_active(status.active);
+        self.suppress_toggle_notify.set(false);
+
+        if status.active {
+            let kind_str = match status.kind {
+                Some(RecKind::Iq) => "IQ",
+                Some(RecKind::Audio) => "audio",
+                None => "?",
+            };
+            let duration = status
+                .duration_s
+                .map(|s| format!("{:>5.1}s", s))
+                .unwrap_or_else(|| "  ---".to_string());
+            let kib = status.bytes_written as f64 / 1024.0;
+            self.rec_status_label
+                .set_text(&format!("REC {kind_str}: {duration}  {kib:.0} KiB"));
+        } else {
+            self.rec_status_label.set_text("");
+        }
+    }
+
+    /// Seed the DSP toggles from a server-pushed `StateSnapshot` so
+    /// persisted user preferences (e.g. "DNR always on") show up
+    /// correctly on reconnect and after server restarts.
+    pub fn apply_snapshot(&self, snap: &StateSnapshot) {
+        self.suppress_toggle_notify.set(true);
+        self.nb_btn.set_active(snap.nb_on);
+        self.dnb_btn.set_active(snap.dnb_on);
+        self.dnr_btn.set_active(snap.dnr_on);
+        self.dnf_btn.set_active(snap.dnf_on);
+        self.apf_btn.set_active(snap.apf_on);
+        self.suppress_toggle_notify.set(false);
     }
 
     pub fn widget(&self) -> &GtkBox {

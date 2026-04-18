@@ -4,6 +4,54 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Added (client 0.8.0 — phase 5a: DSP toggles + REC + decoded-text)
+- **DSP toggle row** in the client's `ctrl2-left` cell — five
+  `ToggleButton`s for `NB` / `DNB` / `DNR` / `DNF` / `APF`. `NB`
+  drives `ClientMsg::SetNb` (pre-IF, phase 3a/b, real blanker).
+  `DNB` drives `ClientMsg::SetDnb` (audio-domain, phase 3b, real
+  blanker). `DNR` / `DNF` / `APF` drive their matching messages;
+  the pipeline wires the flags through (phase 3a) but the filter
+  math is phase 3c, so those three are currently
+  click-has-no-audible-effect stubs. Tooltips spell this out.
+- **REC button** in `ctrl2-right` with a status label next to it.
+  Active state mirrors the server-authoritative
+  `ServerMsg::RecordingStatus`. Click sends `StartRecording`
+  (audio kind by default) / `StopRecording`. While active, the
+  status label shows kind / duration / KiB written, updated by
+  the server's ~1 Hz status push.
+- **Decoded-text area** in `disp2-center` — rolling 6-line log of
+  the last audio-domain decoder outputs
+  (`ServerMsg::DecodedText`). Each line tagged with decoder kind
+  so parallel decoders stay scannable. Widget is empty today
+  because no Tier-3 decoders are wired up server-side yet; the
+  plumbing is in place for when they land.
+- **`ControlBar::apply_snapshot`** — seeds all five DSP toggles
+  from the connect-time `ServerMsg::StateSnapshot` push so
+  persisted preferences ("always start with DNR on") show up
+  correctly. `suppress_toggle_notify` gates the sync so
+  `set_active` doesn't bounce back as a `SetNb` / `SetDnb` / etc.
+  to the server.
+- **`ControlBar::apply_rec_status`** — mirrors server recording
+  state into the REC button + status label, with the same
+  suppress-notify guard.
+
+### Deliberately deferred (phase 5b+)
+- **Source / device pickers.** `disp0-left` still shows the
+  existing AUD/IQ toggle only; there's no dropdown for selecting
+  among discovered devices yet. `ServerMsg::DeviceList` is still
+  printed to stderr. Phase 5b adds the picker UI and wires
+  `ClientMsg::SelectDevice`.
+- **Mode buttons** (AM / SAM / USB / LSB / CWᵤ / CWₗ / FMₙ)
+  replacing the current mode dropdown. No urgency — the dropdown
+  does the same thing.
+- **Decoder-selection buttons** (PSK / CW / MFSK / RTTY / FAX /
+  PCKT / DRM / FDV). Skipped because no audio-domain decoders
+  are wired up server-side; a button that sends
+  `SetDecoder(Ft8, true)` with no receiver would be cosmetic.
+- **WSJT-X launcher** and **CONFIG dialog**. Both need
+  side-channels (process spawn; settings pane) that don't fit
+  this commit's scope.
+
 ### Added (server 0.9.0 — phase 4: REC feature goes live)
 - **Disk recording of IQ or audio.** The phase-1
   `ClientMsg::StartRecording` / `ClientMsg::StopRecording` stubs are
