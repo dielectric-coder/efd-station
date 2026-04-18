@@ -4,6 +4,19 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Changed (server 0.6.14)
+- **s16↔f32 scaling is now symmetric on the decode path.** The USB-RX
+  audio tap (`efd-audio/usb_rx`) and the DRM null-sink reader
+  (`efd-dsp/drm`) previously divided s16 samples by 32768 while their
+  encoder counterparts multiplied by 32767, leaving a ~0.003 dB
+  asymmetry and a slight level drift across a DRM round-trip. Both
+  decode sites now use 32767, matching `f32_to_s16` exactly.
+- **CAT mutex poison is logged once.** `lock_port` in `efd-cat/poll`
+  used to emit a `warn!` on *every* acquisition after a poison event —
+  the poll task's 200 ms cadence would flood the journal. An
+  `AtomicBool` now gates a single `error!` on the healthy→poisoned
+  transition; the original panic is what the operator should read.
+
 ### Added (server 0.6.13)
 - **`efd-server --version` / `-V`.** Prints `efd-server <version>` and
   exits, without initialising tracing, loading config, or entering the

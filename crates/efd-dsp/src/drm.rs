@@ -408,7 +408,10 @@ async fn run_bridge(
                         let mut mono = Vec::with_capacity(FRAMES_PER_CHUNK);
                         for chunk in buf.chunks_exact(2) {
                             let s = i16::from_le_bytes([chunk[0], chunk[1]]);
-                            mono.push(s as f32 / 32768.0);
+                            // Match f32_to_s16's 32767 scale so a DREAM
+                            // round-trip through the null sink preserves
+                            // amplitude exactly.
+                            mono.push(s as f32 / 32767.0);
                         }
                         let blk = AudioBlock {
                             samples: mono,

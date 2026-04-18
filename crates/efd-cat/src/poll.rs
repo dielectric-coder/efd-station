@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -108,10 +109,28 @@ pub fn spawn_cat_tasks(
     (poll_handle, cmd_handle)
 }
 
+/// Tracks whether we've already logged the "mutex poisoned" transition.
+/// Keeps the poll task (200 ms cadence) from spamming the journal when a
+/// single panic poisons the port — the cause has already been recorded
+/// by the panicking task, and one line from us is enough to correlate.
+static PORT_POISON_LOGGED: AtomicBool = AtomicBool::new(false);
+
 /// Acquire the serial port mutex, recovering from poison.
+///
+/// The mutex is shared between the poll and command tasks; if either
+/// panics while holding it (e.g. a buggy parser, an OOM), the other
+/// task will see the poison. We recover the inner state and keep
+/// going — the port itself is fine — but we emit exactly one error
+/// log on the healthy→poisoned transition so the incident is
+/// correlatable with whatever panic set it off.
 fn lock_port(port: &Mutex<SerialPort>) -> std::sync::MutexGuard<'_, SerialPort> {
     port.lock().unwrap_or_else(|poisoned| {
-        warn!("CAT serial port mutex was poisoned, recovering");
+        if !PORT_POISON_LOGGED.swap(true, Ordering::Relaxed) {
+            error!(
+                "CAT serial port mutex poisoned — a prior task panicked while holding \
+                 the lock. Recovering inner state; later poison events will be silent."
+            );
+        }
         poisoned.into_inner()
     })
 }

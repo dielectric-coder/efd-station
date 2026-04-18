@@ -1,6 +1,6 @@
 # Maintainer: dielectric-coder
 pkgname=efd-server
-pkgver=0.6.13
+pkgver=0.6.14
 pkgrel=1
 pkgdesc="SDR backend for the Elad FDM-DUO transceiver"
 arch=('x86_64')

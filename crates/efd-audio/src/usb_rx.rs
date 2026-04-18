@@ -98,7 +98,10 @@ fn run_usb_rx(
         mono.clear();
         for frame in buf[..frame_size * channels as usize].chunks_exact(channels as usize) {
             let sum = frame.iter().map(|&s| s as f32).sum::<f32>();
-            mono.push(sum / (channels as f32 * 32768.0));
+            // Divide by 32767 (not 32768) so encode/decode round-trip is
+            // exact: f32 1.0 ↔ s16 32767, f32 -1.0 ↔ s16 -32767. The
+            // corresponding encoder (usb_tx.rs) also uses 32767.
+            mono.push(sum / (channels as f32 * 32767.0));
         }
 
         let block = PcmBlock { samples: mono.clone() };
