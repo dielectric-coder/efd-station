@@ -4,6 +4,12 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Added (server 0.6.13)
+- **`efd-server --version` / `-V`.** Prints `efd-server <version>` and
+  exits, without initialising tracing, loading config, or entering the
+  tokio runtime. The startup log also now carries `version=<x>` so a
+  running binary's version is visible without asking `dpkg`.
+
 ### Changed (server 0.6.12)
 - **rigctld `F` (set-frequency) sanity bounds.** The responder now
   rejects frequencies outside `[1 kHz, 99_999_999_999 Hz]` with

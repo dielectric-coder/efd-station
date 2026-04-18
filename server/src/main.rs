@@ -12,6 +12,10 @@ use tracing::{error, info, warn};
 
 use ws::handler::{ws_upgrade, AppState};
 
+/// Compile-time server version, surfaced via `--version` and the startup
+/// log so operators can match a running binary to a git tag at a glance.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Hard cap on how long we wait for pipeline tasks to drain after the
 /// HTTP server returns. Some tasks ride on `spawn_blocking` and can be
 /// stuck in a syscall; we don't want to deadlock systemd's stop on them.
@@ -19,6 +23,19 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() {
+    // Handle --version / -V before anything else: no tracing init, no
+    // config load, no tokio runtime work. Matches the behaviour of most
+    // Unix CLIs so `efd-server --version` is cheap and unambiguous.
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--version" | "-V" => {
+                println!("efd-server {VERSION}");
+                return;
+            }
+            _ => {}
+        }
+    }
+
     if let Err(e) = run().await {
         error!("efd-backend exiting with error: {e}");
         std::process::exit(1);
@@ -34,7 +51,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     let cfg = config::load();
-    info!(bind = %cfg.server.bind, port = cfg.server.port, "starting efd-backend");
+    info!(
+        version = VERSION,
+        bind = %cfg.server.bind,
+        port = cfg.server.port,
+        "starting efd-backend"
+    );
 
     if !is_loopback_bind(&cfg.server.bind) && cfg.server.auth_token.is_none() {
         warn!(
