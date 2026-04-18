@@ -25,31 +25,43 @@ use crate::sdr_params::{self, SdrParams};
 #[derive(Clone)]
 pub struct DisplayBar {
     container: GtkBox,
-    freq_label: Label,
-    mode_label: Label,
-    vfo_label: Label,
-    bw_label: Label,
+    /// Unified tuning line (`disp0-center`) — single Pango-markup
+    /// label rendering `f <freq> Hz  demod <mode>  bw <w>  RIT <r>
+    /// IF <i>` from the latest `RadioState`. Replaces the
+    /// freq/mode/VFO/BW/S-meter cluster that used to live here;
+    /// S-meter moved to `disp1-right` per the drawio.
+    tuning_line: Label,
+    /// RX/TX pill (`disp0-right`).
+    tx_label: Label,
+    /// dBm readout next to the RX/TX pill (`disp0-right`).
+    dbm_label: Label,
+    /// Source-class chips (`disp0-left`, AUD + IQ). Exactly one is
+    /// `.chip-active`; the other is `.chip-inactive` (available) or
+    /// `.chip-disabled` (unavailable per server Capabilities).
+    aud_chip: Label,
+    iq_chip: Label,
+    /// Device chips (`disp1-left`, FDM + HRF). Today only FDM is
+    /// driver-backed; HRF is always `.chip-disabled` until the
+    /// HackRF driver lands in `efd-iq`.
+    fdm_chip: Label,
+    hrf_chip: Label,
+    /// Active-source pill (`disp2-left`, e.g. `FDM IQ` green). Shows
+    /// `<device> <class>` for the current live source.
+    active_source_pill: Label,
+    /// Audio-routing indicator (`disp2-right`, e.g. `PASSTHROUGH`).
+    passthrough_pill: Label,
+    /// S-meter bar + numeric label (`disp1-right` per the drawio).
     smeter: LevelBar,
     smeter_label: Label,
-    tx_label: Label,
-    /// Currently-selected source indicator (disp0-left): "SRC: AUD" or
-    /// "SRC: IQ". Updated from the control bar's source-toggle handler.
-    selected_src_label: Label,
-    /// AUD / IQ availability indicators (disp1-left). Each is styled
-    /// either active (`.app-mode`) or greyed-out (`.app-mode-disabled`)
-    /// based on the corresponding capability flag. Both hidden when
-    /// neither source is available; `no_device_label` takes over.
-    aud_avail_label: Label,
-    iq_avail_label: Label,
-    no_device_label: Label,
     /// First DRM info line — mode/bandwidth/modulation/services.
+    /// Lives in `disp1-center` when in DRM mode.
     drm_line1: Label,
     /// Second DRM info line — SNR/WMER/lock flags.
     drm_line2: Label,
-    /// Scrolling decoded-text output (CW / RTTY / PSK / …). Shown in
-    /// `disp2-center` alongside the DRM info lines; each incoming
-    /// `DecodedText` message appends a line, keeping at most
-    /// `DECODED_LINES_KEPT` so the widget doesn't grow unbounded.
+    /// Scrolling decoded-text output (CW / RTTY / PSK / …), shown in
+    /// `disp2-center`. Each incoming `DecodedText` message appends a
+    /// line, keeping at most `DECODED_LINES_KEPT` so the widget
+    /// doesn't grow unbounded.
     decoded_text_label: Label,
     decoded_lines: Rc<RefCell<std::collections::VecDeque<String>>>,
     prev: RefCell<Option<CachedState>>,
@@ -85,113 +97,86 @@ impl DisplayBar {
 
         let (row0, disp0_left, disp0_center, disp0_right) = make_lcr_row();
         container.append(&row0);
-        let (row1, disp1_left, disp1_center, _) = make_lcr_row();
+        let (row1, disp1_left, disp1_center, disp1_right) = make_lcr_row();
         container.append(&row1);
-        let (row2, _, disp2_center, _) = make_lcr_row();
+        let (row2, disp2_left, disp2_center, disp2_right) = make_lcr_row();
         container.append(&row2);
 
-        // disp0-left: currently-selected source ("SRC: AUD" / "SRC: IQ").
-        let selected_src_label = Label::new(Some("SRC: AUD"));
-        selected_src_label.add_css_class("monospace");
-        selected_src_label.add_css_class("app-mode");
-        selected_src_label.set_width_chars(8);
-        selected_src_label.set_xalign(0.0);
-        disp0_left.append(&selected_src_label);
+        // --- disp0-left: source-class chips (AUD + IQ). ---
+        let aud_chip = make_chip("AUD");
+        let iq_chip = make_chip("IQ");
+        paint_chip(&aud_chip, ChipState::Active);
+        paint_chip(&iq_chip, ChipState::Inactive);
+        disp0_left.append(&aud_chip);
+        disp0_left.append(&iq_chip);
 
-        // disp0-center: VFO, freq, mode, BW, S-meter (center-justified).
-        let vfo_label = Label::new(Some("VFO A"));
-        vfo_label.add_css_class("monospace");
-        vfo_label.set_width_chars(5);
-        vfo_label.set_xalign(0.5);
-        disp0_center.append(&vfo_label);
+        // --- disp0-center: unified tuning line. ---
+        let tuning_line = Label::new(None);
+        tuning_line.add_css_class("monospace");
+        tuning_line.set_xalign(0.5);
+        tuning_line.set_use_markup(true);
+        tuning_line.set_markup(&fallback_tuning_markup());
+        disp0_center.append(&tuning_line);
 
-        let freq_label = Label::new(Some("--- Hz"));
-        freq_label.add_css_class("monospace");
-        freq_label.set_width_chars(16);
-        freq_label.set_xalign(0.5);
-        freq_label.set_markup("<span font='18' weight='bold'>--- Hz</span>");
-        disp0_center.append(&freq_label);
-
-        let mode_label = Label::new(Some("---"));
-        mode_label.add_css_class("monospace");
-        mode_label.set_width_chars(5);
-        mode_label.set_xalign(0.5);
-        disp0_center.append(&mode_label);
-
-        let bw_label = Label::new(Some("BW: ---"));
-        bw_label.add_css_class("monospace");
-        bw_label.set_width_chars(10);
-        bw_label.set_xalign(0.5);
-        disp0_center.append(&bw_label);
-
-        let smeter_box = GtkBox::new(Orientation::Horizontal, 4);
-        smeter_box.set_valign(Align::Center);
-        let smeter_title = Label::new(Some("S:"));
-        smeter_box.append(&smeter_title);
-
-        let smeter = LevelBar::new();
-        smeter.set_min_value(0.0);
-        smeter.set_max_value(30.0);
-        smeter.set_value(0.0);
-        smeter.set_width_request(100);
-        smeter.set_height_request(8);
-        smeter.set_valign(Align::Center);
-        smeter_box.append(&smeter);
-
-        let smeter_label = Label::new(Some("S0"));
-        smeter_label.add_css_class("monospace");
-        smeter_label.set_width_chars(6);
-        smeter_label.set_xalign(0.5);
-        smeter_box.append(&smeter_label);
-        disp0_center.append(&smeter_box);
-
-        // disp0-right: RX/TX indicator, right-justified.
+        // --- disp0-right: RX/TX pill + dBm. ---
         let tx_label = Label::new(Some("RX"));
         tx_label.add_css_class("monospace");
         tx_label.add_css_class("tx-rx-rx");
         tx_label.set_width_chars(2);
-        tx_label.set_xalign(1.0);
+        tx_label.set_xalign(0.5);
         tx_label.set_halign(Align::End);
         disp0_right.append(&tx_label);
 
-        // disp1-left: two availability indicators (AUD + IQ), plus a
-        // NO-DEVICE label shown when neither source is present.
-        let aud_avail_label = Label::new(Some("AUD"));
-        aud_avail_label.add_css_class("monospace");
-        aud_avail_label.add_css_class("app-mode");
-        aud_avail_label.set_xalign(0.0);
-        disp1_left.append(&aud_avail_label);
+        let dbm_label = Label::new(Some("---"));
+        dbm_label.add_css_class("monospace");
+        dbm_label.set_xalign(1.0);
+        dbm_label.set_halign(Align::End);
+        disp0_right.append(&dbm_label);
 
-        let iq_avail_label = Label::new(Some("IQ"));
-        iq_avail_label.add_css_class("monospace");
-        iq_avail_label.add_css_class("app-mode");
-        iq_avail_label.set_xalign(0.0);
-        disp1_left.append(&iq_avail_label);
+        // --- disp1-left: device chips (FDM + HRF). ---
+        // Today only FDM is driver-backed; HRF is disabled until the
+        // HackRF driver lands in efd-iq.
+        let fdm_chip = make_chip("FDM");
+        let hrf_chip = make_chip("HRF");
+        paint_chip(&fdm_chip, ChipState::Active);
+        paint_chip(&hrf_chip, ChipState::Disabled);
+        disp1_left.append(&fdm_chip);
+        disp1_left.append(&hrf_chip);
 
-        let no_device_label = Label::new(Some("NO-DEVICE"));
-        no_device_label.add_css_class("monospace");
-        no_device_label.add_css_class("app-mode-warn");
-        no_device_label.set_xalign(0.0);
-        no_device_label.set_visible(false);
-        disp1_left.append(&no_device_label);
-
-        // disp1-center / disp2-center: DRM info lines (center-justified).
-        // Mode-agnostic rows — today carry DRM decoder status; future
-        // modes (RIT/XIT/DNR/DNF/NB readouts, etc.) reuse them via
-        // `update_drm` / `clear_extras` without widget-tree changes.
+        // --- disp1-center: DRM-or-status info line. ---
         let drm_line1 = Label::new(None);
         drm_line1.add_css_class("monospace");
         drm_line1.set_xalign(0.5);
         disp1_center.append(&drm_line1);
 
+        // --- disp1-right: S-meter + numeric readout. ---
+        let smeter = LevelBar::new();
+        smeter.set_min_value(0.0);
+        smeter.set_max_value(30.0);
+        smeter.set_value(0.0);
+        smeter.set_width_request(110);
+        smeter.set_height_request(10);
+        smeter.set_valign(Align::Center);
+        disp1_right.append(&smeter);
+
+        let smeter_label = Label::new(Some("S0"));
+        smeter_label.add_css_class("monospace");
+        smeter_label.set_width_chars(5);
+        smeter_label.set_xalign(1.0);
+        disp1_right.append(&smeter_label);
+
+        // --- disp2-left: active-source pill. ---
+        let active_source_pill = Label::new(Some("— —"));
+        active_source_pill.add_css_class("monospace");
+        active_source_pill.add_css_class("chip-source");
+        disp2_left.append(&active_source_pill);
+
+        // --- disp2-center: DRM line 2 + decoded-text log. ---
         let drm_line2 = Label::new(None);
         drm_line2.add_css_class("monospace");
         drm_line2.set_xalign(0.5);
         disp2_center.append(&drm_line2);
 
-        // disp2-center also carries the decoded-text log (phase 5a).
-        // Stays below drm_line2 so DRM sessions aren't crowded;
-        // renders empty until the first `DecodedText` arrives.
         let decoded_text_label = Label::new(None);
         decoded_text_label.add_css_class("monospace");
         decoded_text_label.set_xalign(0.5);
@@ -202,19 +187,26 @@ impl DisplayBar {
             DECODED_LINES_KEPT,
         )));
 
+        // --- disp2-right: audio-routing indicator (PASSTHROUGH /
+        // SWDEMOD). Text updated by `set_passthrough`.
+        let passthrough_pill = Label::new(Some("SWDEMOD"));
+        passthrough_pill.add_css_class("monospace");
+        passthrough_pill.add_css_class("chip-passthrough");
+        disp2_right.append(&passthrough_pill);
+
         Self {
             container,
-            freq_label,
-            mode_label,
-            vfo_label,
-            bw_label,
+            tuning_line,
+            tx_label,
+            dbm_label,
+            aud_chip,
+            iq_chip,
+            fdm_chip,
+            hrf_chip,
+            active_source_pill,
+            passthrough_pill,
             smeter,
             smeter_label,
-            tx_label,
-            selected_src_label,
-            aud_avail_label,
-            iq_avail_label,
-            no_device_label,
             drm_line1,
             drm_line2,
             decoded_text_label,
@@ -246,44 +238,110 @@ impl DisplayBar {
         &self.container
     }
 
-    /// Update the `SRC: AUD` / `SRC: IQ` indicator in disp0-left.
+    /// Paint the AUD / IQ source-class chips in `disp0-left`. The
+    /// chosen class becomes `.chip-active`, the other drops to
+    /// `.chip-inactive`.
     pub fn set_selected_source(&self, is_iq: bool) {
-        self.selected_src_label
-            .set_text(if is_iq { "SRC: IQ" } else { "SRC: AUD" });
+        paint_chip(
+            &self.aud_chip,
+            if is_iq { ChipState::Inactive } else { ChipState::Active },
+        );
+        paint_chip(
+            &self.iq_chip,
+            if is_iq { ChipState::Active } else { ChipState::Inactive },
+        );
     }
 
-    /// Paint the AUD/IQ availability indicators in disp1-left.
-    /// Each side is greyed out (`.app-mode-disabled`) when its
-    /// capability flag is false. When both are false, both are hidden
-    /// and `NO-DEVICE` appears instead.
+    /// Paint source-class availability onto the chip states. A
+    /// class that's not available goes to `.chip-disabled`
+    /// regardless of the selected-source state.
     pub fn set_source_availability(&self, has_aud: bool, has_iq: bool) {
-        let any = has_aud || has_iq;
-        self.aud_avail_label.set_visible(any);
-        self.iq_avail_label.set_visible(any);
-        self.no_device_label.set_visible(!any);
-        if !any {
-            return;
+        if !has_aud {
+            paint_chip(&self.aud_chip, ChipState::Disabled);
         }
-        apply_avail_style(&self.aud_avail_label, has_aud);
-        apply_avail_style(&self.iq_avail_label, has_iq);
+        if !has_iq {
+            paint_chip(&self.iq_chip, ChipState::Disabled);
+        }
     }
 
-    /// Optimistic frequency update (before radio confirms).
+    /// Paint the active device chip (`disp1-left`). Today only FDM
+    /// is driver-backed; other kinds come online as `efd-iq` gains
+    /// drivers.
+    pub fn set_active_device(&self, kind: efd_proto::SourceKind) {
+        use efd_proto::SourceKind as K;
+        let (fdm, hrf) = match kind {
+            K::FdmDuo => (ChipState::Active, ChipState::Disabled),
+            K::HackRf => (ChipState::Inactive, ChipState::Active),
+            _ => (ChipState::Inactive, ChipState::Disabled),
+        };
+        paint_chip(&self.fdm_chip, fdm);
+        paint_chip(&self.hrf_chip, hrf);
+    }
+
+    /// Update the disp2-left active-source pill (e.g. `FDM IQ`).
+    pub fn set_active_source_label(&self, text: &str) {
+        self.active_source_pill.set_text(text);
+    }
+
+    /// Update the disp2-right audio-routing indicator text.
+    pub fn set_passthrough(&self, text: &str) {
+        self.passthrough_pill.set_text(text);
+    }
+
+    /// Optimistic frequency update (before radio confirms). Keeps
+    /// the tuning line in sync with the user's typed value while
+    /// we wait for the CAT poll to confirm.
     pub fn set_freq_immediate(&self, hz: u64) {
-        let freq = format_freq(hz);
-        self.freq_label
-            .set_markup(&format!("<span font='18' weight='bold'>{freq}</span>"));
+        let mut prev = self.prev.borrow_mut();
+        // Apply the freq into the cached state so the next `update`
+        // doesn't clobber it with a stale value.
+        let composed = match prev.as_mut() {
+            Some(s) => {
+                s.freq_hz = hz;
+                s.clone()
+            }
+            None => CachedState {
+                freq_hz: hz,
+                mode: "USB".into(),
+                vfo: "VFO A".into(),
+                filter_bw: String::new(),
+                s_reading: 0,
+                tx: false,
+            },
+        };
+        *prev = Some(composed);
+        // Re-render tuning_line with current cached fields.
+        self.tuning_line.set_markup(&self.current_tuning_markup());
+    }
+
+    /// Build a tuning-markup string from the cached state (used by
+    /// `set_freq_immediate` so we can re-render without an incoming
+    /// `RadioState`).
+    fn current_tuning_markup(&self) -> String {
+        let prev = self.prev.borrow();
+        match prev.as_ref() {
+            Some(s) => {
+                let freq = format_freq_spaced(s.freq_hz);
+                format!(
+                    "<i>f</i> <span size='x-large'><b>{freq}</b></span> Hz   \
+                     demod <b>{}</b>   <i>bw</i> <b>{}</b>   <i>RIT</i> <b>0</b> Hz   <i>IF</i> <b>0</b> Hz",
+                    s.mode,
+                    if s.filter_bw.is_empty() { "—".into() } else { s.filter_bw.clone() },
+                )
+            }
+            None => fallback_tuning_markup(),
+        }
     }
 
     pub fn update(&self, state: &RadioState) {
         let s_reading = db_to_s_reading(state.s_meter_db);
-        let mode_str = format!("{:?}", state.mode);
+        let mode_str = mode_markup(state.mode).to_string();
         let vfo_str = format!("VFO {:?}", state.vfo);
 
         let new_state = CachedState {
             freq_hz: state.freq_hz,
-            mode: mode_str.clone(),
-            vfo: vfo_str.clone(),
+            mode: mode_str,
+            vfo: vfo_str,
             filter_bw: state.filter_bw.clone(),
             s_reading: (s_reading * 10.0) as u16,
             tx: state.tx,
@@ -294,16 +352,16 @@ impl DisplayBar {
             return;
         }
         *prev = Some(new_state);
+        drop(prev);
 
-        let freq = format_freq(state.freq_hz);
-        self.freq_label
-            .set_markup(&format!("<span font='18' weight='bold'>{freq}</span>"));
-        self.mode_label.set_text(&mode_str);
-        self.vfo_label.set_text(&vfo_str);
-        self.bw_label
-            .set_text(&format!("BW: {}", state.filter_bw));
+        // Unified tuning line (disp0-center).
+        self.tuning_line.set_markup(&format_tuning_markup(state));
+
+        // S-meter + dBm pills (disp0-right / disp1-right).
         self.smeter.set_value(s_reading as f64);
         self.smeter_label.set_text(&s_reading_to_string(s_reading));
+        self.dbm_label
+            .set_text(&format!("{:.0} dBm", state.s_meter_db));
 
         if state.tx {
             self.tx_label.remove_css_class("tx-rx-rx");
@@ -1030,6 +1088,23 @@ impl ControlBar {
         // AUD / IQ availability indicators in the display bar.
         self.display_bar
             .set_source_availability(caps.has_usb_audio, caps.has_iq);
+        // Device chips + active-source pill for disp1-left / disp2-left
+        // come from Capabilities. `set_passthrough` follows the audio
+        // routing — SWDEMOD when the IQ chain produces audio,
+        // PASSTHROUGH when the radio's USB audio goes straight through.
+        self.display_bar.set_active_device(caps.source);
+        let class_tag = if caps.has_iq && !caps.has_usb_audio {
+            "IQ"
+        } else if caps.has_usb_audio && !caps.has_iq {
+            "AUD"
+        } else {
+            "IQ"
+        };
+        self.display_bar
+            .set_active_source_label(&format!("{:?} {}", caps.source, class_tag));
+        self.display_bar.set_passthrough(
+            if caps.has_usb_audio && !caps.has_iq { "PASSTHROUGH" } else { "SWDEMOD" },
+        );
 
         // DRM flip toggle — sync initial state from the server's
         // advertised value (usually seeded from its config.toml).
@@ -1163,16 +1238,114 @@ fn tune_by_step(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Toggle a label between the active (blue `.app-mode`) and inactive
-/// (grey `.app-mode-disabled`) styles. Used by the AUD / IQ
-/// availability indicators in the display bar.
-fn apply_avail_style(label: &Label, available: bool) {
-    if available {
-        label.add_css_class("app-mode");
-        label.remove_css_class("app-mode-disabled");
+/// Visual state for a source / device chip in the display bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChipState {
+    /// Currently-selected — bright blue `.chip-active`.
+    Active,
+    /// Available but not selected — dim blue `.chip-inactive`.
+    Inactive,
+    /// Present in config but not usable on this backend (HackRF
+    /// button when the driver isn't wired up) — grey
+    /// `.chip-disabled`.
+    Disabled,
+}
+
+fn make_chip(label: &str) -> Label {
+    let l = Label::new(Some(label));
+    l.add_css_class("monospace");
+    l
+}
+
+fn paint_chip(label: &Label, state: ChipState) {
+    for class in ["chip-active", "chip-inactive", "chip-disabled"] {
+        label.remove_css_class(class);
+    }
+    match state {
+        ChipState::Active => label.add_css_class("chip-active"),
+        ChipState::Inactive => label.add_css_class("chip-inactive"),
+        ChipState::Disabled => label.add_css_class("chip-disabled"),
+    }
+}
+
+/// Build the initial tuning-line markup shown before the first
+/// `RadioState` arrives. Matches `format_tuning_markup`'s shape so
+/// the layout doesn't jump when the first update lands.
+fn fallback_tuning_markup() -> String {
+    "<i>f</i> <span size='x-large'><b>—</b></span> Hz   demod <b>—</b>   \
+     <i>bw</i> <b>—</b> Hz   <i>RIT</i> <b>0</b> Hz   <i>IF</i> <b>0</b> Hz"
+        .to_string()
+}
+
+/// Render a `RadioState` into a Pango-markup string for
+/// `tuning_line`. Matches the drawio IQ-NO-DRM `disp0-center`
+/// format.
+fn format_tuning_markup(state: &RadioState) -> String {
+    let freq = format_freq_spaced(state.freq_hz);
+    let mode = mode_markup(state.mode);
+    let bw = state
+        .filter_bw_hz
+        .map(|hz| format_bw_hz(hz))
+        .unwrap_or_else(|| state.filter_bw.clone());
+    let rit = if state.rit_on { state.rit_hz } else { 0 };
+    let if_off = state.if_offset_hz;
+    format!(
+        "<i>f</i> <span size='x-large'><b>{freq}</b></span> Hz   \
+         demod <b>{mode}</b>   \
+         <i>bw</i> <b>{bw}</b>   \
+         <i>RIT</i> <b>{rit:+}</b> Hz   \
+         <i>IF</i> <b>{if_off:+}</b> Hz"
+    )
+}
+
+/// Mode → Pango-markup string with subscripts for sideband
+/// variants. `CW` is CW-upper, `CWR` is CW-lower; narrow FM gets
+/// the drawio's `FMₙ` subscript. `SAMU` / `SAML` follow the same
+/// convention as `CW` / `CWR`.
+fn mode_markup(mode: Mode) -> &'static str {
+    match mode {
+        Mode::AM => "AM",
+        Mode::SAM => "SAM",
+        Mode::SAMU => "SAM<sub>u</sub>",
+        Mode::SAML => "SAM<sub>l</sub>",
+        Mode::DSB => "DSB",
+        Mode::LSB => "LSB",
+        Mode::USB => "USB",
+        Mode::CW => "CW<sub>u</sub>",
+        Mode::CWR => "CW<sub>l</sub>",
+        Mode::FM => "FM<sub>n</sub>",
+        Mode::DRM => "DRM",
+        Mode::Unknown => "—",
+    }
+}
+
+/// Format a Hz value as grouped digits with spaces, matching the
+/// drawio's `14 200 000` style rather than the comma/dot format.
+fn format_freq_spaced(hz: u64) -> String {
+    let raw = hz.to_string();
+    let len = raw.len();
+    let mut out = String::with_capacity(len + len / 3);
+    for (i, ch) in raw.chars().enumerate() {
+        if i > 0 && (len - i) % 3 == 0 {
+            out.push(' ');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Format a parsed bandwidth in Hz for the tuning line. Sub-kHz
+/// values render as e.g. `500 Hz`; kHz values as `2.4 kHz`.
+fn format_bw_hz(hz: f64) -> String {
+    if hz >= 1000.0 {
+        let k = hz / 1000.0;
+        if (k - k.round()).abs() < 0.05 {
+            format!("{:.0} kHz", k)
+        } else {
+            format!("{:.1} kHz", k)
+        }
     } else {
-        label.remove_css_class("app-mode");
-        label.add_css_class("app-mode-disabled");
+        format!("{:.0} Hz", hz)
     }
 }
 
@@ -1372,20 +1545,6 @@ fn build_decoder_buttons(
     out
 }
 
-fn format_freq(hz: u64) -> String {
-    if hz >= 1_000_000 {
-        let mhz = hz / 1_000_000;
-        let khz = (hz % 1_000_000) / 1_000;
-        let remainder = hz % 1_000;
-        format!("{mhz}.{khz:03}.{remainder:03} Hz")
-    } else if hz >= 1_000 {
-        let khz = hz / 1_000;
-        let remainder = hz % 1_000;
-        format!("{khz}.{remainder:03} Hz")
-    } else {
-        format!("{hz} Hz")
-    }
-}
 
 fn db_to_s_reading(db: f32) -> f32 {
     if db <= -127.0 {

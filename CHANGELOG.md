@@ -4,6 +4,58 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Changed (client 0.8.2 — phase 5c: display-bar layout matches drawio IQ-NO-DRM)
+- **Unified tuning line** in `disp0-center`. The split
+  vfo/freq/mode/bw/S-meter cluster collapses to a single Pango-
+  markup label rendering
+  `f 14 200 000 Hz   demod CWᵤ   bw 2.4 kHz   RIT +0 Hz   IF +0 Hz`
+  from the latest `RadioState`. Freq uses three-digit grouping with
+  spaces (matches drawio) rather than dots. Mode subscripts
+  (CWᵤ / CWₗ / SAMᵤ / SAMₗ / FMₙ) render via
+  Pango `<sub>` tags.
+- **Source-class chips** in `disp0-left`: two blue pills, `AUD`
+  and `IQ`. Active class gets `.chip-active` (bright blue); other
+  class is `.chip-inactive` (dim blue) when available or
+  `.chip-disabled` (grey) when the server doesn't advertise it.
+- **Device chips** in `disp1-left`: `FDM` and `HRF`. Only the
+  driver-backed kind lights up — HRF stays `.chip-disabled`
+  today (no HackRF driver in `efd-iq` yet).
+- **Active-source pill** in `disp2-left` (green `chip-source`)
+  showing e.g. `FdmDuo IQ` from the server's `Capabilities`.
+- **Audio-routing indicator** in `disp2-right` (grey
+  `chip-passthrough` pill): `PASSTHROUGH` when the radio's USB
+  audio goes straight out, `SWDEMOD` when the IQ chain produces
+  audio.
+- **S-meter relocated** to `disp1-right` per the drawio (was
+  inline with tuning text in disp0-center). S-meter bar gets a
+  wider, taller rendering.
+- **dBm readout** added to `disp0-right` next to the RX/TX pill.
+- **Pill CSS palette** in the client's stylesheet:
+  `.chip-active` / `.chip-inactive` / `.chip-disabled` for
+  source+device chips, `.chip-source` green for the live-source
+  pill, `.chip-passthrough` grey for the audio-routing pill.
+- **`DisplayBar::set_active_device`**, **`set_active_source_label`**,
+  **`set_passthrough`** new methods, called from
+  `ControlBar::apply_capabilities` so the server's `Capabilities`
+  drives the chip state.
+- **`DisplayBar::set_freq_immediate`** re-renders the tuning line
+  from the cached state instead of writing a dedicated freq label,
+  so optimistic typed frequencies still look right in the unified
+  layout.
+
+### Not in this commit (phase 5d targets)
+- **SRC / DEV** dedicated buttons in `ctrl0-left` and click-to-
+  tune yellow chips (`f`, `bw`, `rit`, `IF`) in `ctrl0-center`.
+  Current tune-entry + step-dropdown + ± buttons still provide
+  the functionality, just not in the chip-styled form.
+- **Real WSJT-X launcher** + **CONFIG dialog** (placeholders
+  today).
+- **Dynamic device list** — `disp1-left` hard-codes `FDM` / `HRF`;
+  future phase reads `DeviceList` and shows the real enumeration.
+- **SNR / DSP-status text** in `disp1-center` when not in DRM
+  mode. `drm_line1` is reused but only populated under
+  `Mode::DRM`.
+
 ### Changed (client 0.8.1 — phase 5b: control-bar layout matches drawio IQ-NO-DRM)
 - **Control-bar rows reshuffled** to match
   `docs/client-sdr-UI.drawio` layer `IQ-NO-DRM`:

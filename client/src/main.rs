@@ -136,6 +136,54 @@ fn load_css() {
             color: #000;
             font-weight: bold;
         }
+        /* Display-bar chip palette, matching drawio IQ-NO-DRM. */
+        /* Blue source / device pills (AUD / IQ / FDM / HRF). */
+        .chip-active {
+            background: #1ba1e2;
+            color: #fff;
+            font-weight: bold;
+            border-radius: 10px;
+            padding: 1px 10px;
+            min-width: 30px;
+        }
+        .chip-inactive {
+            background: #bbdefb;
+            color: #0d47a1;
+            border-radius: 10px;
+            padding: 1px 10px;
+            min-width: 30px;
+        }
+        .chip-disabled {
+            background: #eeeeee;
+            color: #9e9e9e;
+            border-radius: 10px;
+            padding: 1px 10px;
+            min-width: 30px;
+        }
+        /* Green active-source pill (e.g. FDM IQ). */
+        .chip-source {
+            background: #60a917;
+            color: #fff;
+            font-weight: bold;
+            border-radius: 4px;
+            padding: 2px 10px;
+        }
+        /* Gray audio-routing indicator (PASSTHROUGH / SWDEMOD). */
+        .chip-passthrough {
+            background: #647687;
+            color: #fff;
+            border-radius: 4px;
+            padding: 2px 10px;
+            font-weight: bold;
+        }
+        /* Yellow tuning chip (f / bw / rit / IF readouts). */
+        .chip-tuning {
+            background: #fff2cc;
+            color: #000;
+            border: 1px solid #d6b656;
+            border-radius: 10px;
+            padding: 1px 8px;
+        }
         ",
     );
     gtk4::style_context_add_provider_for_display(
