@@ -5,7 +5,7 @@ use efd_proto::{AudioChunk, AudioSource, Capabilities, CatCommand, FftBins, Radi
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::config::Config;
 
@@ -431,8 +431,17 @@ impl Pipeline {
         // Port A fronts the FDM-DUO; bound whenever hardware CAT is present.
         // Port B fronts the software demod; bound whenever IQ is available.
         if source_caps.has_hardware_cat {
-            match config.cat.responder_fdmduo_bind.parse() {
+            match config.cat.responder_fdmduo_bind.parse::<std::net::SocketAddr>() {
                 Ok(bind_addr) => {
+                    if !bind_addr.ip().is_loopback() {
+                        warn!(
+                            bind = %bind_addr,
+                            "rigctld fdmduo-front is on a non-loopback interface and has NO auth. \
+                             Any host on this network can retune the radio. \
+                             Prefer 127.0.0.1 and reach it from the client via: \
+                             ssh -L 4532:localhost:4532 <pi>"
+                        );
+                    }
                     let cfg = efd_cat::ResponderConfig {
                         bind_addr,
                         label: "fdmduo-front",
@@ -460,8 +469,17 @@ impl Pipeline {
             }
         }
         if source_caps.has_iq {
-            match config.cat.responder_demod_bind.parse() {
+            match config.cat.responder_demod_bind.parse::<std::net::SocketAddr>() {
                 Ok(bind_addr) => {
+                    if !bind_addr.ip().is_loopback() {
+                        warn!(
+                            bind = %bind_addr,
+                            "rigctld demod-front is on a non-loopback interface and has NO auth. \
+                             Any host on this network can retune the demod. \
+                             Prefer 127.0.0.1 and reach it from the client via: \
+                             ssh -L 4533:localhost:4533 <pi>"
+                        );
+                    }
                     let cfg = efd_cat::ResponderConfig {
                         bind_addr,
                         label: "demod-front",

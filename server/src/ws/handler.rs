@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use axum::extract::ws::{WebSocket, WebSocketUpgrade};
-use axum::extract::State;
-use axum::response::IntoResponse;
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
+use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::pipeline::Pipeline;
 
@@ -13,14 +15,38 @@ use crate::pipeline::Pipeline;
 pub struct AppState {
     pub pipeline: Pipeline,
     pub cancel: CancellationToken,
+    /// Optional shared secret required from clients as `?token=<value>`.
+    /// `None` disables the check — only safe when bound to loopback.
+    pub auth_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct AuthParams {
+    token: Option<String>,
 }
 
 /// Axum handler: upgrade GET /ws to WebSocket.
 pub async fn ws_upgrade(
     ws: WebSocketUpgrade,
+    Query(params): Query<AuthParams>,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_client(socket, state))
+) -> Response {
+    if let Some(expected) = &state.auth_token {
+        let got = params.token.as_deref().unwrap_or("");
+        if !ct_eq(got.as_bytes(), expected.as_bytes()) {
+            warn!("WS upgrade rejected: bad or missing token");
+            return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+        }
+    }
+    ws.on_upgrade(move |socket| handle_client(socket, state)).into_response()
+}
+
+// Constant-time byte comparison. Avoids early-exit timing leaks in token check.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Per-client handler: split socket, spawn downstream + upstream tasks.

@@ -4,6 +4,19 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Optional WebSocket auth via shared token.** New
+  `[server] auth_token` in `config.toml`; when set, clients must pass
+  `?token=<value>` on the WS URL or the upgrade is rejected with 401
+  (constant-time compare to avoid timing leaks). When unset the server
+  is unauthenticated as before — intended for loopback or trusted
+  LAN. Startup emits a loud warning if `bind` is non-loopback and no
+  token is configured. The rigctld responders (fdmduo-front,
+  demod-front) also warn when bound to a non-loopback address, since
+  they have no auth layer — recommended pattern is to keep them on
+  `127.0.0.1` and SSH-forward from the client
+  (`ssh -L 4532:localhost:4532 pi@cm5`).
+
 ### Changed
 - **DRM bridge simpler in file-test mode.** `spawn_drm_bridge` now takes
   a `DrmInput` enum (`AudioBroadcast` or `File`). The `File` variant

@@ -18,6 +18,9 @@ pub struct Config {
 pub struct ServerConfig {
     pub bind: String,
     pub port: u16,
+    /// Shared secret. Clients must pass `?token=<value>` in the WS URL.
+    /// `None` disables auth — only safe when `bind` is loopback.
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +102,7 @@ impl Default for ServerConfig {
         Self {
             bind: "0.0.0.0".into(),
             port: 8080,
+            auth_token: None,
         }
     }
 }
@@ -203,6 +207,7 @@ fn log_effective(cfg: &Config) {
     tracing::info!(
         bind = %cfg.server.bind,
         port = cfg.server.port,
+        auth = if cfg.server.auth_token.is_some() { "set" } else { "none" },
         "effective server config"
     );
     tracing::info!(

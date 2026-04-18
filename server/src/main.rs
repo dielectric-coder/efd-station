@@ -36,6 +36,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cfg = config::load();
     info!(bind = %cfg.server.bind, port = cfg.server.port, "starting efd-backend");
 
+    if !is_loopback_bind(&cfg.server.bind) && cfg.server.auth_token.is_none() {
+        warn!(
+            bind = %cfg.server.bind,
+            "WS is bound to a non-loopback interface with NO auth token. \
+             Anyone reachable on this network can control the radio. \
+             Set [server] auth_token in config.toml and pass ?token=... from clients."
+        );
+    }
+
     let cancel = CancellationToken::new();
     let pipeline = match std::env::var("EFD_DRM_FILE_TEST").ok() {
         Some(path) if !path.is_empty() => {
@@ -48,6 +57,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = Arc::new(AppState {
         pipeline,
         cancel: cancel.clone(),
+        auth_token: cfg.server.auth_token.clone(),
     });
 
     let app = Router::new()
@@ -95,6 +105,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     Ok(())
+}
+
+fn is_loopback_bind(bind: &str) -> bool {
+    // Accept literal forms; also parse IPs to catch exotic loopback addrs
+    // (127.0.0.0/8, ::1). Unparseable strings (e.g. "localhost") fall back
+    // to the literal check.
+    matches!(bind, "localhost" | "127.0.0.1" | "::1")
+        || bind
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
 }
 
 async fn shutdown_signal(cancel: CancellationToken) {
