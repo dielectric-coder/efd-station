@@ -304,16 +304,8 @@ fn build_ui(app: &Application, url: &str) {
                 ServerMsg::Error(err) => {
                     eprintln!("server error: [{}] {}", err.code, err.message);
                 }
-                // Phase-5a wiring: phase-1 stubs become real UI
-                // handlers. DeviceList stays eprintln-only until the
-                // source/device-picker UI lands (phase 5b).
                 ServerMsg::DeviceList(list) => {
-                    eprintln!(
-                        "device list: audio={} iq={} active={:?}",
-                        list.audio_devices.len(),
-                        list.iq_devices.len(),
-                        list.active,
-                    );
+                    display_bar2.set_device_list(&list);
                 }
                 ServerMsg::DecodedText(dt) => {
                     display_bar2.push_decoded(dt.decoder, &dt.text);

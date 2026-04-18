@@ -40,11 +40,13 @@ pub struct DisplayBar {
     /// `.chip-disabled` (unavailable per server Capabilities).
     aud_chip: Label,
     iq_chip: Label,
-    /// Device chips (`disp1-left`, FDM + HRF). Today only FDM is
-    /// driver-backed; HRF is always `.chip-disabled` until the
-    /// HackRF driver lands in `efd-iq`.
-    fdm_chip: Label,
-    hrf_chip: Label,
+    /// Device chips (`disp1-left`) — rebuilt from the server's
+    /// `DeviceList`. `disp1_left_box` is held so
+    /// `set_device_list` can clear + repopulate; `device_chips`
+    /// stores `(DeviceId, Label)` pairs so `set_active_device`
+    /// can paint the right one.
+    disp1_left_box: GtkBox,
+    device_chips: Rc<RefCell<Vec<(efd_proto::DeviceId, Label)>>>,
     /// Active-source pill (`disp2-left`, e.g. `FDM IQ` green). Shows
     /// `<device> <class>` for the current live source.
     active_source_pill: Label,
@@ -56,6 +58,16 @@ pub struct DisplayBar {
     /// First DRM info line — mode/bandwidth/modulation/services.
     /// Lives in `disp1-center` when in DRM mode.
     drm_line1: Label,
+    /// Non-DRM status line (`disp1-center`) — `SNR … · DNR off
+    /// DNF off APF off · decode …`. Mutually exclusive with
+    /// `drm_line1`: one's visible while the other's hidden, driven
+    /// by the current mode.
+    status_line: Label,
+    /// Cached DSP-flag + decoder state written by `apply_snapshot`
+    /// and read by `refresh_status_line` — lets us compose the
+    /// status line whenever either `RadioState` or the snapshot
+    /// changes.
+    cached_dsp: Rc<RefCell<StatusLineCache>>,
     /// Second DRM info line — SNR/WMER/lock flags.
     drm_line2: Label,
     /// Scrolling decoded-text output (CW / RTTY / PSK / …), shown in
@@ -81,6 +93,20 @@ struct CachedState {
     filter_bw: String,
     s_reading: u16,
     tx: bool,
+}
+
+/// Fields `refresh_status_line` needs that don't live on the
+/// incoming `RadioState` — the DSP flags and enabled decoders are
+/// snapshot-driven, the SNR comes from the radio state.
+#[derive(Clone, Default)]
+struct StatusLineCache {
+    snr_db: Option<f32>,
+    nb_on: bool,
+    dnr_on: bool,
+    dnf_on: bool,
+    apf_on: bool,
+    decoders: Vec<efd_proto::DecoderKind>,
+    in_drm: bool,
 }
 
 impl DisplayBar {
@@ -133,21 +159,30 @@ impl DisplayBar {
         dbm_label.set_halign(Align::End);
         disp0_right.append(&dbm_label);
 
-        // --- disp1-left: device chips (FDM + HRF). ---
-        // Today only FDM is driver-backed; HRF is disabled until the
-        // HackRF driver lands in efd-iq.
-        let fdm_chip = make_chip("FDM");
-        let hrf_chip = make_chip("HRF");
-        paint_chip(&fdm_chip, ChipState::Active);
-        paint_chip(&hrf_chip, ChipState::Disabled);
-        disp1_left.append(&fdm_chip);
-        disp1_left.append(&hrf_chip);
+        // --- disp1-left: device chips, rebuilt from DeviceList. ---
+        // Starts empty; `set_device_list` populates on first
+        // `ServerMsg::DeviceList`. Until then the cell is blank
+        // rather than lying about what's available.
+        let disp1_left_box = disp1_left.clone();
+        let device_chips: Rc<RefCell<Vec<(efd_proto::DeviceId, Label)>>> =
+            Rc::new(RefCell::new(Vec::new()));
 
-        // --- disp1-center: DRM-or-status info line. ---
+        // --- disp1-center: DRM info (drm_line1) XOR non-DRM status
+        // (status_line). Only one is visible at a time; the current
+        // mode drives which.
         let drm_line1 = Label::new(None);
         drm_line1.add_css_class("monospace");
         drm_line1.set_xalign(0.5);
+        drm_line1.set_visible(false);
         disp1_center.append(&drm_line1);
+
+        let status_line = Label::new(None);
+        status_line.add_css_class("monospace");
+        status_line.set_xalign(0.5);
+        status_line.set_use_markup(true);
+        disp1_center.append(&status_line);
+
+        let cached_dsp = Rc::new(RefCell::new(StatusLineCache::default()));
 
         // --- disp1-right: S-meter + numeric readout. ---
         let smeter = LevelBar::new();
@@ -201,13 +236,15 @@ impl DisplayBar {
             dbm_label,
             aud_chip,
             iq_chip,
-            fdm_chip,
-            hrf_chip,
+            disp1_left_box,
+            device_chips,
             active_source_pill,
             passthrough_pill,
             smeter,
             smeter_label,
             drm_line1,
+            status_line,
+            cached_dsp,
             drm_line2,
             decoded_text_label,
             decoded_lines,
@@ -264,18 +301,66 @@ impl DisplayBar {
         }
     }
 
-    /// Paint the active device chip (`disp1-left`). Today only FDM
-    /// is driver-backed; other kinds come online as `efd-iq` gains
-    /// drivers.
+    /// Paint the active device chip (`disp1-left`). One chip in the
+    /// current `device_chips` list matches the given kind by kind —
+    /// if we ever have multiple devices of the same kind, the first
+    /// match wins. More specific matching (by `DeviceId.id` as well)
+    /// is a phase-5e concern once the picker UI exists.
     pub fn set_active_device(&self, kind: efd_proto::SourceKind) {
-        use efd_proto::SourceKind as K;
-        let (fdm, hrf) = match kind {
-            K::FdmDuo => (ChipState::Active, ChipState::Disabled),
-            K::HackRf => (ChipState::Inactive, ChipState::Active),
-            _ => (ChipState::Inactive, ChipState::Disabled),
-        };
-        paint_chip(&self.fdm_chip, fdm);
-        paint_chip(&self.hrf_chip, hrf);
+        for (dev, chip) in self.device_chips.borrow().iter() {
+            let state = if dev.kind == kind {
+                ChipState::Active
+            } else {
+                ChipState::Inactive
+            };
+            paint_chip(chip, state);
+        }
+    }
+
+    /// Rebuild the `disp1-left` chip row from a server-pushed
+    /// `DeviceList`. Clears whatever was there, then adds a chip per
+    /// discovered device with its `device_short_label` text.
+    /// Chips for the active source get `.chip-active`, everything
+    /// else gets `.chip-inactive`. Called from the WS dispatch on
+    /// every `ServerMsg::DeviceList`.
+    pub fn set_device_list(&self, list: &efd_proto::DeviceList) {
+        // Drop existing chip widgets from the container first.
+        for (_, chip) in self.device_chips.borrow().iter() {
+            self.disp1_left_box.remove(chip);
+        }
+        self.device_chips.borrow_mut().clear();
+
+        let active_kind = list.active.as_ref().map(|d| d.kind);
+        // Iterate iq then audio so IQ-class devices always sort
+        // before audio-class in the UI.
+        let ordered = list
+            .iq_devices
+            .iter()
+            .chain(list.audio_devices.iter());
+        for dev in ordered {
+            // Skip the synthetic "empty-id" file-source placeholders
+            // the server inserts in every DeviceList — they exist for
+            // wire shape only and have no picker value today.
+            if matches!(
+                dev.kind,
+                efd_proto::SourceKind::AudioFile | efd_proto::SourceKind::IqFile,
+            ) && dev.id.is_empty()
+            {
+                continue;
+            }
+            let chip = make_chip(device_short_label(dev.kind));
+            chip.set_tooltip_text(Some(&format!("{:?} — {}", dev.kind, dev.id)));
+            let state = if Some(dev.kind) == active_kind {
+                ChipState::Active
+            } else {
+                ChipState::Inactive
+            };
+            paint_chip(&chip, state);
+            self.disp1_left_box.append(&chip);
+            self.device_chips
+                .borrow_mut()
+                .push((dev.clone(), chip));
+        }
     }
 
     /// Update the disp2-left active-source pill (e.g. `FDM IQ`).
@@ -286,6 +371,74 @@ impl DisplayBar {
     /// Update the disp2-right audio-routing indicator text.
     pub fn set_passthrough(&self, text: &str) {
         self.passthrough_pill.set_text(text);
+    }
+
+    /// Pull the DSP + decoder-intent state out of a `StateSnapshot`
+    /// into the status-line cache. Called from
+    /// `ControlBar::apply_snapshot`; the status line itself is
+    /// redrawn by `refresh_status_line`.
+    pub fn set_dsp_status(
+        &self,
+        nb_on: bool,
+        dnr_on: bool,
+        dnf_on: bool,
+        apf_on: bool,
+        decoders: &[efd_proto::DecoderKind],
+    ) {
+        {
+            let mut cache = self.cached_dsp.borrow_mut();
+            cache.nb_on = nb_on;
+            cache.dnr_on = dnr_on;
+            cache.dnf_on = dnf_on;
+            cache.apf_on = apf_on;
+            cache.decoders = decoders.to_vec();
+        }
+        self.refresh_status_line();
+    }
+
+    /// Compose the `disp1-center` status line from whichever cache
+    /// fields are currently set. Pango markup makes the toggle-is-off
+    /// tags dim so the operator can scan the on-state quickly.
+    fn refresh_status_line(&self) {
+        let cache = self.cached_dsp.borrow();
+        // Swap visibility between DRM and non-DRM info for this cell.
+        self.drm_line1.set_visible(cache.in_drm);
+        self.status_line.set_visible(!cache.in_drm);
+        if cache.in_drm {
+            return;
+        }
+
+        let snr = cache
+            .snr_db
+            .map(|v| format!("<b>{:.0}</b> dB", v))
+            .unwrap_or_else(|| "<i>—</i>".into());
+
+        let tag = |label: &str, on: bool| -> String {
+            if on {
+                format!("<b>{label}</b>")
+            } else {
+                format!("<span alpha='45%'>{label} off</span>")
+            }
+        };
+
+        let decoders = if cache.decoders.is_empty() {
+            "<i>—</i>".to_string()
+        } else {
+            cache
+                .decoders
+                .iter()
+                .map(|d| format!("<b>{:?}</b>", d))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+
+        self.status_line.set_markup(&format!(
+            "SNR {snr}   {nb}  {dnr}  {dnf}  {apf}   decode {decoders}",
+            nb = tag("NB", cache.nb_on),
+            dnr = tag("DNR", cache.dnr_on),
+            dnf = tag("DNF", cache.dnf_on),
+            apf = tag("APF", cache.apf_on),
+        ));
     }
 
     /// Optimistic frequency update (before radio confirms). Keeps
@@ -362,6 +515,16 @@ impl DisplayBar {
         self.smeter_label.set_text(&s_reading_to_string(s_reading));
         self.dbm_label
             .set_text(&format!("{:.0} dBm", state.s_meter_db));
+
+        // Non-DRM status line (disp1-center). `drm_line1` owns the
+        // cell while in DRM; otherwise the composed SNR+DSP+decoder
+        // line does.
+        {
+            let mut cache = self.cached_dsp.borrow_mut();
+            cache.snr_db = state.snr_db;
+            cache.in_drm = state.mode == Mode::DRM;
+        }
+        self.refresh_status_line();
 
         if state.tx {
             self.tx_label.remove_css_class("tx-rx-rx");
@@ -933,17 +1096,34 @@ impl ControlBar {
         ctrl1_right.append(&rec_status_label);
 
         // --- WSJT-X launcher (ctrl0-right) ---
-        // Phase-5b placeholder: click logs a TODO. Real launcher is
-        // a follow-up — it needs to know how to spawn WSJT-X and
-        // point it at the rigctld tunnel we document in README.
+        // Click spawns `wsjtx` as a detached child. WSJT-X keeps its
+        // own config (audio devices, rigctld endpoint) so we don't
+        // pass any arguments — the user configures it once on first
+        // launch, pointing it at an SSH-tunnelled
+        // `localhost:4532` (the rigctld pattern documented in the
+        // README). Errors (binary missing, fork failure) are surfaced
+        // via stderr; a failed launch doesn't block the button.
         let wsjtx_btn = Button::with_label("WSJT-X");
         wsjtx_btn.set_valign(Align::Center);
         wsjtx_btn.add_css_class("chrome-btn");
         wsjtx_btn.set_tooltip_text(Some(
-            "Launch WSJT-X (phase-5c placeholder — no-op until the launcher ships)",
+            "Launch WSJT-X. Point WSJT-X at localhost:4532 once you've \
+             set up an SSH tunnel to the Pi's rigctld responder.",
         ));
-        wsjtx_btn.connect_clicked(|_| {
-            eprintln!("[wsjtx] launcher not yet implemented (phase 5c)");
+        wsjtx_btn.connect_clicked(|_| match std::process::Command::new("wsjtx")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => {
+                tracing::info!(pid = child.id(), "spawned wsjtx");
+                // Intentionally drop the Child handle — WSJT-X is a
+                // detached GUI process; we don't wait on it.
+            }
+            Err(e) => {
+                tracing::error!("failed to spawn wsjtx: {e} (is it installed?)");
+            }
         });
         ctrl0_right.append(&wsjtx_btn);
 
@@ -1068,6 +1248,17 @@ impl ControlBar {
             btn.set_active(snap.enabled_decoders.contains(kind));
         }
         self.suppress_toggle_notify.set(false);
+
+        // Mirror the flags + enabled decoders into the display bar's
+        // status line so disp1-center's "NB DNR DNF APF / decode …"
+        // row reflects the same state the buttons do.
+        self.display_bar.set_dsp_status(
+            snap.nb_on,
+            snap.dnr_on,
+            snap.dnf_on,
+            snap.apf_on,
+            &snap.enabled_decoders,
+        );
     }
 
     pub fn widget(&self) -> &GtkBox {
@@ -1255,6 +1446,22 @@ fn make_chip(label: &str) -> Label {
     let l = Label::new(Some(label));
     l.add_css_class("monospace");
     l
+}
+
+/// Three-letter short label for a `SourceKind`, shown on the
+/// `disp1-left` device chips. Matches the drawio's FDM / HRF
+/// style; new kinds pick abbreviations that don't collide.
+fn device_short_label(kind: efd_proto::SourceKind) -> &'static str {
+    use efd_proto::SourceKind as K;
+    match kind {
+        K::FdmDuo => "FDM",
+        K::HackRf => "HRF",
+        K::RspDx => "RSP",
+        K::RtlSdr => "RTL",
+        K::PortableRadio => "POR",
+        K::AudioFile => "AF",
+        K::IqFile => "IQF",
+    }
 }
 
 fn paint_chip(label: &Label, state: ChipState) {

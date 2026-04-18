@@ -4,6 +4,37 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Added (client 0.8.3 — phase 5d: WSJT-X launcher + dynamic device chips + status line)
+- **WSJT-X launcher** — `ctrl0-right` button now actually spawns
+  `wsjtx` as a detached child process. Stdio is redirected to
+  `/dev/null` so the GUI doesn't get lost; the `Child` handle is
+  dropped (fire-and-forget). Missing binary / fork failure is
+  logged at `error!` level; the button stays pressable. WSJT-X
+  itself needs to be pointed at `localhost:4532` — set up a
+  `ssh -L 4532:localhost:4532 pi@cm5` tunnel per the README.
+- **Dynamic device chips** in `disp1-left`. The hard-coded
+  `FDM` / `HRF` pair is gone; the cell now rebuilds on every
+  `ServerMsg::DeviceList` push, adding one chip per discovered
+  device with a three-letter abbreviation (`FDM` / `HRF` / `RSP`
+  / `RTL` / `POR` / `AF` / `IQF`). Active kind gets
+  `.chip-active`, the rest `.chip-inactive`. Tooltips carry the
+  full `DeviceId { kind, id }`. Empty-id synthetic file-source
+  placeholders are filtered out.
+- **Non-DRM status line** in `disp1-center`. When the current
+  mode isn't `DRM`, the cell shows `SNR <db> dB   NB  DNR off
+  DNF off APF off   decode <list>`. Toggle-is-off tags dim via
+  Pango `alpha='45%'` so the on-state pops. SNR pulls from
+  `RadioState.snr_db` (server fills in phase 3+). Decoder list
+  pulls from `snapshot.enabled_decoders`. `drm_line1` and the
+  new `status_line` are mutually-visible — the current mode
+  picks which.
+- **`DisplayBar::set_dsp_status`** new method called from
+  `ControlBar::apply_snapshot` so the cell stays in sync with
+  the button states.
+- **`DisplayBar::set_device_list`** new method called from
+  `main.rs`'s WS dispatch on `ServerMsg::DeviceList`. Replaces
+  the `eprintln!` debug.
+
 ### Changed (client 0.8.2 — phase 5c: display-bar layout matches drawio IQ-NO-DRM)
 - **Unified tuning line** in `disp0-center`. The split
   vfo/freq/mode/bw/S-meter cluster collapses to a single Pango-
