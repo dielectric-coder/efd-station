@@ -4,6 +4,43 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Added (server 0.8.3 — phase 3e: process-respawn hot-swap + systemd fixes)
+- **`SelectDevice` now actually switches.** Client-initiated
+  `SelectDevice` writes the new device into the snapshot and
+  triggers a clean process exit; systemd's `Restart=always`
+  brings `efd-server` back ~2 seconds later with the new device
+  active. The client's existing WS reconnect (with exponential
+  backoff) covers the gap. This removes the "takes effect on next
+  restart" caveat phase 2 shipped with.
+- **`Pipeline.restart_requested_tx`** — new watch channel raised
+  by the upstream `SelectDevice` handler. `main.rs` selects on it
+  alongside SIGINT / SIGTERM in the graceful-shutdown future, so
+  the restart path is a regular clean shutdown: HTTP server
+  drains, pipeline cancels, snapshot saves to disk, process
+  exits 0.
+- **Systemd unit updates** (`server/debian/efd-server.service`):
+  - `Restart=on-failure` → `Restart=always` so exit-0 on
+    `SelectDevice` triggers the respawn.
+  - `RestartSec=5` → `2` so the gap between exit and new process
+    matches a user clicking a UI button.
+  - `ReadWritePaths` now also covers `~/.local/state/efd-backend`.
+    Phase 2's persistence writes to `$XDG_STATE_HOME` but the
+    unit only whitelisted `~/.config`, so state saves were
+    silently refused under systemd hardening. This is a bug fix;
+    the `SelectDevice` respawn needs the snapshot to survive.
+
+### Deliberately deferred (phase 3f)
+- **True in-process hot-swap.** The mpsc channels the client-
+  facing API exposes (`cat_tx`, `tx_audio_tx`) are coupled to the
+  current source; a clean in-process swap needs a forwarder task
+  pattern that decouples them. Planned for phase 3f.
+- **Cross-kind device swap validation.** Today `SelectDevice`
+  triggers a restart regardless of whether the target device has
+  a driver. Unsupported kinds (`HackRf` / `RtlSdr` / `RspDx` /
+  `IqFile`) restart into a server with no IQ source, which falls
+  back to the SoftwareDemod-from-nothing path — not harmful, but
+  not useful. Proper validation is phase 3f.
+
 ### Changed (server 0.8.2 — phase 3d: DRM single-USB IF feed)
 - **DRM audio-IF is now a real USB-demod.** The demod's DRM branch
   used to `Re(filtered_buf)` with no post-filter shift, which

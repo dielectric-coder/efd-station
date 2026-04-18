@@ -79,6 +79,15 @@ pub struct Pipeline {
     /// toggles / active decoders.
     pub snapshot_tx: watch::Sender<StateSnapshot>,
 
+    /// Phase 3e: process-respawn hot-swap trigger. Upstream writes
+    /// `true` when a client requests a cross-device swap that the
+    /// in-process pipeline can't accommodate today; `main.rs` checks
+    /// after the HTTP server returns, saves the snapshot, and exits
+    /// cleanly so systemd's `Restart=always` brings the service
+    /// back with the newly-selected device active. True in-process
+    /// hot-swap is phase 3f.
+    pub restart_requested_tx: watch::Sender<bool>,
+
     pub(crate) cancel: CancellationToken,
     tasks: Vec<(&'static str, JoinHandle<()>)>,
 }
@@ -606,6 +615,9 @@ impl Pipeline {
         // `EnumerateDevices` can re-run discovery into this sender.
         let (device_list_tx, _device_list_rx) = watch::channel(devices);
 
+        // Phase 3e: process-respawn swap signal.
+        let (restart_requested_tx, _restart_requested_rx) = watch::channel(false);
+
         // snapshot_tx holds the live session snapshot. Seeded from the
         // persisted snapshot the caller loaded/validated, then kept
         // current by the snapshot-tracker task below.
@@ -721,6 +733,7 @@ impl Pipeline {
             drm_status_rx,
             device_list_tx,
             snapshot_tx,
+            restart_requested_tx,
             cancel,
             tasks,
         }
@@ -907,6 +920,7 @@ impl Pipeline {
             active: None,
         });
         let (snapshot_tx, _) = watch::channel(crate::persistence::default_snapshot());
+        let (restart_requested_tx, _) = watch::channel(false);
 
         info!(
             file = %file_path.display(),
@@ -927,6 +941,7 @@ impl Pipeline {
             drm_status_rx,
             device_list_tx,
             snapshot_tx,
+            restart_requested_tx,
             cancel,
             tasks,
         }

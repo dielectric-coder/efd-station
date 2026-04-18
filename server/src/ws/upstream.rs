@@ -29,6 +29,7 @@ pub async fn run(
     flip_spectrum_tx: watch::Sender<bool>,
     device_list_tx: watch::Sender<DeviceList>,
     snapshot_tx: watch::Sender<StateSnapshot>,
+    restart_requested_tx: watch::Sender<bool>,
     cancel: CancellationToken,
 ) {
     loop {
@@ -140,15 +141,19 @@ pub async fn run(
                 let _ = device_list_tx.send(fresh);
             }
             ClientMsg::SelectDevice(dev) => {
-                // Phase-2 semantics: record the selection into the
-                // persisted snapshot so next startup picks it up;
-                // real hot-swap into the running pipeline is phase 3.
-                // We still update `device_list.active` and
-                // `snapshot.active_device` so the client UI reflects
-                // the pending choice.
-                info!(?dev, "upstream: SelectDevice — persisted; takes effect on next restart");
+                // Phase 3e: process-respawn hot-swap. We record the
+                // new device into the snapshot + device_list (so
+                // every connected client sees the pending active)
+                // then raise `restart_requested_tx`. main.rs catches
+                // it after the HTTP server returns, saves the
+                // snapshot, and exits cleanly — systemd's
+                // `Restart=always` brings the service back with
+                // the newly-selected device active ~2 s later. True
+                // in-process hot-swap is phase 3f.
+                info!(?dev, "upstream: SelectDevice — triggering process respawn");
                 snapshot_tx.send_modify(|s| s.active_device = Some(dev.clone()));
                 device_list_tx.send_modify(|d| d.active = Some(dev));
+                let _ = restart_requested_tx.send(true);
             }
             ClientMsg::SelectSource(src) => {
                 // Phase-1 kept this as a direct AudioRouting change so

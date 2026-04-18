@@ -6,8 +6,8 @@ Wants=network.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/efd-server
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=2
 Environment=RUST_LOG=info
 
 # Run as dedicated user
@@ -20,7 +20,9 @@ SupplementaryGroups=dialout audio plugdev
 # Hardening
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/efd/.config/efd-backend
+# Phase 2 persistence writes to $XDG_STATE_HOME (~/.local/state/efd-backend);
+# config still lives under ~/.config/efd-backend. Both must be writable.
+ReadWritePaths=/home/efd/.config/efd-backend /home/efd/.local/state/efd-backend
 NoNewPrivileges=true
 PrivateTmp=true
 

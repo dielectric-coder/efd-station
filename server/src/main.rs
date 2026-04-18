@@ -111,9 +111,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map_err(|e| format!("bind {addr}: {e}"))?;
     info!(addr = %addr, "listening");
 
-    // Serve until SIGINT / SIGTERM
+    // Phase 3e: also wake the graceful-shutdown future on a
+    // client-initiated `SelectDevice`, so the service can cleanly
+    // exit and let systemd's `Restart=always` bring it back with
+    // the new device active.
+    let restart_rx = state.pipeline.restart_requested_tx.subscribe();
+
+    // Serve until SIGINT / SIGTERM / SelectDevice restart request
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(cancel.clone()))
+        .with_graceful_shutdown(shutdown_signal(cancel.clone(), restart_rx))
         .await
         .map_err(|e| format!("axum serve error: {e}"))?;
 
@@ -167,7 +173,10 @@ fn is_loopback_bind(bind: &str) -> bool {
             .unwrap_or(false)
 }
 
-async fn shutdown_signal(cancel: CancellationToken) {
+async fn shutdown_signal(
+    cancel: CancellationToken,
+    mut restart_rx: tokio::sync::watch::Receiver<bool>,
+) {
     let ctrl_c = tokio::signal::ctrl_c();
     #[cfg(unix)]
     let mut sigterm = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -185,10 +194,23 @@ async fn shutdown_signal(cancel: CancellationToken) {
     tokio::select! {
         _ = ctrl_c => info!("SIGINT received"),
         _ = sigterm.recv() => info!("SIGTERM received"),
+        r = restart_rx.changed() => match r {
+            Ok(()) if *restart_rx.borrow() => {
+                info!("client-initiated restart requested — shutting down for systemd respawn");
+            }
+            _ => {
+                // The watch sender was dropped or flipped back to
+                // false; either way no action. Fall through to
+                // the normal SIGINT/SIGTERM wait.
+            }
+        },
     }
 
     #[cfg(not(unix))]
-    ctrl_c.await.ok();
+    {
+        let _ = restart_rx.changed().await;
+        ctrl_c.await.ok();
+    }
 
     cancel.cancel();
 }
