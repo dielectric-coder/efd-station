@@ -199,6 +199,31 @@ fn build_ui(app: &Application, url: &str) {
                 ServerMsg::Error(err) => {
                     eprintln!("server error: [{}] {}", err.code, err.message);
                 }
+                // Phase-1 stubs: the proto shape is wired up; full UI
+                // handling lands with the grid rewrite (phase 5).
+                ServerMsg::DeviceList(list) => {
+                    eprintln!(
+                        "device list: audio={} iq={} active={:?}",
+                        list.audio_devices.len(),
+                        list.iq_devices.len(),
+                        list.active,
+                    );
+                }
+                ServerMsg::DecodedText(dt) => {
+                    eprintln!("decoded[{:?}]: {}", dt.decoder, dt.text);
+                }
+                ServerMsg::RecordingStatus(rs) => {
+                    eprintln!(
+                        "recording: active={} kind={:?} path={:?} bytes={}",
+                        rs.active, rs.kind, rs.path, rs.bytes_written,
+                    );
+                }
+                ServerMsg::StateSnapshot(snap) => {
+                    eprintln!(
+                        "state snapshot: freq={}Hz mode={:?} device={:?}",
+                        snap.freq_hz, snap.mode, snap.active_device,
+                    );
+                }
             }
         }
 

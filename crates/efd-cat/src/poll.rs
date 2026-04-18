@@ -257,6 +257,10 @@ fn poll_radio_state(
         freq_hz: parsed.freq_hz,
         mode: parsed.mode,
         filter_bw,
+        // Server-side pipeline fills `filter_bw_hz` from the string
+        // before publishing to WS. Leave None here; enriching in-place
+        // is a phase-2+ concern.
+        filter_bw_hz: None,
         att,
         lp,
         agc,
@@ -265,6 +269,17 @@ fn poll_radio_state(
         nb,
         s_meter_db,
         tx: parsed.tx,
+        // RIT / XIT / IF-offset are already in the IF; response we
+        // parsed earlier but aren't surfaced through the CAT layer
+        // today. Phase 3 wires them in; for now they default to 0/off.
+        rit_hz: 0,
+        rit_on: false,
+        xit_hz: 0,
+        xit_on: false,
+        if_offset_hz: 0,
+        // SNR only meaningful on SDR demod path; MON-mode CAT doesn't
+        // produce an SNR estimate. Server may overwrite before WS send.
+        snr_db: None,
     })
 }
 

@@ -1,13 +1,38 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use efd_proto::{AudioChunk, AudioSource, Capabilities, CatCommand, FftBins, RadioState, TxAudio};
+use efd_proto::{AudioChunk, Capabilities, CatCommand, FftBins, RadioState, SourceClass, TxAudio};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::config::Config;
+
+/// Internal audio-routing selector driving `encode_audio_mux`. Maps
+/// 1:1 onto the client-facing `SourceClass` today (Audio → RadioUsb,
+/// Iq → SoftwareDemod) but kept distinct so the pipeline can
+/// evolve — phase 2's runtime device model will let this be driven
+/// by `SelectDevice` too, not just `SelectSource`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioRouting {
+    /// Audio comes from the FDM-DUO USB audio passthrough (or, in
+    /// portable-radio configs, a USB audio dongle). Corresponds to
+    /// `SourceClass::Audio`.
+    RadioUsb,
+    /// Audio comes from the software demod chain, driven by an IQ
+    /// source. Corresponds to `SourceClass::Iq`.
+    SoftwareDemod,
+}
+
+impl From<SourceClass> for AudioRouting {
+    fn from(src: SourceClass) -> Self {
+        match src {
+            SourceClass::Audio => AudioRouting::RadioUsb,
+            SourceClass::Iq => AudioRouting::SoftwareDemod,
+        }
+    }
+}
 
 /// Handles returned by the pipeline — used by WebSocket handlers to
 /// subscribe to data and send commands.
@@ -25,7 +50,7 @@ pub struct Pipeline {
     pub demod_mode_tx: watch::Sender<Option<efd_proto::Mode>>,
 
     /// Audio source selection: SoftwareDemod or RadioUsb.
-    pub audio_source_tx: watch::Sender<AudioSource>,
+    pub audio_source_tx: watch::Sender<AudioRouting>,
 
     /// Runtime DREAM spectrum-flip flag (`-p`). Updated by the client;
     /// the DRM supervisor restarts the bridge when this changes.
@@ -262,7 +287,7 @@ impl Pipeline {
         };
 
         // --- Audio source mux → Opus encoder → broadcast<AudioChunk> ---
-        let (audio_source_tx, audio_source_rx) = watch::channel(AudioSource::RadioUsb);
+        let (audio_source_tx, audio_source_rx) = watch::channel(AudioRouting::RadioUsb);
         {
             let atx = audio_tx.clone();
             let c = cancel.clone();
@@ -521,6 +546,10 @@ impl Pipeline {
             has_hardware_cat: source_caps.has_hardware_cat,
             has_usb_audio: source_caps.has_usb_audio && usb_audio_live,
             supported_demod_modes: source_caps.supported_demod_modes,
+            // Phase-1 stub — none of the rework-era decoders are
+            // wired up in the pipeline yet. Phase 3 populates this
+            // from a real capability probe against efd-dsp.
+            supported_decoders: Vec::new(),
             drm_flip_spectrum: config.drm.flip_spectrum,
         };
 
@@ -572,7 +601,7 @@ impl Pipeline {
         let (demod_mode_tx, _demod_mode_rx_unused) =
             watch::channel::<Option<efd_proto::Mode>>(Some(efd_proto::Mode::DRM));
         let (audio_source_tx, audio_source_rx) =
-            watch::channel(AudioSource::SoftwareDemod);
+            watch::channel(AudioRouting::SoftwareDemod);
 
         let mut tasks: Vec<(&'static str, JoinHandle<()>)> = Vec::new();
 
@@ -657,6 +686,7 @@ impl Pipeline {
                     freq_hz: 0,
                     mode: efd_proto::Mode::DRM,
                     filter_bw: "10.0k".into(),
+                    filter_bw_hz: Some(10_000.0),
                     att: false,
                     lp: false,
                     agc: efd_proto::AgcMode::Off,
@@ -665,6 +695,12 @@ impl Pipeline {
                     nb: false,
                     s_meter_db: -120.0,
                     tx: false,
+                    rit_hz: 0,
+                    rit_on: false,
+                    xit_hz: 0,
+                    xit_on: false,
+                    if_offset_hz: 0,
+                    snr_db: None,
                 };
                 let mut tick = tokio::time::interval(Duration::from_millis(500));
                 loop {
@@ -690,6 +726,7 @@ impl Pipeline {
             has_hardware_cat: false,
             has_usb_audio: false,
             supported_demod_modes: vec![efd_proto::Mode::DRM],
+            supported_decoders: Vec::new(),
             drm_flip_spectrum: false,
         };
 
@@ -740,7 +777,7 @@ impl Pipeline {
 async fn encode_audio_mux(
     mut demod_rx: mpsc::Receiver<efd_dsp::AudioBlock>,
     mut usb_rx: mpsc::Receiver<efd_audio::PcmBlock>,
-    mut source_rx: watch::Receiver<AudioSource>,
+    mut source_rx: watch::Receiver<AudioRouting>,
     mut demod_mode_rx: watch::Receiver<Option<efd_proto::Mode>>,
     sample_rate: u32,
     tx: broadcast::Sender<AudioChunk>,
@@ -777,19 +814,19 @@ async fn encode_audio_mux(
         // is unavailable (channel closed / not configured).
         let requested = *source_rx.borrow();
         let source = match requested {
-            AudioSource::RadioUsb if !usb_alive => {
+            AudioRouting::RadioUsb if !usb_alive => {
                 if !logged_fallback {
                     tracing::warn!("USB RX unavailable, falling back to software demod");
                     logged_fallback = true;
                 }
-                AudioSource::SoftwareDemod
+                AudioRouting::SoftwareDemod
             }
-            AudioSource::SoftwareDemod if !demod_alive => {
+            AudioRouting::SoftwareDemod if !demod_alive => {
                 if !logged_fallback {
                     tracing::warn!("software demod unavailable, falling back to USB RX");
                     logged_fallback = true;
                 }
-                AudioSource::RadioUsb
+                AudioRouting::RadioUsb
             }
             other => other,
         };
@@ -816,7 +853,7 @@ async fn encode_audio_mux(
                     tracing::warn!("demod audio channel closed");
                     continue;
                 };
-                if source != AudioSource::SoftwareDemod {
+                if source != AudioRouting::SoftwareDemod {
                     continue;
                 }
                 dsp_scratch.clear();
@@ -830,7 +867,7 @@ async fn encode_audio_mux(
                     tracing::warn!("USB RX audio channel closed");
                     continue;
                 };
-                if source != AudioSource::RadioUsb {
+                if source != AudioRouting::RadioUsb {
                     continue;
                 }
                 dsp_scratch.clear();

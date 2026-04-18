@@ -1,9 +1,12 @@
 use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
-use crate::downstream::{AudioChunk, Capabilities, DrmStatus, ErrorMsg, FftBins, RadioState};
-use crate::radio::Mode;
-use crate::upstream::{AudioSource, CatCommand, Ptt, TxAudio};
+use crate::downstream::{
+    AudioChunk, Capabilities, DecodedText, DeviceList, DrmStatus, ErrorMsg, FftBins, RadioState,
+    RecordingStatus, StateSnapshot,
+};
+use crate::radio::{DecoderKind, DeviceId, Mode, SourceClass};
+use crate::upstream::{CatCommand, Ptt, StartRecording, TxAudio};
 
 /// Wire-format version. Bump on any breaking change to `ServerMsg` or
 /// `ClientMsg` (including reorderings and field additions in the middle of
@@ -11,7 +14,13 @@ use crate::upstream::{AudioSource, CatCommand, Ptt, TxAudio};
 ///
 /// Every encoded frame is prefixed with this byte so the receiver can
 /// reject mismatched peers cleanly instead of producing garbled state.
-pub const PROTO_VERSION: u8 = 1;
+///
+/// Version 2 — rework phase 1. Drops `SetAudioSource`; adds device
+/// enumeration, source/device selection, per-decoder toggles, DSP
+/// block toggles (DNB/DNR/DNF/APF), recording control, and
+/// state save/load. RadioState gains parsed numeric fields (RIT/XIT
+/// /IF shift / SNR). Capabilities gains `supported_decoders`.
+pub const PROTO_VERSION: u8 = 2;
 
 /// Envelope for all server → client WebSocket messages.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Encode, Decode)]
@@ -22,6 +31,17 @@ pub enum ServerMsg {
     Capabilities(Capabilities),
     DrmStatus(DrmStatus),
     Error(ErrorMsg),
+
+    /// Response to `EnumerateDevices`; also pushed unprompted on
+    /// hotplug / device-state change.
+    DeviceList(DeviceList),
+    /// Output from an audio-domain decoder (CW / RTTY / PSK / …).
+    DecodedText(DecodedText),
+    /// Status of the recording subsystem.
+    RecordingStatus(RecordingStatus),
+    /// Server-side persisted state, sent in reply to `SaveState` /
+    /// `LoadState` and on startup.
+    StateSnapshot(StateSnapshot),
 }
 
 /// Envelope for all client → server WebSocket messages.
@@ -30,14 +50,41 @@ pub enum ClientMsg {
     CatCommand(CatCommand),
     TxAudio(TxAudio),
     Ptt(Ptt),
-    SetAudioSource(AudioSource),
-    /// Set or clear the demod mode override. `Some(mode)` overrides (SDR),
-    /// `None` clears the override so demod follows the radio's mode (MON).
+
+    /// Set or clear the demod mode override. `Some(mode)` overrides the
+    /// radio (SDR demod), `None` clears the override so demod follows
+    /// the radio's reported mode (MON-style).
     SetDemodMode(Option<Mode>),
-    /// Runtime toggle for DREAM's `-p` (spectrum flip) flag. Taking the
-    /// bridge down and bringing it back up with the new flag is handled
-    /// by the server; the client just asks for the new state.
+
+    /// Runtime toggle for DREAM's `-p` (spectrum flip) flag.
     SetDrmFlipSpectrum(bool),
+
+    /// Ask the server to publish its current `DeviceList`.
+    EnumerateDevices,
+    /// Switch between the `Audio` and `Iq` UI source classes.
+    SelectSource(SourceClass),
+    /// Select a specific device within the active source class.
+    SelectDevice(DeviceId),
+
+    /// Enable or disable a single audio-domain decoder.
+    SetDecoder { decoder: DecoderKind, enabled: bool },
+
+    /// Toggle a DSP-block filter on the audio-out path. Each flag is
+    /// independent; the block chain is DNB → DNR → DNF → APF.
+    SetDnb(bool),
+    SetDnr(bool),
+    SetDnf(bool),
+    SetApf(bool),
+
+    /// Start recording IQ or decoded audio to a file.
+    StartRecording(StartRecording),
+    StopRecording,
+
+    /// Explicitly save the current session snapshot to persistent
+    /// storage. (The server also auto-saves on clean shutdown.)
+    SaveState,
+    /// Restore from the last saved snapshot.
+    LoadState,
 }
 
 /// Decode error returned by [`decode_msg`]. Distinct from a bincode error

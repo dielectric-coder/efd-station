@@ -1,9 +1,11 @@
 use axum::extract::ws::{Message, WebSocket};
-use efd_proto::{AudioSource, CatCommand, ClientMsg, Mode, TxAudio};
+use efd_proto::{CatCommand, ClientMsg, Mode, TxAudio};
 use futures_util::StreamExt;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
+
+use crate::pipeline::AudioRouting;
 
 /// Maximum WS frame size we'll decode (4 KB — plenty for any valid message).
 const MAX_WS_FRAME: usize = 4096;
@@ -20,7 +22,7 @@ pub async fn run(
     cat_tx: mpsc::Sender<CatCommand>,
     tx_audio_tx: mpsc::Sender<TxAudio>,
     demod_mode_tx: watch::Sender<Option<Mode>>,
-    audio_source_tx: watch::Sender<AudioSource>,
+    audio_source_tx: watch::Sender<AudioRouting>,
     flip_spectrum_tx: watch::Sender<bool>,
     cancel: CancellationToken,
 ) {
@@ -111,9 +113,10 @@ pub async fn run(
                     break;
                 }
             }
-            ClientMsg::SetAudioSource(src) => {
-                debug!(?src, "upstream: audio source selection");
-                let _ = audio_source_tx.send(src);
+            ClientMsg::SelectSource(src) => {
+                let routing = AudioRouting::from(src);
+                debug!(?src, ?routing, "upstream: source class selection");
+                let _ = audio_source_tx.send(routing);
             }
             ClientMsg::SetDemodMode(mode) => {
                 debug!(?mode, "upstream: demod mode override");
@@ -123,6 +126,31 @@ pub async fn run(
                 debug!(flip, "upstream: DRM flip_spectrum toggle");
                 let _ = flip_spectrum_tx.send(flip);
             }
+            // Phase-1 stubs: the proto shape is here, the backend
+            // implementation lands in phase 2 (device model) and
+            // phase 4 (recording). Log + ignore for now so clients
+            // can send these without the connection dying.
+            ClientMsg::EnumerateDevices => {
+                debug!("upstream: EnumerateDevices (phase-2 stub)");
+            }
+            ClientMsg::SelectDevice(dev) => {
+                debug!(?dev, "upstream: SelectDevice (phase-2 stub)");
+            }
+            ClientMsg::SetDecoder { decoder, enabled } => {
+                debug!(?decoder, enabled, "upstream: SetDecoder (phase-3 stub)");
+            }
+            ClientMsg::SetDnb(on) => debug!(on, "upstream: SetDnb (phase-3 stub)"),
+            ClientMsg::SetDnr(on) => debug!(on, "upstream: SetDnr (phase-3 stub)"),
+            ClientMsg::SetDnf(on) => debug!(on, "upstream: SetDnf (phase-3 stub)"),
+            ClientMsg::SetApf(on) => debug!(on, "upstream: SetApf (phase-3 stub)"),
+            ClientMsg::StartRecording(rec) => {
+                debug!(?rec, "upstream: StartRecording (phase-4 stub)");
+            }
+            ClientMsg::StopRecording => {
+                debug!("upstream: StopRecording (phase-4 stub)");
+            }
+            ClientMsg::SaveState => debug!("upstream: SaveState (phase-2 stub)"),
+            ClientMsg::LoadState => debug!("upstream: LoadState (phase-2 stub)"),
         }
     }
 }

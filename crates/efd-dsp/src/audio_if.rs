@@ -68,8 +68,17 @@ fn mode_to_bandpass(mode: Mode) -> Option<(f32, f32)> {
         Mode::CW | Mode::CWR => Some((800.0, 500.0)),
         // SSB voice: ~2.4 kHz BW centered at mid-band.
         Mode::USB | Mode::LSB => Some((1500.0, 2400.0)),
-        // Pass-through.
-        Mode::AM | Mode::FM | Mode::DRM | Mode::Unknown => None,
+        // Pass-through. AM-family (AM/SAM/SAMU/SAML/DSB), FM and DRM
+        // carry their own width characteristics that the audio-rate
+        // bandpass would just mangle.
+        Mode::AM
+        | Mode::SAM
+        | Mode::SAMU
+        | Mode::SAML
+        | Mode::DSB
+        | Mode::FM
+        | Mode::DRM
+        | Mode::Unknown => None,
     }
 }
 

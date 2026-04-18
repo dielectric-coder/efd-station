@@ -4,6 +4,41 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Changed (server 0.7.0, client 0.6.0 — **wire break**, phase 1 of rework)
+- **Proto version 1 → 2.** Old server/client pairs cannot talk to the
+  new ones; the existing `WireError::VersionMismatch` handshake
+  detects skew cleanly. Server and client must be upgraded together.
+- **`Mode` gains `SAM`, `SAMU`, `SAML`, `DSB`.** The software demod
+  doesn't implement SAM / DSB yet (phase 3) — current code falls
+  through to envelope-AM for these variants so the pipeline keeps
+  running. Hardware CAT maps all four to AM digit 5, matching the
+  existing DRM convention.
+- **`DecoderKind` enum added** (Cw/Rtty/Psk/Mfsk/Fax/Pckt/Wspr/
+  Ft8/Aprs) and surfaced on `Capabilities::supported_decoders` and
+  `ServerMsg::DecodedText`.
+- **Device model scaffolding**: new `SourceClass` (`Audio` / `Iq`),
+  `DeviceId { kind, id }`, `RecKind`. Added client → server messages
+  `EnumerateDevices`, `SelectSource`, `SelectDevice`, `SetDecoder`,
+  `SetDnb`/`SetDnr`/`SetDnf`/`SetApf`, `StartRecording`/
+  `StopRecording`, `SaveState`/`LoadState`. Server stubs them
+  (debug-logs and ignores) until phases 2–4 land.
+- **Server messages added**: `DeviceList`, `DecodedText`,
+  `RecordingStatus`, `StateSnapshot`. Client stubs them (eprintln)
+  until the UI rewrite (phase 5).
+- **`RadioState` extended** with `filter_bw_hz: Option<f64>`,
+  `rit_hz`/`rit_on`, `xit_hz`/`xit_on`, `if_offset_hz`, and
+  `snr_db: Option<f32>`. Server fills them with safe defaults
+  today (None / 0 / false); real RIT/XIT/IF surfacing is phase 3
+  work, and SNR comes from the demod in phase 3.
+- **`GridCell` enum added** in `efd-proto/grid.rs` — stable IDs for
+  the client's named layout cells. Unused on the wire today;
+  available for phase 5.
+- **`ClientMsg::SetAudioSource` removed**, replaced with
+  `SelectSource(SourceClass)`. Server's internal `AudioRouting` enum
+  (in `pipeline::AudioRouting`) keeps the RadioUsb / SoftwareDemod
+  routing semantics intact — `From<SourceClass>` bridges the new
+  message onto the old pipeline until phase 2.
+
 ### Changed (server 0.6.14)
 - **s16↔f32 scaling is now symmetric on the decode path.** The USB-RX
   audio tap (`efd-audio/usb_rx`) and the DRM null-sink reader

@@ -1,11 +1,16 @@
 pub mod downstream;
+pub mod grid;
 pub mod radio;
 pub mod upstream;
 pub mod wire;
 
-pub use downstream::{AudioChunk, Capabilities, DrmStatus, ErrorMsg, FftBins, RadioState};
-pub use radio::{AgcMode, Mode, SourceKind, Vfo};
-pub use upstream::{AudioSource, CatCommand, Ptt, TxAudio};
+pub use downstream::{
+    AudioChunk, Capabilities, DecodedText, DeviceList, DrmStatus, ErrorMsg, FftBins, RadioState,
+    RecordingStatus, StateSnapshot,
+};
+pub use grid::GridCell;
+pub use radio::{AgcMode, DecoderKind, DeviceId, Mode, RecKind, SourceClass, SourceKind, Vfo};
+pub use upstream::{CatCommand, Ptt, StartRecording, TxAudio};
 pub use wire::{decode_msg, encode_msg, ClientMsg, ServerMsg, WireError, PROTO_VERSION};
 
 #[cfg(test)]
@@ -21,6 +26,30 @@ mod tests {
         let bytes = bincode::encode_to_vec(val, cfg).expect("encode");
         let (decoded, _): (T, _) = bincode::decode_from_slice(&bytes, cfg).expect("decode");
         decoded
+    }
+
+    fn sample_radio_state() -> RadioState {
+        RadioState {
+            vfo: Vfo::A,
+            freq_hz: 14_200_000,
+            mode: Mode::USB,
+            filter_bw: "2400".to_string(),
+            filter_bw_hz: Some(2400.0),
+            att: false,
+            lp: true,
+            agc: AgcMode::Slow,
+            agc_threshold: 50,
+            nr: false,
+            nb: false,
+            s_meter_db: -73.0,
+            tx: false,
+            rit_hz: 0,
+            rit_on: false,
+            xit_hz: 0,
+            xit_on: false,
+            if_offset_hz: 0,
+            snr_db: Some(18.5),
+        }
     }
 
     #[test]
@@ -46,20 +75,7 @@ mod tests {
 
     #[test]
     fn radio_state_round_trip() {
-        let orig = RadioState {
-            vfo: Vfo::A,
-            freq_hz: 14_200_000,
-            mode: Mode::USB,
-            filter_bw: "2400".to_string(),
-            att: false,
-            lp: true,
-            agc: AgcMode::Slow,
-            agc_threshold: 50,
-            nr: false,
-            nb: false,
-            s_meter_db: -73.0,
-            tx: false,
-        };
+        let orig = sample_radio_state();
         assert_eq!(orig, round_trip(&orig));
     }
 
@@ -134,10 +150,102 @@ mod tests {
             has_tx: true,
             has_hardware_cat: true,
             has_usb_audio: true,
-            supported_demod_modes: vec![Mode::USB, Mode::LSB, Mode::CW, Mode::AM, Mode::FM],
+            supported_demod_modes: vec![Mode::USB, Mode::LSB, Mode::CW, Mode::AM, Mode::SAM, Mode::FM],
+            supported_decoders: vec![DecoderKind::Cw, DecoderKind::Rtty, DecoderKind::Psk],
             drm_flip_spectrum: false,
         };
         assert_eq!(orig, round_trip(&orig));
+    }
+
+    #[test]
+    fn device_list_round_trip() {
+        let orig = DeviceList {
+            audio_devices: vec![DeviceId {
+                kind: SourceKind::PortableRadio,
+                id: "hw:1,0".into(),
+            }],
+            iq_devices: vec![
+                DeviceId {
+                    kind: SourceKind::FdmDuo,
+                    id: "SL1JO3".into(),
+                },
+                DeviceId {
+                    kind: SourceKind::RtlSdr,
+                    id: "0".into(),
+                },
+            ],
+            active: Some(DeviceId {
+                kind: SourceKind::FdmDuo,
+                id: "SL1JO3".into(),
+            }),
+        };
+        assert_eq!(orig, round_trip(&orig));
+    }
+
+    #[test]
+    fn decoded_text_round_trip() {
+        let orig = DecodedText {
+            decoder: DecoderKind::Cw,
+            text: "QST DE WA1W".into(),
+            timestamp_us: 123,
+        };
+        assert_eq!(orig, round_trip(&orig));
+    }
+
+    #[test]
+    fn recording_status_round_trip() {
+        let orig = RecordingStatus {
+            active: true,
+            kind: Some(RecKind::Iq),
+            path: Some("/var/efd/rec/20260418-1400-iq.raw".into()),
+            bytes_written: 123_456,
+            duration_s: Some(12.5),
+        };
+        assert_eq!(orig, round_trip(&orig));
+    }
+
+    #[test]
+    fn state_snapshot_round_trip() {
+        let orig = StateSnapshot {
+            active_device: Some(DeviceId {
+                kind: SourceKind::FdmDuo,
+                id: "SL1JO3".into(),
+            }),
+            freq_hz: 14_074_000,
+            mode: Mode::USB,
+            filter_bw_hz: Some(2400.0),
+            rit_hz: 10,
+            xit_hz: 0,
+            if_offset_hz: -15,
+            enabled_decoders: vec![DecoderKind::Cw, DecoderKind::Ft8],
+            dnb_on: false,
+            dnr_on: true,
+            dnf_on: false,
+            apf_on: false,
+        };
+        assert_eq!(orig, round_trip(&orig));
+    }
+
+    #[test]
+    fn grid_cell_round_trip() {
+        let cells = [
+            GridCell::Disp0Center,
+            GridCell::Ctrl1Right,
+            GridCell::Spectrum,
+            GridCell::TimeAxis,
+        ];
+        for cell in cells {
+            assert_eq!(cell, round_trip(&cell));
+        }
+    }
+
+    #[test]
+    fn source_kind_class_mapping() {
+        assert_eq!(SourceKind::FdmDuo.class(), SourceClass::Iq);
+        assert_eq!(SourceKind::HackRf.class(), SourceClass::Iq);
+        assert_eq!(SourceKind::IqFile.class(), SourceClass::Iq);
+        assert_eq!(SourceKind::PortableRadio.class(), SourceClass::Audio);
+        assert_eq!(SourceKind::AudioFile.class(), SourceClass::Audio);
     }
 
     #[test]
@@ -154,23 +262,20 @@ mod tests {
                 opus_data: vec![0xFF; 120],
                 seq: 1,
             }),
-            ServerMsg::RadioState(RadioState {
-                vfo: Vfo::B,
-                freq_hz: 3_500_000,
-                mode: Mode::CW,
-                filter_bw: "500".to_string(),
-                att: true,
-                lp: false,
-                agc: AgcMode::Fast,
-                agc_threshold: 100,
-                nr: true,
-                nb: true,
-                s_meter_db: -60.0,
-                tx: true,
-            }),
+            ServerMsg::RadioState(sample_radio_state()),
             ServerMsg::Error(ErrorMsg {
                 code: 404,
                 message: "not found".to_string(),
+            }),
+            ServerMsg::DeviceList(DeviceList {
+                audio_devices: vec![],
+                iq_devices: vec![],
+                active: None,
+            }),
+            ServerMsg::DecodedText(DecodedText {
+                decoder: DecoderKind::Rtty,
+                text: "CQ CQ".into(),
+                timestamp_us: 9,
             }),
         ];
         for msg in &msgs {
@@ -189,6 +294,29 @@ mod tests {
                 seq: 7,
             }),
             ClientMsg::Ptt(Ptt { on: true }),
+            ClientMsg::SetDemodMode(Some(Mode::SAMU)),
+            ClientMsg::SetDrmFlipSpectrum(true),
+            ClientMsg::EnumerateDevices,
+            ClientMsg::SelectSource(SourceClass::Iq),
+            ClientMsg::SelectDevice(DeviceId {
+                kind: SourceKind::HackRf,
+                id: "abcd".into(),
+            }),
+            ClientMsg::SetDecoder {
+                decoder: DecoderKind::Ft8,
+                enabled: true,
+            },
+            ClientMsg::SetDnr(true),
+            ClientMsg::SetDnf(false),
+            ClientMsg::SetApf(true),
+            ClientMsg::SetDnb(false),
+            ClientMsg::StartRecording(StartRecording {
+                kind: RecKind::Audio,
+                path: None,
+            }),
+            ClientMsg::StopRecording,
+            ClientMsg::SaveState,
+            ClientMsg::LoadState,
         ];
         for msg in &msgs {
             assert_eq!(*msg, round_trip(msg));

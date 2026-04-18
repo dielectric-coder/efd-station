@@ -3,7 +3,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use efd_proto::{AudioSource, Capabilities, ClientMsg, DrmStatus, Mode, Ptt, RadioState};
+use efd_proto::{Capabilities, ClientMsg, DrmStatus, Mode, Ptt, RadioState, SourceClass};
 use gtk4::prelude::*;
 use gtk4::{
     Adjustment, Align, Box as GtkBox, Button, DropDown, Entry, Label, LevelBar, Orientation,
@@ -541,7 +541,7 @@ impl ControlBar {
                         let _ = tx.send(ClientMsg::CatCommand(cmd));
                     }
                     let _ = tx.send(ClientMsg::SetDemodMode(Some(mode)));
-                    let _ = tx.send(ClientMsg::SetAudioSource(AudioSource::SoftwareDemod));
+                    let _ = tx.send(ClientMsg::SelectSource(SourceClass::Iq));
 
                     fe.set_text(&format!("{}", freq_hz));
                     if let Some(idx) = am.borrow().iter().position(|&(_, m)| m == mode) {
@@ -564,7 +564,7 @@ impl ControlBar {
                         sdr_params::save(&params);
                     }
                     let _ = tx.send(ClientMsg::SetDemodMode(None));
-                    let _ = tx.send(ClientMsg::SetAudioSource(AudioSource::RadioUsb));
+                    let _ = tx.send(ClientMsg::SelectSource(SourceClass::Audio));
                 }
             });
         }
@@ -604,7 +604,7 @@ impl ControlBar {
         // Audio-source initial sync is always safe; the AGC-threshold initial
         // sync is deferred to `apply_capabilities` so it's gated on
         // has_hardware_cat and not emitted to sources that can't accept it.
-        let _ = ws_tx.send(ClientMsg::SetAudioSource(AudioSource::RadioUsb));
+        let _ = ws_tx.send(ClientMsg::SelectSource(SourceClass::Audio));
 
         // Step size dropdown
         let step_list = StringList::new(&STEPS.iter().map(|(s, _)| *s).collect::<Vec<_>>());

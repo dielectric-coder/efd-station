@@ -152,6 +152,29 @@ async fn main() {
                 error_count += 1;
                 println!("server error: [{}] {}", err.code, err.message);
             }
+            ServerMsg::DeviceList(list) => {
+                println!(
+                    "DeviceList: audio={} iq={} active={:?}",
+                    list.audio_devices.len(),
+                    list.iq_devices.len(),
+                    list.active,
+                );
+            }
+            ServerMsg::DecodedText(dt) => {
+                println!("Decoded[{:?}]: {}", dt.decoder, dt.text);
+            }
+            ServerMsg::RecordingStatus(rs) => {
+                println!(
+                    "Recording: active={} kind={:?} path={:?}",
+                    rs.active, rs.kind, rs.path,
+                );
+            }
+            ServerMsg::StateSnapshot(snap) => {
+                println!(
+                    "StateSnapshot: freq={} Hz mode={:?} device={:?}",
+                    snap.freq_hz, snap.mode, snap.active_device,
+                );
+            }
         }
     }
 

@@ -1,7 +1,7 @@
 use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
-use crate::radio::{AgcMode, Mode, SourceKind, Vfo};
+use crate::radio::{AgcMode, DecoderKind, DeviceId, Mode, RecKind, SourceKind, Vfo};
 
 /// FFT magnitude bins — server computes, client renders spectrum + waterfall.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Encode, Decode)]
@@ -23,13 +23,23 @@ pub struct AudioChunk {
     pub seq: u32,
 }
 
-/// Current radio state polled from rigctld.
+/// Current radio state polled from the active source.
+///
+/// Carries both display-friendly strings (`filter_bw`) and the
+/// parsed numeric fields the client needs to draw overlays
+/// (`filter_bw_hz`). Server parses once, client consumes directly —
+/// no second parser on the client side.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Encode, Decode)]
 pub struct RadioState {
     pub vfo: Vfo,
     pub freq_hz: u64,
     pub mode: Mode,
+    /// Human-readable bandwidth string from the radio (e.g. `"2.4k"`,
+    /// `"500"`, `"D300"`). Kept for display.
     pub filter_bw: String,
+    /// Parsed bandwidth in Hz, if `filter_bw` could be interpreted as
+    /// a numeric width. `None` for labels the server could not parse.
+    pub filter_bw_hz: Option<f64>,
     pub att: bool,
     pub lp: bool,
     pub agc: AgcMode,
@@ -38,6 +48,19 @@ pub struct RadioState {
     pub nb: bool,
     pub s_meter_db: f32,
     pub tx: bool,
+    /// Receiver Incremental Tuning offset in Hz (±). `0` when RIT is
+    /// off or cleared.
+    pub rit_hz: i32,
+    pub rit_on: bool,
+    /// Transmit Incremental Tuning offset in Hz.
+    pub xit_hz: i32,
+    pub xit_on: bool,
+    /// IF shift in Hz, from the radio or the software demod.
+    pub if_offset_hz: i32,
+    /// Estimated signal-to-noise ratio in dB, when the active source
+    /// reports one. Typically only populated in IQ / SDR mode where
+    /// the demod computes it; MON mode may leave it `None`.
+    pub snr_db: Option<f32>,
 }
 
 /// Error reported to client.
@@ -59,6 +82,10 @@ pub struct Capabilities {
     /// radio). Independent of `has_hardware_cat`.
     pub has_usb_audio: bool,
     pub supported_demod_modes: Vec<Mode>,
+    /// Audio-domain decoders the server can run against the current
+    /// source's audio stream. Clients enable individual decoders via
+    /// `ClientMsg::SetDecoder`.
+    pub supported_decoders: Vec<DecoderKind>,
     /// Initial state of DREAM's `-p` flag as the server will use it on
     /// the next DRM bridge spawn. Client uses this to sync its Flip
     /// toggle on connect.
@@ -104,4 +131,61 @@ pub struct DrmStatus {
 
     /// Monotonic timestamp in microseconds since the DRM bridge started.
     pub timestamp_us: u64,
+}
+
+/// Response to `ClientMsg::EnumerateDevices`. Also pushed unprompted
+/// when the server's view of available devices changes (e.g. hotplug).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Encode, Decode)]
+pub struct DeviceList {
+    /// Devices in the `Audio` class (portable radios, USB dongles,
+    /// recorded WAV/FLAC files offered for replay).
+    pub audio_devices: Vec<DeviceId>,
+    /// Devices in the `Iq` class (SDRs and IQ-file replays).
+    pub iq_devices: Vec<DeviceId>,
+    /// Currently selected device, if any.
+    pub active: Option<DeviceId>,
+}
+
+/// Output from an audio-domain decoder (Tier 3 in the pipeline
+/// taxonomy). Emitted as the decoder produces text — rate varies by
+/// mode and signal. Client routes to the `disp2-center` cell.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Encode, Decode)]
+pub struct DecodedText {
+    pub decoder: DecoderKind,
+    pub text: String,
+    pub timestamp_us: u64,
+}
+
+/// Recording subsystem status. Sent in response to start/stop
+/// commands, and periodically while a recording is active.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Encode, Decode)]
+pub struct RecordingStatus {
+    pub active: bool,
+    pub kind: Option<RecKind>,
+    /// Absolute path of the output file, chosen by the server.
+    pub path: Option<String>,
+    pub bytes_written: u64,
+    /// Seconds of content written so far, computed from the source
+    /// sample rate. `None` until the first block lands.
+    pub duration_s: Option<f64>,
+}
+
+/// Snapshot of persisted state — device selection plus tuning plus
+/// DSP toggles. Sent in response to `ClientMsg::SaveState` /
+/// `ClientMsg::LoadState`, and on startup so the client can pre-fill
+/// UI before any poll arrives.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Encode, Decode)]
+pub struct StateSnapshot {
+    pub active_device: Option<DeviceId>,
+    pub freq_hz: u64,
+    pub mode: Mode,
+    pub filter_bw_hz: Option<f64>,
+    pub rit_hz: i32,
+    pub xit_hz: i32,
+    pub if_offset_hz: i32,
+    pub enabled_decoders: Vec<DecoderKind>,
+    pub dnb_on: bool,
+    pub dnr_on: bool,
+    pub dnf_on: bool,
+    pub apf_on: bool,
 }

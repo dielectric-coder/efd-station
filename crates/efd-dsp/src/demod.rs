@@ -528,7 +528,11 @@ fn run_demod(
 /// Demodulate IQ samples based on mode.
 fn demodulate(iq: &[[f32; 2]], mode: Mode) -> Vec<f32> {
     match mode {
-        Mode::AM => demod_am(iq),
+        // SAM (PLL-locked synchronous AM), the SAM sideband variants,
+        // and DSB will get dedicated demods in phase 3. For now they
+        // fall through to envelope-AM so the pipeline compiles and
+        // produces audible output.
+        Mode::AM | Mode::SAM | Mode::SAMU | Mode::SAML | Mode::DSB => demod_am(iq),
         Mode::USB => demod_usb(iq),
         Mode::LSB => demod_lsb(iq),
         Mode::FM => demod_fm(iq),

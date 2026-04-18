@@ -378,9 +378,9 @@ fn mode_to_str(mode: Mode) -> &'static str {
         Mode::CWR => "CWR",
         Mode::AM => "AM",
         Mode::FM => "FM",
-        // DRM isn't a rigctld standard mode; report as AM so clients that
-        // poll mode while decoding DRM don't see an unknown string.
-        Mode::DRM => "AM",
+        // Software-only AM-family modes and DRM are not rigctld standard
+        // modes; report as AM so hamlib clients see something coherent.
+        Mode::DRM | Mode::SAM | Mode::SAMU | Mode::SAML | Mode::DSB => "AM",
         Mode::Unknown => "USB",
     }
 }
@@ -403,9 +403,9 @@ fn mode_to_cat(mode: Mode) -> Option<String> {
         Mode::USB => '2',
         Mode::CW => '3',
         Mode::FM => '4',
-        // DRM leaves the radio in AM; the demod decision is handled
-        // elsewhere via demod_mode_tx.
-        Mode::AM | Mode::DRM => '5',
+        // DRM and the software-only AM-family modes leave the radio in
+        // AM; the demod decision is handled via demod_mode_tx.
+        Mode::AM | Mode::DRM | Mode::SAM | Mode::SAMU | Mode::SAML | Mode::DSB => '5',
         Mode::CWR => '7',
         Mode::Unknown => return None,
     };
@@ -446,6 +446,7 @@ mod tests {
             freq_hz,
             mode,
             filter_bw: String::new(),
+            filter_bw_hz: None,
             att: false,
             lp: false,
             agc: AgcMode::Slow,
@@ -454,6 +455,12 @@ mod tests {
             nb: false,
             s_meter_db: -73.0,
             tx,
+            rit_hz: 0,
+            rit_on: false,
+            xit_hz: 0,
+            xit_on: false,
+            if_offset_hz: 0,
+            snr_db: None,
         }
     }
 

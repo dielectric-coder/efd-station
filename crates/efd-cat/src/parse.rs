@@ -14,16 +14,23 @@ pub fn kenwood_mode(digit: u8) -> Mode {
 }
 
 /// Convert our Mode to the Kenwood RF-command mode character.
+///
+/// Software-only modes (SAM, SAMU, SAML, DSB) have no FDM-DUO hardware
+/// equivalent; the radio stays in AM while the software demod does the
+/// work, mirroring the DRM convention.
 pub fn mode_char(mode: Mode) -> Option<char> {
     match mode {
         Mode::LSB => Some('1'),
         Mode::USB => Some('2'),
         Mode::CW => Some('3'),
         Mode::FM => Some('4'),
-        Mode::AM => Some('5'),
+        Mode::AM
+        | Mode::DRM
+        | Mode::SAM
+        | Mode::SAMU
+        | Mode::SAML
+        | Mode::DSB => Some('5'),
         Mode::CWR => Some('7'),
-        // DRM: the radio stays in AM (wide) while DREAM decodes OFDM from IQ.
-        Mode::DRM => Some('5'),
         Mode::Unknown => None,
     }
 }
@@ -239,8 +246,12 @@ pub fn parse_rf_response(response: &str, mode: Mode) -> Option<String> {
     let filter: Option<&str> = match mode {
         Mode::LSB | Mode::USB => FILTER_LSB_USB.get(p2).copied(),
         Mode::CW | Mode::CWR => FILTER_CW.get(p2).and_then(|o| *o),
-        // DRM borrows the radio's AM filter table since the hardware stays on AM.
-        Mode::AM | Mode::DRM => FILTER_AM.get(p2).copied(),
+        // AM/DRM and the software-only AM-family modes (SAM*, DSB) all
+        // share the radio's AM filter table — hardware stays in AM, the
+        // software demod picks the sideband.
+        Mode::AM | Mode::DRM | Mode::SAM | Mode::SAMU | Mode::SAML | Mode::DSB => {
+            FILTER_AM.get(p2).copied()
+        }
         Mode::FM => FILTER_FM.get(p2).copied(),
         Mode::Unknown => None,
     };
