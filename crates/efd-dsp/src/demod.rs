@@ -390,6 +390,10 @@ fn run_demod(
         "demod task started"
     );
 
+    // Running count of audio blocks we had to drop because `audio_tx`
+    // was full. See the `try_send` site below for rationale.
+    let mut dropped_audio_blocks: u64 = 0;
+
     loop {
         if cancel.is_cancelled() {
             return Err(DspError::Cancelled);
@@ -495,9 +499,28 @@ fn run_demod(
             timestamp_us: block.timestamp_us,
         };
 
-        if audio_tx.blocking_send(block).is_err() {
-            trace!("audio channel closed");
-            return Err(DspError::ChannelClosed);
+        // Non-blocking send: if the downstream audio consumer (ALSA
+        // task, WS audio encoder) falls behind and the mpsc buffer is
+        // full, drop this block rather than stall the whole demod.
+        // Stalling here would also stall the IQ broadcast subscriber
+        // and the NCO/decimator state, producing far worse artifacts
+        // than an occasional audio glitch. Log-rate-limit the warn so
+        // a sustained stall doesn't flood the journal.
+        match audio_tx.try_send(block) {
+            Ok(_) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                dropped_audio_blocks = dropped_audio_blocks.saturating_add(1);
+                if dropped_audio_blocks.is_power_of_two() {
+                    warn!(
+                        dropped = dropped_audio_blocks,
+                        "audio consumer slow; demod dropped block(s)"
+                    );
+                }
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                trace!("audio channel closed");
+                return Err(DspError::ChannelClosed);
+            }
         }
     }
 }

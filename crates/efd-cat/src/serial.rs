@@ -1,8 +1,10 @@
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nix::fcntl::{self, OFlag};
+use nix::poll::{PollFd, PollFlags, PollTimeout};
 use nix::sys::stat::Mode;
 use nix::sys::termios::{self, BaudRate, SetArg, SpecialCharacterIndices};
 use nix::unistd;
@@ -12,6 +14,33 @@ use crate::error::CatError;
 
 /// Maximum length of a CAT command we'll accept from clients.
 pub const MAX_CAT_CMD_LEN: usize = 64;
+
+/// Hard cap on how long a single CAT command (write + first response
+/// byte) or response-read may block. Protects the CAT task from a
+/// hung radio — e.g. a mid-session USB unplug where the kernel hasn't
+/// surfaced the disconnect yet and write(2) would otherwise block
+/// indefinitely. 500 ms is comfortably longer than any real
+/// radio-processing latency at 38400 baud.
+const IO_DEADLINE: Duration = Duration::from_millis(500);
+
+/// Wait for `fd` to be ready for `flags` (POLLIN / POLLOUT) within
+/// `remaining` time. Returns `Ok(true)` if ready, `Ok(false)` on
+/// timeout / EINTR, `Err` on any other poll failure.
+fn wait_fd(
+    fd: BorrowedFd<'_>,
+    flags: PollFlags,
+    remaining: Duration,
+) -> Result<bool, CatError> {
+    let ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+    let mut fds = [PollFd::new(fd, flags)];
+    let timeout = PollTimeout::try_from(ms).unwrap_or(PollTimeout::ZERO);
+    match nix::poll::poll(&mut fds, timeout) {
+        Ok(0) => Ok(false),
+        Ok(_) => Ok(true),
+        Err(nix::errno::Errno::EINTR) => Ok(false),
+        Err(e) => Err(CatError::Io(std::io::Error::other(e))),
+    }
+}
 
 /// Direct serial connection to the FDM-DUO CAT port.
 /// Ported from EladSpectrum cat_control.c — 38400 8N1, raw mode.
@@ -122,13 +151,31 @@ impl SerialPort {
         termios::tcflush(&self.fd, termios::FlushArg::TCIFLUSH)
             .map_err(|e| CatError::Io(std::io::Error::other(e)))?;
 
-        // Write command
+        // Write command with an overall deadline. Without this, a
+        // mid-session USB unplug where the kernel is still fielding
+        // write(2) can hang the CAT task forever — poll(2) on POLLOUT
+        // gives us a bounded wait.
         let mut written = 0;
         let cmd_bytes = cmd.as_bytes();
+        let write_deadline = Instant::now() + IO_DEADLINE;
         while written < cmd_bytes.len() {
+            let remaining = write_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(CatError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "CAT write timed out after {:?} on {} ({} of {} bytes written)",
+                        IO_DEADLINE, self.device, written, cmd_bytes.len()
+                    ),
+                )));
+            }
+            if !wait_fd(self.fd.as_fd(), PollFlags::POLLOUT, remaining)? {
+                // Timeout or EINTR — loop and re-check deadline
+                continue;
+            }
             match unistd::write(&self.fd, &cmd_bytes[written..]) {
                 Ok(n) => written += n,
-                Err(nix::errno::Errno::EINTR) => continue,
+                Err(nix::errno::Errno::EINTR) | Err(nix::errno::Errno::EAGAIN) => continue,
                 Err(e) => {
                     return Err(CatError::Io(std::io::Error::other(
                         e,
@@ -166,20 +213,26 @@ impl SerialPort {
     }
 
     /// Read a single `;`-terminated response from the serial port.
+    ///
+    /// Uses an overall deadline (`IO_DEADLINE`) rather than a retry count,
+    /// so the total blocking time is bounded even when the radio is
+    /// trickling bytes. Returns whatever was accumulated on timeout,
+    /// matching the previous contract (empty string → caller gives up).
     fn read_response(&self) -> Result<String, CatError> {
         let mut response = Vec::with_capacity(64);
         let mut buf = [0u8; 64];
-        let mut retries = 10;
+        let deadline = Instant::now() + IO_DEADLINE;
 
         loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            if !wait_fd(self.fd.as_fd(), PollFlags::POLLIN, remaining)? {
+                continue;
+            }
             match unistd::read(self.fd.as_raw_fd(), &mut buf) {
-                Ok(0) => {
-                    retries -= 1;
-                    if retries == 0 {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
+                Ok(0) => continue,
                 Ok(n) => {
                     response.extend_from_slice(&buf[..n]);
                     if let Some(pos) = response.iter().position(|&b| b == b';') {
@@ -187,14 +240,7 @@ impl SerialPort {
                         break;
                     }
                 }
-                Err(nix::errno::Errno::EAGAIN) => {
-                    retries -= 1;
-                    if retries == 0 {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(nix::errno::Errno::EINTR) => continue,
+                Err(nix::errno::Errno::EAGAIN) | Err(nix::errno::Errno::EINTR) => continue,
                 Err(e) => {
                     return Err(CatError::Io(std::io::Error::other(
                         e,

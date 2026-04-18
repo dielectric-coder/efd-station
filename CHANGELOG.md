@@ -4,6 +4,22 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **Bounded CAT serial I/O.** `SerialPort::command` wraps write(2) and
+  `read_response` in a 500 ms overall deadline via `poll(2)` (new `nix`
+  `poll` feature). A mid-session USB unplug — where the kernel is
+  still fielding write(2) or the radio has gone silent — now surfaces
+  as a `TimedOut` error and the CAT poll/command task recovers
+  instead of wedging the pipeline indefinitely.
+- **Demod uses `try_send` with drop-on-full backpressure.** Previously
+  `audio_tx.blocking_send` would stall the demod if the downstream
+  audio consumer (ALSA or WS encoder) fell behind; a USB-audio
+  underrun could pause IQ consumption, NCO state, and the whole FFT
+  pipeline. Now the demod drops the current audio block on a full
+  queue, warns at exponentially spaced counts (1, 2, 4, 8, …), and
+  keeps the RX chain running. Short audio glitch beats a frozen
+  waterfall.
+
 ### Added
 - **DRM bridge pre-flight validation.** `run_bridge` now rejects
   invalid PipeWire sink names (`[a-z0-9_]`, 1..=63 chars) and a
