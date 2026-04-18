@@ -4,6 +4,22 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Changed (client 0.5.3)
+- **Audio ring buffer switches to drop-newest.** `AudioPlayer::push_audio`
+  previously drained the oldest samples when the ring overflowed,
+  producing a mid-stream click in whatever SSB/AM audio was currently
+  playing. Now an overflow truncates the tail of the incoming Opus
+  frame instead: what's already in the ring plays out cleanly, and a
+  sustained producer-outruns-consumer state surfaces as a gap at a
+  20 ms frame boundary. Rate-limited stderr warn at power-of-two drop
+  counts. Bounded latency stays at `RING_CAPACITY` (1.5 s) either way.
+- **Client mutex locks tolerate poisoning.** Two bare `.unwrap()` calls
+  on `fft_data` and `radio_state` mutexes in the GTK tick callback
+  replaced with `unwrap_or_else(|e| e.into_inner())`, matching the
+  existing pattern used for the WS message queue. Prevents the GTK
+  main loop from crashing if the WS thread ever panics while holding
+  a lock.
+
 ### Changed
 - **Bounded CAT serial I/O.** `SerialPort::command` wraps write(2) and
   `read_response` in a 500 ms overall deadline via `poll(2)` (new `nix`

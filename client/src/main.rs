@@ -168,13 +168,13 @@ fn build_ui(app: &Application, url: &str) {
             match msg {
                 ServerMsg::FftBins(bins) => {
                     waterfall2.push_line(&bins.bins);
-                    *fft_data2.lock().unwrap() = Some(bins);
+                    *fft_data2.lock().unwrap_or_else(|e| e.into_inner()) = Some(bins);
                     need_redraw = true;
                 }
                 ServerMsg::RadioState(state) => {
                     display_bar2.update(&state);
                     control_bar2.sync_from_radio(&state);
-                    *radio_state2.lock().unwrap() = Some(state);
+                    *radio_state2.lock().unwrap_or_else(|e| e.into_inner()) = Some(state);
                 }
                 ServerMsg::Audio(chunk) => {
                     if let Some(ref player) = audio2 {

@@ -30,6 +30,10 @@ pub struct AudioPlayer {
     _stream: Stream,
     decoder: Mutex<(Decoder, Vec<f32>)>, // decoder + reusable PCM buffer
     chunks_received: AtomicU64,
+    /// Count of decoded samples dropped because the ring was full.
+    /// Rate-limited logging uses powers of two so a sustained stall
+    /// doesn't spam stderr.
+    samples_dropped: AtomicU64,
     volume: Arc<AtomicU32>,  // volume as fixed-point: 0..1000 → 0.0..1.0
     muted: Arc<AtomicBool>,
 }
@@ -98,6 +102,7 @@ impl AudioPlayer {
             _stream: stream,
             decoder: Mutex::new((decoder, pcm_buf)),
             chunks_received: AtomicU64::new(0),
+            samples_dropped: AtomicU64::new(0),
             volume,
             muted,
         })
@@ -155,14 +160,28 @@ impl AudioPlayer {
         }
 
         let mut rb = self.ring.lock().unwrap_or_else(|e| e.into_inner());
-        // Drop oldest samples if buffer is getting too large (prevents latency buildup)
-        let max = RING_CAPACITY;
-        let incoming = n;
-        if rb.len() + incoming > max {
-            let drain = rb.len() + incoming - max;
-            rb.drain(..drain);
+        // Drop from the *newest* end when the ring is full: truncate
+        // the tail of this incoming frame to the available space.
+        // Drop-oldest (previous behaviour) caused a click in the middle
+        // of the currently-playing audio; drop-newest lets what's
+        // already in the ring play out cleanly and, if the producer
+        // outruns the consumer, surfaces as a tail gap at a 20 ms Opus
+        // frame boundary instead.
+        let space_left = RING_CAPACITY.saturating_sub(rb.len());
+        let to_push = space_left.min(n);
+        if to_push < n {
+            let dropped = (n - to_push) as u64;
+            let total = self.samples_dropped.fetch_add(dropped, Ordering::Relaxed) + dropped;
+            // Log at 1, 2, 4, 8, ... so a persistent stall doesn't flood stderr.
+            if total.is_power_of_two() {
+                eprintln!(
+                    "audio: ring full; dropped {dropped} samples \
+                     (total dropped: {total}, ring_len: {})",
+                    rb.len()
+                );
+            }
         }
-        rb.extend(&pcm[..n]);
+        rb.extend(&pcm[..to_push]);
     }
 }
 
