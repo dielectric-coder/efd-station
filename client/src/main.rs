@@ -307,6 +307,21 @@ fn build_ui(app: &Application, url: &str) {
                 ServerMsg::DeviceList(list) => {
                     display_bar2.set_device_list(&list);
                     control_bar2.set_device_list(&list);
+                    // When the active source is audio-class (AUD), the
+                    // server gates IQ FFT frames and doesn't yet produce
+                    // an audio-domain spectrum. Clear the stale IQ
+                    // spectrum so the display isn't lying about what's
+                    // live. A subsequent IQ pick will repopulate on the
+                    // next FftBins frame.
+                    if list
+                        .active
+                        .as_ref()
+                        .map(|d| matches!(d.kind.class(), efd_proto::SourceClass::Audio))
+                        .unwrap_or(false)
+                    {
+                        *fft_data2.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                        need_redraw = true;
+                    }
                 }
                 ServerMsg::DecodedText(dt) => {
                     display_bar2.push_decoded(dt.decoder, &dt.text);

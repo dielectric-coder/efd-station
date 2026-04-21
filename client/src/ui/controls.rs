@@ -937,7 +937,13 @@ impl ControlBar {
         let cached_audio_devices: Rc<RefCell<Vec<DeviceId>>> = Rc::new(RefCell::new(Vec::new()));
         let cached_iq_devices: Rc<RefCell<Vec<DeviceId>>> = Rc::new(RefCell::new(Vec::new()));
 
-        let aud_dev_btn = Button::with_label("AUDdev");
+        let aud_dev_btn = Button::new();
+        {
+            let lbl = Label::new(None);
+            lbl.set_use_markup(true);
+            lbl.set_markup("AUD<sup>dev</sup>");
+            aud_dev_btn.set_child(Some(&lbl));
+        }
         aud_dev_btn.set_valign(Align::Center);
         aud_dev_btn.set_tooltip_text(Some(
             "Pick an audio input device (FDM-DUO USB audio / HAT / USB dongle)",
@@ -957,7 +963,13 @@ impl ControlBar {
             });
         }
 
-        let iq_dev_btn = Button::with_label("IQdev");
+        let iq_dev_btn = Button::new();
+        {
+            let lbl = Label::new(None);
+            lbl.set_use_markup(true);
+            lbl.set_markup("IQ<sup>dev</sup>");
+            iq_dev_btn.set_child(Some(&lbl));
+        }
         iq_dev_btn.set_valign(Align::Center);
         iq_dev_btn.set_tooltip_text(Some(
             "Pick an IQ source device (FDM-DUO / HackRF / RSPdx / RTL-SDR)",
