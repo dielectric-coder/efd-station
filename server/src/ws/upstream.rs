@@ -164,7 +164,7 @@ pub async fn run(
                 // device whose class matches `src` once selected),
                 // but for now we just flip the routing and log.
                 let routing = AudioRouting::from(src);
-                debug!(?src, ?routing, "upstream: source class selection");
+                info!(?src, ?routing, "upstream: SelectSource from client");
                 let _ = audio_source_tx.send(routing);
             }
             ClientMsg::SetDecoder { decoder, enabled } => {
