@@ -246,11 +246,25 @@ fn poll_radio_state(
         .ok()
         .and_then(|r| parse::parse_nb_response(&r))
         .unwrap_or(false);
-    let agc = port
-        .command("GT;")
+    // AGC state needs two reads on the FDM-DUO: GC; picks auto vs
+    // manual gain, GS; carries the speed (when auto) or manual gain
+    // value. We ignore the manual-gain value here — it maps to
+    // AgcMode::Off in `gs_to_agc_mode`. Kenwood's `GT;` is documented
+    // as compatibility-only on this radio and always returns "000",
+    // so it can't drive real AGC state.
+    let gc_auto = port
+        .command("GC;")
         .ok()
-        .and_then(|r| parse::parse_gt_response(&r))
-        .unwrap_or(AgcMode::Slow);
+        .and_then(|r| parse::parse_gc_response(&r));
+    let gs = port
+        .command("GS;")
+        .ok()
+        .and_then(|r| parse::parse_gs_response(&r));
+    let agc = match (gc_auto, gs) {
+        (Some(auto), Some((_, p2))) => parse::gs_to_agc_mode(auto, p2),
+        (Some(false), _) => AgcMode::Off,
+        _ => AgcMode::Slow,
+    };
 
     Ok(RadioState {
         vfo: parsed.vfo,

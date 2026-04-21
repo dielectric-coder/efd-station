@@ -189,26 +189,64 @@ pub fn parse_nb_response(response: &str) -> Option<bool> {
     parse_bit_response(response, "NB")
 }
 
-/// Parse a GT; (AGC speed) response into our [`AgcMode`] enum.
+/// Parse a `GC;` (active gain control) response.
 ///
-/// FDM-DUO follows Kenwood `GT;` semantics: `GTnnn;` where nnn is in
-/// [000, 020]. 000 = AGC off; 001..=007 ≈ Fast; 008..=014 ≈ Medium;
-/// 015..=020 ≈ Slow. Mapping is approximate — the radio doesn't expose
-/// discrete enum slots.
-pub fn parse_gt_response(response: &str) -> Option<crate::AgcMode> {
-    use crate::AgcMode;
+/// `GC0;` = auto (AGC engaged). `GC1;` = manual gain (AGC off).
+/// Returns `true` when AGC is engaged.
+pub fn parse_gc_response(response: &str) -> Option<bool> {
     let s = response.trim();
-    if !s.starts_with("GT") || !s.ends_with(';') {
+    if !s.starts_with("GC") || !s.ends_with(';') {
+        return None;
+    }
+    match &s[2..s.len() - 1] {
+        "0" => Some(true),
+        "1" => Some(false),
+        _ => None,
+    }
+}
+
+/// Parse a `GS;` (control gain settings) response. Format is
+/// `GS P1 P2 P2 ;` where P1 selects the active gain mode and P2 is a
+/// two-digit value whose meaning depends on P1:
+///   - `P1='0'` (auto/AGC): P2 = `00` slow, `01` medium, `02` fast.
+///   - `P1='1'` (manual):   P2 = `00` OFF, `01`..`10` manual gain.
+///
+/// Returns `(is_auto, p2)` so the caller can combine it with the `GC;`
+/// answer to produce an [`AgcMode`].
+pub fn parse_gs_response(response: &str) -> Option<(bool, u8)> {
+    let s = response.trim();
+    if !s.starts_with("GS") || !s.ends_with(';') {
         return None;
     }
     let payload = &s[2..s.len() - 1];
-    let n: u16 = payload.parse().ok()?;
-    Some(match n {
-        0 => AgcMode::Off,
-        1..=7 => AgcMode::Fast,
-        8..=14 => AgcMode::Medium,
+    if payload.len() != 3 {
+        return None;
+    }
+    let (p1, p2_str) = payload.split_at(1);
+    let is_auto = match p1 {
+        "0" => true,
+        "1" => false,
+        _ => return None,
+    };
+    let p2: u8 = p2_str.parse().ok()?;
+    Some((is_auto, p2))
+}
+
+/// Combine a `GC;` + `GS;` answer pair into an [`AgcMode`]. `GC1;`
+/// (manual gain) always maps to [`AgcMode::Off`] regardless of `GS`.
+/// `GC0;` + `GS 0 PP;` maps the P2 byte: 00→Slow, 01→Medium, 02→Fast.
+/// Unknown P2 values fall back to [`AgcMode::Slow`].
+pub fn gs_to_agc_mode(gc_auto: bool, gs_p2: u8) -> crate::AgcMode {
+    use crate::AgcMode;
+    if !gc_auto {
+        return AgcMode::Off;
+    }
+    match gs_p2 {
+        0 => AgcMode::Slow,
+        1 => AgcMode::Medium,
+        2 => AgcMode::Fast,
         _ => AgcMode::Slow,
-    })
+    }
 }
 
 // ---------- filter bandwidth tables (per ELAD FDM-DUO manual) ----------
@@ -380,13 +418,30 @@ mod tests {
     }
 
     #[test]
-    fn parse_gt_agc_modes() {
+    fn parse_gc_gs_and_agc_mode() {
         use efd_proto::AgcMode;
-        assert_eq!(parse_gt_response("GT000;"), Some(AgcMode::Off));
-        assert_eq!(parse_gt_response("GT005;"), Some(AgcMode::Fast));
-        assert_eq!(parse_gt_response("GT010;"), Some(AgcMode::Medium));
-        assert_eq!(parse_gt_response("GT018;"), Some(AgcMode::Slow));
-        assert_eq!(parse_gt_response("GTxx;"), None);
+        // GC; picks auto vs manual.
+        assert_eq!(parse_gc_response("GC0;"), Some(true));
+        assert_eq!(parse_gc_response("GC1;"), Some(false));
+        assert_eq!(parse_gc_response("GCx;"), None);
+        assert_eq!(parse_gc_response("foo"), None);
+
+        // GS; carries the (auto, P2) pair.
+        assert_eq!(parse_gs_response("GS000;"), Some((true, 0)));
+        assert_eq!(parse_gs_response("GS001;"), Some((true, 1)));
+        assert_eq!(parse_gs_response("GS002;"), Some((true, 2)));
+        assert_eq!(parse_gs_response("GS110;"), Some((false, 10)));
+        assert_eq!(parse_gs_response("GS2;"), None); // wrong length
+        assert_eq!(parse_gs_response("GSxxx;"), None);
+
+        // Combining yields AgcMode.
+        assert_eq!(gs_to_agc_mode(true, 0), AgcMode::Slow);
+        assert_eq!(gs_to_agc_mode(true, 1), AgcMode::Medium);
+        assert_eq!(gs_to_agc_mode(true, 2), AgcMode::Fast);
+        // Manual gain (GC1;) always reads back as Off regardless of
+        // the P2 value, since the AGC stage is bypassed.
+        assert_eq!(gs_to_agc_mode(false, 0), AgcMode::Off);
+        assert_eq!(gs_to_agc_mode(false, 5), AgcMode::Off);
     }
 
     #[test]

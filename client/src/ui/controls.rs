@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use efd_proto::{
-    Capabilities, ClientMsg, ControlTarget, DeviceId, DeviceList, DrmStatus, Mode, Ptt, RadioState,
-    RecKind, RecordingStatus, SourceClass, StartRecording, StateSnapshot,
+    AgcMode, Capabilities, ClientMsg, ControlTarget, DeviceId, DeviceList, DrmStatus, Mode, Ptt,
+    RadioState, RecKind, RecordingStatus, SourceClass, StartRecording, StateSnapshot,
 };
 use gtk4::prelude::*;
 use gtk4::{
@@ -624,9 +624,11 @@ pub struct ControlBar {
     cached_iq_devices: Rc<RefCell<Vec<DeviceId>>>,
     /// ctrl0-center yellow chip tiles per drawio (agc / f / bw / rit
     /// / IF). Buttons are kept only for the two tiles that get
-    /// visibility-gated on hardware CAT (agc + f); bw/rit/IF labels
-    /// stay because `sync_from_radio` updates their markup.
+    /// visibility-gated on hardware CAT (agc + f); the labels stay
+    /// because `sync_from_radio` updates their markup from the
+    /// polled `RadioState`.
     agc_tile_btn: Button,
+    agc_tile_label: Label,
     freq_tile_btn: Button,
     freq_tile_label: Label,
     bw_tile_label: Label,
@@ -805,9 +807,10 @@ impl ControlBar {
         // -----------------------------------------------------------
         const TILE_WIDTH: i32 = 100;
         let initial_threshold = sdr_params.borrow().agc_threshold;
+        let initial_agc_mode = sdr_params.borrow().agc_mode();
         let (agc_tile_btn, agc_tile_label) = make_ctrl_tile(
-            &format!("<i>agc {}</i>", initial_threshold),
-            "AGC threshold (0–10) — click to edit",
+            &format_agc_label(initial_threshold, initial_agc_mode),
+            "AGC threshold + speed — click to edit",
             TILE_WIDTH,
         );
         let (freq_tile_btn, freq_tile_label) = make_ctrl_tile(
@@ -839,27 +842,33 @@ impl ControlBar {
         ctrl0_center.append(&rit_tile_btn);
         ctrl0_center.append(&if_tile_btn);
 
-        // agc tile → edit threshold (0–10), send CAT, update label.
+        // agc tile → edit threshold + speed, send both CAT commands,
+        // update label. Dialog commits on OK; Cancel discards. We
+        // always send both commands even if only one changed — the
+        // FDM-DUO handles duplicate-value writes harmlessly.
         {
             let ws = ws_tx.clone();
             let sp = sdr_params.clone();
             let lc = last_cmd.clone();
             let lbl = agc_tile_label.clone();
             agc_tile_btn.connect_clicked(move |btn| {
-                let current = sp.borrow().agc_threshold;
+                let threshold = sp.borrow().agc_threshold;
+                let mode = sp.borrow().agc_mode();
                 let ws = ws.clone();
                 let sp = sp.clone();
                 let lc = lc.clone();
                 let lbl = lbl.clone();
-                open_tile_entry(btn, "AGC threshold", &current.to_string(), move |txt| {
-                    if let Ok(v) = txt.trim().parse::<u8>() {
-                        let v = v.min(10);
-                        lc.set(Instant::now());
-                        sp.borrow_mut().agc_threshold = v;
-                        lbl.set_markup(&format!("<i>agc {v}</i>"));
-                        let _ = ws.send(ClientMsg::CatCommand(
-                            cat_commands::set_agc_threshold(v),
-                        ));
+                open_agc_dialog(btn, threshold, mode, move |v, new_mode| {
+                    lc.set(Instant::now());
+                    {
+                        let mut p = sp.borrow_mut();
+                        p.agc_threshold = v;
+                        p.set_agc_mode(new_mode);
+                    }
+                    lbl.set_markup(&format_agc_label(v, new_mode));
+                    let _ = ws.send(ClientMsg::CatCommand(cat_commands::set_agc_threshold(v)));
+                    for cmd in cat_commands::set_agc_mode(new_mode) {
+                        let _ = ws.send(ClientMsg::CatCommand(cmd));
                     }
                 });
             });
@@ -1237,6 +1246,7 @@ impl ControlBar {
             cached_audio_devices,
             cached_iq_devices,
             agc_tile_btn,
+            agc_tile_label,
             freq_tile_btn,
             freq_tile_label,
             bw_tile_label,
@@ -1349,6 +1359,9 @@ impl ControlBar {
     pub fn sync_from_radio(&self, state: &RadioState) {
         *self.last_radio.borrow_mut() = Some(state.clone());
 
+        self.agc_tile_label
+            .set_markup(&format_agc_label(state.agc_threshold.min(10), state.agc));
+
         self.freq_tile_label.set_markup(&format!(
             "<i>f</i> {}<sup>Hz</sup>",
             format_freq_spaced(state.freq_hz)
@@ -1432,15 +1445,21 @@ impl ControlBar {
             btn.set_sensitive(cat_live);
         }
 
-        // Initial AGC-threshold sync, deferred from construction so we only
-        // emit it to sources that can accept the CAT command.
+        // Initial AGC sync (threshold + speed), deferred from
+        // construction so we only emit it to sources that can accept
+        // the CAT command. Gated on Radio: in DemodMirrorFreq the
+        // server drops TH/GC/GS (demod-bound, not wired yet).
         if caps.has_hardware_cat && caps.control_target == ControlTarget::Radio {
-            let threshold = self.sdr_params.borrow().agc_threshold;
-            let _ = self
-                .ws_tx
-                .send(ClientMsg::CatCommand(cat_commands::set_agc_threshold(
-                    threshold,
-                )));
+            let (threshold, mode) = {
+                let p = self.sdr_params.borrow();
+                (p.agc_threshold, p.agc_mode())
+            };
+            let _ = self.ws_tx.send(ClientMsg::CatCommand(
+                cat_commands::set_agc_threshold(threshold),
+            ));
+            for cmd in cat_commands::set_agc_mode(mode) {
+                let _ = self.ws_tx.send(ClientMsg::CatCommand(cmd));
+            }
         }
 
         let filtered: Vec<(&'static str, Mode)> = MODES
@@ -1562,6 +1581,142 @@ where
         let cb = cb.clone();
         entry.connect_activate(move |e| {
             cb(&e.text());
+            d.close();
+        });
+    }
+
+    dlg.present();
+}
+
+/// Short-form AGC-speed label used in the ctrl0-center chip tile.
+/// `S`/`M`/`F` mirror the dropdown order; `O` shows when the radio
+/// reports AGC off even though that state isn't pickable from the UI.
+fn agc_mode_letter(mode: AgcMode) -> &'static str {
+    match mode {
+        AgcMode::Slow => "S",
+        AgcMode::Medium => "M",
+        AgcMode::Fast => "F",
+        AgcMode::Off => "O",
+    }
+}
+
+/// Render the AGC chip tile's Pango markup.
+fn format_agc_label(threshold: u8, mode: AgcMode) -> String {
+    format!("<i>agc</i> {threshold} {}", agc_mode_letter(mode))
+}
+
+/// AGC editor dialog — threshold slider (0–10) + speed dropdown
+/// (Slow / Medium / Fast). Commits both values on OK; silently
+/// discards on Cancel. Preselects the dropdown to match `initial_mode`
+/// (falling back to Slow when the radio is in Off since Off isn't
+/// a pickable option).
+fn open_agc_dialog<F>(
+    anchor: &Button,
+    initial_threshold: u8,
+    initial_mode: AgcMode,
+    on_commit: F,
+) where
+    F: Fn(u8, AgcMode) + 'static,
+{
+    let dlg = Window::new();
+    dlg.set_title(Some("AGC"));
+    if let Some(root) = anchor.root().and_downcast::<Window>() {
+        dlg.set_transient_for(Some(&root));
+    }
+    dlg.set_modal(true);
+    dlg.set_default_size(320, -1);
+    dlg.set_resizable(false);
+
+    let vbox = GtkBox::new(Orientation::Vertical, 10);
+    vbox.set_margin_start(12);
+    vbox.set_margin_end(12);
+    vbox.set_margin_top(12);
+    vbox.set_margin_bottom(12);
+
+    // --- Threshold row: "Threshold (0–10)" label + slider + live value ---
+    let threshold_hdr = Label::new(Some("Threshold (0–10)"));
+    threshold_hdr.set_halign(Align::Start);
+    vbox.append(&threshold_hdr);
+
+    let thr_row = GtkBox::new(Orientation::Horizontal, 8);
+    let thr_adj = Adjustment::new(
+        initial_threshold.min(10) as f64,
+        0.0,
+        10.0,
+        1.0,
+        1.0,
+        0.0,
+    );
+    let thr_scale = Scale::new(Orientation::Horizontal, Some(&thr_adj));
+    thr_scale.set_draw_value(false);
+    thr_scale.set_digits(0);
+    thr_scale.set_hexpand(true);
+    thr_scale.set_round_digits(0);
+    for v in 0..=10 {
+        thr_scale.add_mark(v as f64, gtk4::PositionType::Bottom, None);
+    }
+    let thr_value = Label::new(Some(&initial_threshold.min(10).to_string()));
+    thr_value.set_width_chars(3);
+    thr_value.set_xalign(1.0);
+    {
+        let lbl = thr_value.clone();
+        thr_scale.connect_value_changed(move |s| {
+            lbl.set_text(&(s.value().round() as u8).to_string());
+        });
+    }
+    thr_row.append(&thr_scale);
+    thr_row.append(&thr_value);
+    vbox.append(&thr_row);
+
+    // --- Speed row: dropdown ---
+    let speed_hdr = Label::new(Some("Speed"));
+    speed_hdr.set_halign(Align::Start);
+    vbox.append(&speed_hdr);
+
+    let speed_list = StringList::new(&["Off", "Slow", "Medium", "Fast"]);
+    let speed_dd = DropDown::new(Some(speed_list), gtk4::Expression::NONE);
+    let preselect = match initial_mode {
+        AgcMode::Off => 0,
+        AgcMode::Slow => 1,
+        AgcMode::Medium => 2,
+        AgcMode::Fast => 3,
+    };
+    speed_dd.set_selected(preselect);
+    speed_dd.set_hexpand(true);
+    vbox.append(&speed_dd);
+
+    // --- OK / Cancel ---
+    let hbox = GtkBox::new(Orientation::Horizontal, 8);
+    hbox.set_halign(Align::End);
+    hbox.set_margin_top(4);
+    let cancel = Button::with_label("Cancel");
+    let ok = Button::with_label("OK");
+    hbox.append(&cancel);
+    hbox.append(&ok);
+    vbox.append(&hbox);
+
+    dlg.set_child(Some(&vbox));
+
+    let cb = Rc::new(on_commit);
+    {
+        let d = dlg.clone();
+        cancel.connect_clicked(move |_| d.close());
+    }
+    {
+        let d = dlg.clone();
+        let sc = thr_scale.clone();
+        let sd = speed_dd.clone();
+        let cb = cb.clone();
+        ok.connect_clicked(move |_| {
+            let v = (sc.value().round() as i32).clamp(0, 10) as u8;
+            let mode = match sd.selected() {
+                0 => AgcMode::Off,
+                1 => AgcMode::Slow,
+                2 => AgcMode::Medium,
+                3 => AgcMode::Fast,
+                _ => AgcMode::Slow,
+            };
+            cb(v, mode);
             d.close();
         });
     }

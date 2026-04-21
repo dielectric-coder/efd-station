@@ -319,7 +319,11 @@ const ALLOWED_CAT_PREFIXES: &[&str] = &[
     "RF",       // filter bandwidth (RF<mode><idx>)
     "RA",       // attenuator
     "LP",       // 50 MHz low-pass filter
-    "GT", "TH", // AGC mode + threshold
+    // AGC surface: `GC` picks auto vs manual gain, `GS` carries the
+    // speed (or manual gain value) per the FDM-DUO manual §6.3.2;
+    // `TH` sets the AGC threshold (0–10). The Kenwood-era `GT` is a
+    // compatibility no-op on this radio, so it's omitted.
+    "GC", "GS", "TH",
     "NR", "NB", // noise reduction / blanker
     "RT", "XT", // RIT / XIT enable
     "RC",       // RIT clear

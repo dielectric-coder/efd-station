@@ -1,4 +1,4 @@
-use efd_proto::Mode;
+use efd_proto::{AgcMode, Mode};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -8,6 +8,16 @@ pub struct SdrParams {
     pub freq_hz: u64,
     pub mode: String,
     pub agc_threshold: u8,
+    /// AGC speed: "slow" / "medium" / "fast". Serialized as a string
+    /// so the TOML file is easy to hand-edit; maps to [`AgcMode`] via
+    /// [`Self::agc_mode`] / [`Self::set_agc_mode`]. Older files with
+    /// no `agc_speed` key load with the serde default ("slow").
+    #[serde(default = "default_agc_speed")]
+    pub agc_speed: String,
+}
+
+fn default_agc_speed() -> String {
+    "slow".into()
 }
 
 impl Default for SdrParams {
@@ -16,6 +26,7 @@ impl Default for SdrParams {
             freq_hz: 7_100_000,
             mode: "USB".into(),
             agc_threshold: 5,
+            agc_speed: default_agc_speed(),
         }
     }
 }
@@ -36,6 +47,25 @@ impl SdrParams {
 
     pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode_str(mode).to_string();
+    }
+
+    pub fn agc_mode(&self) -> AgcMode {
+        match self.agc_speed.as_str() {
+            "off" => AgcMode::Off,
+            "fast" => AgcMode::Fast,
+            "medium" => AgcMode::Medium,
+            _ => AgcMode::Slow,
+        }
+    }
+
+    pub fn set_agc_mode(&mut self, mode: AgcMode) {
+        self.agc_speed = match mode {
+            AgcMode::Off => "off",
+            AgcMode::Fast => "fast",
+            AgcMode::Medium => "medium",
+            AgcMode::Slow => "slow",
+        }
+        .to_string();
     }
 }
 

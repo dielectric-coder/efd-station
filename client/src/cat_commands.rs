@@ -1,4 +1,4 @@
-use efd_proto::CatCommand;
+use efd_proto::{AgcMode, CatCommand};
 
 /// Build a CAT command to set the VFO A frequency.
 pub fn set_freq(hz: u64) -> CatCommand {
@@ -37,6 +37,74 @@ pub fn set_agc_threshold(value: u8) -> CatCommand {
     let v = value.min(10);
     CatCommand {
         raw: format!("TH{v:02};"),
+    }
+}
+
+/// Build the CAT commands needed to set AGC speed on the FDM-DUO.
+///
+/// The native surface (manual §6.3.2) is two commands:
+///   - `GC0;` / `GC1;` picks auto (AGC) vs. manual gain.
+///   - `GS 0 P2 P2 ;` sets the speed when auto: `00` slow, `01` medium,
+///     `02` fast.
+///
+/// So `Off` emits just `GC1;` (switch to manual gain — AGC bypassed);
+/// the three speeds emit `GC0;` followed by the matching `GS`. The
+/// legacy Kenwood-style `GTnnn;` is a compatibility no-op on the
+/// FDM-DUO and is not used.
+pub fn set_agc_mode(mode: AgcMode) -> Vec<CatCommand> {
+    match mode {
+        AgcMode::Off => vec![CatCommand { raw: "GC1;".into() }],
+        speed => {
+            let p2 = match speed {
+                AgcMode::Slow => 0,
+                AgcMode::Medium => 1,
+                AgcMode::Fast => 2,
+                AgcMode::Off => unreachable!(),
+            };
+            vec![
+                CatCommand { raw: "GC0;".into() },
+                CatCommand { raw: format!("GS0{p2:02};") },
+            ]
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raws(cmds: Vec<CatCommand>) -> Vec<String> {
+        cmds.into_iter().map(|c| c.raw).collect()
+    }
+
+    #[test]
+    fn threshold_format() {
+        assert_eq!(set_agc_threshold(0).raw, "TH00;");
+        assert_eq!(set_agc_threshold(5).raw, "TH05;");
+        assert_eq!(set_agc_threshold(10).raw, "TH10;");
+        // Values above 10 clamp to 10.
+        assert_eq!(set_agc_threshold(42).raw, "TH10;");
+    }
+
+    #[test]
+    fn agc_mode_off_is_single_gc1() {
+        assert_eq!(raws(set_agc_mode(AgcMode::Off)), vec!["GC1;"]);
+    }
+
+    #[test]
+    fn agc_mode_speeds_emit_gc0_then_gs() {
+        assert_eq!(
+            raws(set_agc_mode(AgcMode::Slow)),
+            vec!["GC0;", "GS000;"]
+        );
+        assert_eq!(
+            raws(set_agc_mode(AgcMode::Medium)),
+            vec!["GC0;", "GS001;"]
+        );
+        assert_eq!(
+            raws(set_agc_mode(AgcMode::Fast)),
+            vec!["GC0;", "GS002;"]
+        );
     }
 }
 

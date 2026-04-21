@@ -4,6 +4,38 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Fixed (server 0.10.9 / client 0.8.5 — use native GC/GS for AGC)
+- **AGC speed never reached the radio.** The previous implementation
+  emitted `GTnnn;` (Kenwood-compat), but §6.3.3 of the FDM-DUO manual
+  lists `GT` as a compatibility no-op ("no effect on the transceiver").
+  The native AGC surface is `GC` (auto vs manual gain) + `GS` (speed
+  or manual gain value), per §6.3.2 pages 48–49.
+- Client `cat_commands::set_agc_mode` now returns a `Vec<CatCommand>`:
+  `Off` emits `GC1;` (manual gain, AGC bypassed); Slow/Medium/Fast
+  emit `GC0;` followed by `GS000;` / `GS001;` / `GS002;`.
+- AGC dropdown gains an `Off` entry (preselect order: Off/Slow/Med/Fast).
+- Server `efd-cat` polling reads `GC;` + `GS;` instead of `GT;`;
+  `parse_gt_response` removed, `parse_gc_response` / `parse_gs_response`
+  / `gs_to_agc_mode` added. 5 new parse tests replace the old GT test.
+- `ws::upstream` allowlist: `GT` removed (useless), `GC` + `GS` added.
+
+### Added (client 0.8.4 — AGC popup: slider + speed dropdown)
+- AGC chip tile now opens a modal editor with a 0–10 threshold slider
+  (tick-marked at every step) and a Slow / Medium / Fast dropdown.
+  Both values commit on OK; Cancel discards. Tile label renders as
+  `agc <n> S|M|F` to show the current state at a glance.
+- New `cat_commands::set_agc_mode(AgcMode)` emits `GTnnn;` with the
+  FDM-DUO's 0–20 bucket mapping (Off=0, Fast=4, Medium=11, Slow=17)
+  — the same bands `efd-cat::parse::parse_gt_response` decodes from
+  the radio.
+- `SdrParams` gains an `agc_speed` field (serde-default `"slow"` so
+  existing on-disk params load cleanly), persisted on quit alongside
+  threshold.
+- `apply_capabilities` now pushes both the threshold AND the speed to
+  the radio on connect (Radio target only); `sync_from_radio`
+  refreshes the tile from the polled `RadioState.agc` +
+  `agc_threshold` so the label tracks hardware knob twists.
+
 ### Added (server 0.10.8 — ControlTarget routing)
 - New `efd_proto::ControlTarget` enum on `Capabilities`
   (`None | Radio | Demod | DemodMirrorFreq`) — computed server-side
