@@ -205,21 +205,24 @@ pub fn parse_gc_response(response: &str) -> Option<bool> {
     }
 }
 
-/// Parse a `GS;` (control gain settings) response. Format is
-/// `GS P1 P2 P2 ;` where P1 selects the active gain mode and P2 is a
-/// two-digit value whose meaning depends on P1:
-///   - `P1='0'` (auto/AGC): P2 = `00` slow, `01` medium, `02` fast.
-///   - `P1='1'` (manual):   P2 = `00` OFF, `01`..`10` manual gain.
+/// Parse a `GS;` (control gain settings) response. Format on the
+/// FDM-DUO firmware is `GS P1 P2 P2 P2 ;` — P1 selects the active
+/// gain mode (`0`=auto, `1`=manual), P2P2P2 is a three-digit value:
+///   - `P1='0'` (auto/AGC): `000` slow, `001` medium, `002` fast.
+///   - `P1='1'` (manual):   `000` OFF, `001`..`010` manual gain.
 ///
-/// Returns `(is_auto, p2)` so the caller can combine it with the `GC;`
+/// (Bench-verified on firmware Rev 2.13 — the manual's table shows
+/// only two P2 cells, but the radio's own answer uses three.)
+///
+/// Returns `(is_auto, p2)`; the caller combines it with the `GC;`
 /// answer to produce an [`AgcMode`].
-pub fn parse_gs_response(response: &str) -> Option<(bool, u8)> {
+pub fn parse_gs_response(response: &str) -> Option<(bool, u16)> {
     let s = response.trim();
     if !s.starts_with("GS") || !s.ends_with(';') {
         return None;
     }
     let payload = &s[2..s.len() - 1];
-    if payload.len() != 3 {
+    if payload.len() != 4 {
         return None;
     }
     let (p1, p2_str) = payload.split_at(1);
@@ -228,15 +231,16 @@ pub fn parse_gs_response(response: &str) -> Option<(bool, u8)> {
         "1" => false,
         _ => return None,
     };
-    let p2: u8 = p2_str.parse().ok()?;
+    let p2: u16 = p2_str.parse().ok()?;
     Some((is_auto, p2))
 }
 
 /// Combine a `GC;` + `GS;` answer pair into an [`AgcMode`]. `GC1;`
 /// (manual gain) always maps to [`AgcMode::Off`] regardless of `GS`.
-/// `GC0;` + `GS 0 PP;` maps the P2 byte: 00→Slow, 01→Medium, 02→Fast.
-/// Unknown P2 values fall back to [`AgcMode::Slow`].
-pub fn gs_to_agc_mode(gc_auto: bool, gs_p2: u8) -> crate::AgcMode {
+/// `GC0;` + `GS 0 PPP;` maps the three-digit P2 field: `000`→Slow,
+/// `001`→Medium, `002`→Fast. Unknown values fall back to
+/// [`AgcMode::Slow`].
+pub fn gs_to_agc_mode(gc_auto: bool, gs_p2: u16) -> crate::AgcMode {
     use crate::AgcMode;
     if !gc_auto {
         return AgcMode::Off;
@@ -426,13 +430,14 @@ mod tests {
         assert_eq!(parse_gc_response("GCx;"), None);
         assert_eq!(parse_gc_response("foo"), None);
 
-        // GS; carries the (auto, P2) pair.
-        assert_eq!(parse_gs_response("GS000;"), Some((true, 0)));
-        assert_eq!(parse_gs_response("GS001;"), Some((true, 1)));
-        assert_eq!(parse_gs_response("GS002;"), Some((true, 2)));
-        assert_eq!(parse_gs_response("GS110;"), Some((false, 10)));
-        assert_eq!(parse_gs_response("GS2;"), None); // wrong length
-        assert_eq!(parse_gs_response("GSxxx;"), None);
+        // GS; carries the (auto, P2) pair — 4-byte payload
+        // (P1 + 3-digit P2) per observed firmware behavior.
+        assert_eq!(parse_gs_response("GS0000;"), Some((true, 0)));
+        assert_eq!(parse_gs_response("GS0001;"), Some((true, 1)));
+        assert_eq!(parse_gs_response("GS0002;"), Some((true, 2)));
+        assert_eq!(parse_gs_response("GS1010;"), Some((false, 10)));
+        assert_eq!(parse_gs_response("GS000;"), None); // old 3-byte payload
+        assert_eq!(parse_gs_response("GSxxxx;"), None);
 
         // Combining yields AgcMode.
         assert_eq!(gs_to_agc_mode(true, 0), AgcMode::Slow);

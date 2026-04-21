@@ -44,10 +44,16 @@ pub fn set_agc_threshold(value: u8) -> CatCommand {
 ///
 /// The native surface (manual §6.3.2) is two commands:
 ///   - `GC0;` / `GC1;` picks auto (AGC) vs. manual gain.
-///   - `GS 0 P2 P2 ;` sets the speed when auto: `00` slow, `01` medium,
-///     `02` fast.
+///   - `GS 0 P2 P2 P2 ;` sets the speed when auto:
+///         `000` slow, `001` medium, `002` fast.
 ///
-/// So `Off` emits just `GC1;` (switch to manual gain — AGC bypassed);
+/// Note: the manual's GS table shows only two P2 cells, but the
+/// radio's own reply to a `GS0;` read uses three digits
+/// (e.g. `GS0001;`). Bench-verified on firmware Rev 2.13. The
+/// two-digit variant is silently ignored, which is what produced
+/// the "speed doesn't take effect" report.
+///
+/// `Off` emits just `GC1;` (switch to manual gain — AGC bypassed);
 /// the three speeds emit `GC0;` followed by the matching `GS`. The
 /// legacy Kenwood-style `GTnnn;` is a compatibility no-op on the
 /// FDM-DUO and is not used.
@@ -63,7 +69,7 @@ pub fn set_agc_mode(mode: AgcMode) -> Vec<CatCommand> {
             };
             vec![
                 CatCommand { raw: "GC0;".into() },
-                CatCommand { raw: format!("GS0{p2:02};") },
+                CatCommand { raw: format!("GS0{p2:03};") },
             ]
         }
     }
@@ -95,15 +101,15 @@ mod tests {
     fn agc_mode_speeds_emit_gc0_then_gs() {
         assert_eq!(
             raws(set_agc_mode(AgcMode::Slow)),
-            vec!["GC0;", "GS000;"]
+            vec!["GC0;", "GS0000;"]
         );
         assert_eq!(
             raws(set_agc_mode(AgcMode::Medium)),
-            vec!["GC0;", "GS001;"]
+            vec!["GC0;", "GS0001;"]
         );
         assert_eq!(
             raws(set_agc_mode(AgcMode::Fast)),
-            vec!["GC0;", "GS002;"]
+            vec!["GC0;", "GS0002;"]
         );
     }
 }

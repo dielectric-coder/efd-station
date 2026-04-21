@@ -4,6 +4,19 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Fixed (server 0.10.12 / client 0.8.6 — GS P2 is 3 digits, not 2)
+- The manual's §6.3.2 GS table shows only two P2 cells, but the
+  radio's own reply to `GS0;` is `GS0001;` — a 4-byte payload
+  (`P1` + three-digit `P2`). The 0.10.9 wire format was one byte
+  short, so the radio silently rejected every `GS`, which is why
+  toggling Slow/Medium/Fast produced no behavioural change even
+  though the command reached the radio cleanly.
+- Client `set_agc_mode` now emits `GS0000;` / `GS0001;` / `GS0002;`.
+- Server `parse_gs_response` expects a 4-byte payload; parser /
+  tests / `gs_to_agc_mode` widened from `u8` to `u16` so the manual
+  gain range (`000`..`010`) also round-trips cleanly.
+- Bench-verified against firmware Rev 2.13.
+
 ### Diag (server 0.10.11 — log the AGC poll replies too)
 - Set-command logs alone can't tell us whether the radio is
   accepting `GC`/`GS` — TH echoes empty too and that one definitely

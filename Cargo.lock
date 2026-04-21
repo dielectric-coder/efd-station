@@ -450,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "efd-client"
-version = "0.8.5"
+version = "0.8.6"
 dependencies = [
  "audiopus",
  "bincode",
@@ -506,7 +506,7 @@ dependencies = [
 
 [[package]]
 name = "efd-server"
-version = "0.10.10"
+version = "0.10.12"
 dependencies = [
  "axum",
  "bincode",
