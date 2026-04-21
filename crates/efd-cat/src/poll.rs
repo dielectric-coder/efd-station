@@ -258,15 +258,17 @@ fn poll_radio_state(
     // Kenwood's `GT;` is a compatibility-only command on this radio
     // per manual §6.3.3 — it echoes hardcoded data regardless of real
     // AGC state, so we don't use it.
-    let gc_auto = port
-        .command("GC;")
-        .ok()
-        .and_then(|r| parse::parse_gc_response(&r));
+    // Raw reads go through explicit info! calls during diagnosis —
+    // `SerialPort::command()` only logs at debug, and we want the
+    // radio's actual reply visible in the journal so we can tell
+    // whether GC/GS writes are being honoured.
+    let gc_raw = port.command("GC;").unwrap_or_default();
+    info!(cmd = "GC;", response = %gc_raw, "CAT agc poll");
+    let gc_auto = parse::parse_gc_response(&gc_raw);
     let gs_query = if gc_auto == Some(false) { "GS1;" } else { "GS0;" };
-    let gs = port
-        .command(gs_query)
-        .ok()
-        .and_then(|r| parse::parse_gs_response(&r));
+    let gs_raw = port.command(gs_query).unwrap_or_default();
+    info!(cmd = %gs_query, response = %gs_raw, "CAT agc poll");
+    let gs = parse::parse_gs_response(&gs_raw);
     let agc = match (gc_auto, gs) {
         (Some(true), Some((_, p2))) => parse::gs_to_agc_mode(true, p2),
         (Some(false), _) => AgcMode::Off,

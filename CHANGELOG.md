@@ -4,6 +4,13 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Diag (server 0.10.11 — log the AGC poll replies too)
+- Set-command logs alone can't tell us whether the radio is
+  accepting `GC`/`GS` — TH echoes empty too and that one definitely
+  works. Promoted the poll-path `GC;` and `GS<P1>;` reads to info
+  with the raw response, so the journal shows what the radio
+  actually answers with. Non-functional otherwise.
+
 ### Fixed (server 0.10.10 — GS poll needed P1)
 - Manual §6.3.2 shows `GS` Read format as `GS<P1>;` — a bare `GS;`
   is invalid and the radio doesn't return a parseable answer. The
