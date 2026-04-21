@@ -10,7 +10,7 @@ use efd_proto::{
 use gtk4::prelude::*;
 use gtk4::{
     Adjustment, Align, Box as GtkBox, Button, DropDown, Entry, GestureClick, Label, LevelBar,
-    Orientation, Scale, StringList, ToggleButton, Window,
+    Orientation, Scale, StringList, ToggleButton, Widget, Window,
 };
 use tokio::sync::mpsc;
 
@@ -40,13 +40,16 @@ pub struct DisplayBar {
     /// `.chip-disabled` (unavailable per server Capabilities).
     aud_chip: Label,
     iq_chip: Label,
-    /// Device chips (`disp1-left`) — rebuilt from the server's
-    /// `DeviceList`. `disp1_left_box` is held so
-    /// `set_device_list` can clear + repopulate; `device_chips`
-    /// stores `(DeviceId, Label)` pairs so `set_active_device`
-    /// can paint the right one.
-    disp1_left_box: GtkBox,
-    device_chips: Rc<RefCell<Vec<(efd_proto::DeviceId, Label)>>>,
+    /// Selected-device labels (`disp1-left`) — one under each class
+    /// chip. Show the short form of the currently-picked device for
+    /// that class ("FDM" / "hw:0,0" / "—"). Updated from
+    /// `ServerMsg::DeviceList.active` per class.
+    selected_aud_label: Label,
+    selected_iq_label: Label,
+    /// Cached device lists, by class, from the latest server push.
+    /// Read when the AUD / IQ chips open their pickers.
+    cached_audio_devices: Rc<RefCell<Vec<efd_proto::DeviceId>>>,
+    cached_iq_devices: Rc<RefCell<Vec<efd_proto::DeviceId>>>,
     /// Active-source pill (`disp2-left`, e.g. `FDM IQ` green). Shows
     /// `<device> <class>` for the current live source.
     active_source_pill: Label,
@@ -77,10 +80,6 @@ pub struct DisplayBar {
     decoded_text_label: Label,
     decoded_lines: Rc<RefCell<std::collections::VecDeque<String>>>,
     prev: RefCell<Option<CachedState>>,
-    /// Sender used by clickable `disp1-left` device chips to emit
-    /// `ClientMsg::SelectDevice`. Each chip captures a clone in its
-    /// `GestureClick` handler — no chip currently sends anything else.
-    ws_tx: mpsc::UnboundedSender<ClientMsg>,
 }
 
 /// Rolling log cap for the decoded-text view. 6 fits nicely in the
@@ -132,11 +131,52 @@ impl DisplayBar {
         let (row2, disp2_left, disp2_center, disp2_right) = make_lcr_row();
         container.append(&row2);
 
-        // --- disp0-left: source-class chips (AUD + IQ). ---
+        // --- disp0-left: source-class chips (AUD + IQ) — clickable ---
+        // Clicking a chip opens a device picker filtered to that class
+        // (AUD → audio_devices, IQ → iq_devices). The server records
+        // the pick via `ClientMsg::SelectDevice` and respawns with the
+        // new backend. See `cached_audio_devices` / `cached_iq_devices`.
         let aud_chip = make_chip("AUD");
         let iq_chip = make_chip("IQ");
         paint_chip(&aud_chip, ChipState::Active);
         paint_chip(&iq_chip, ChipState::Inactive);
+
+        let cached_audio_devices: Rc<RefCell<Vec<efd_proto::DeviceId>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        let cached_iq_devices: Rc<RefCell<Vec<efd_proto::DeviceId>>> =
+            Rc::new(RefCell::new(Vec::new()));
+
+        {
+            let tx = ws_tx.clone();
+            let cache = cached_audio_devices.clone();
+            let gesture = GestureClick::new();
+            let chip = aud_chip.clone();
+            gesture.connect_released(move |_, _, _, _| {
+                open_device_picker_anchor(
+                    chip.upcast_ref(),
+                    "Pick AUD device",
+                    &cache.borrow(),
+                    tx.clone(),
+                );
+            });
+            aud_chip.add_controller(gesture);
+        }
+        {
+            let tx = ws_tx.clone();
+            let cache = cached_iq_devices.clone();
+            let gesture = GestureClick::new();
+            let chip = iq_chip.clone();
+            gesture.connect_released(move |_, _, _, _| {
+                open_device_picker_anchor(
+                    chip.upcast_ref(),
+                    "Pick IQ device",
+                    &cache.borrow(),
+                    tx.clone(),
+                );
+            });
+            iq_chip.add_controller(gesture);
+        }
+
         disp0_left.append(&aud_chip);
         disp0_left.append(&iq_chip);
 
@@ -163,13 +203,17 @@ impl DisplayBar {
         dbm_label.set_halign(Align::End);
         disp0_right.append(&dbm_label);
 
-        // --- disp1-left: device chips, rebuilt from DeviceList. ---
-        // Starts empty; `set_device_list` populates on first
-        // `ServerMsg::DeviceList`. Until then the cell is blank
-        // rather than lying about what's available.
-        let disp1_left_box = disp1_left.clone();
-        let device_chips: Rc<RefCell<Vec<(efd_proto::DeviceId, Label)>>> =
-            Rc::new(RefCell::new(Vec::new()));
+        // --- disp1-left: selected-device labels, one under each class
+        // chip in disp0-left. Text updates from `set_device_list` when
+        // a `DeviceList.active` arrives for that class. `—` until then.
+        let selected_aud_label = Label::new(Some("—"));
+        selected_aud_label.add_css_class("monospace");
+        selected_aud_label.set_xalign(0.5);
+        let selected_iq_label = Label::new(Some("—"));
+        selected_iq_label.add_css_class("monospace");
+        selected_iq_label.set_xalign(0.5);
+        disp1_left.append(&selected_aud_label);
+        disp1_left.append(&selected_iq_label);
 
         // --- disp1-center: DRM info (drm_line1) XOR non-DRM status
         // (status_line). Only one is visible at a time; the current
@@ -240,8 +284,10 @@ impl DisplayBar {
             dbm_label,
             aud_chip,
             iq_chip,
-            disp1_left_box,
-            device_chips,
+            selected_aud_label,
+            selected_iq_label,
+            cached_audio_devices,
+            cached_iq_devices,
             active_source_pill,
             passthrough_pill,
             smeter,
@@ -253,7 +299,6 @@ impl DisplayBar {
             decoded_text_label,
             decoded_lines,
             prev: RefCell::new(None),
-            ws_tx,
         }
     }
 
@@ -306,86 +351,43 @@ impl DisplayBar {
         }
     }
 
-    /// Paint the active device chip (`disp1-left`). One chip in the
-    /// current `device_chips` list matches the given kind by kind —
-    /// if we ever have multiple devices of the same kind, the first
-    /// match wins. More specific matching (by `DeviceId.id` as well)
-    /// is a phase-5e concern once the picker UI exists.
+    /// Paint the AUD / IQ source-class chips active/inactive based on
+    /// the kind's `SourceClass`. Call from `apply_capabilities` when
+    /// the server advertises its active source.
     pub fn set_active_device(&self, kind: efd_proto::SourceKind) {
-        for (dev, chip) in self.device_chips.borrow().iter() {
-            let state = if dev.kind == kind {
-                ChipState::Active
-            } else {
-                ChipState::Inactive
-            };
-            paint_chip(chip, state);
-        }
+        let is_iq = matches!(kind.class(), efd_proto::SourceClass::Iq);
+        self.set_selected_source(is_iq);
     }
 
-    /// Rebuild the `disp1-left` chip row from a server-pushed
-    /// `DeviceList`. Clears whatever was there, then adds a chip per
-    /// discovered device with its `device_short_label` text.
-    /// Chips for the active source get `.chip-active`, everything
-    /// else gets `.chip-inactive`. Called from the WS dispatch on
-    /// every `ServerMsg::DeviceList`.
+    /// Cache the server's latest `DeviceList` per class (so AUD/IQ
+    /// chip clicks can open class-filtered pickers) and update the
+    /// disp1-left selected-device labels to reflect `list.active`.
     pub fn set_device_list(&self, list: &efd_proto::DeviceList) {
-        // Drop existing chip widgets from the container first.
-        for (_, chip) in self.device_chips.borrow().iter() {
-            self.disp1_left_box.remove(chip);
-        }
-        self.device_chips.borrow_mut().clear();
-
-        let active_kind = list.active.as_ref().map(|d| d.kind);
-        // Iterate iq then audio so IQ-class devices always sort
-        // before audio-class in the UI.
-        let ordered = list
-            .iq_devices
-            .iter()
-            .chain(list.audio_devices.iter());
-        for dev in ordered {
-            // Skip the synthetic "empty-id" file-source placeholders
-            // the server inserts in every DeviceList — they exist for
-            // wire shape only and have no picker value today.
-            if matches!(
-                dev.kind,
+        // Cache devices by class, dropping synthetic empty-id file
+        // placeholders the server inserts for future AudioFile/IqFile
+        // replay paths — they have no picker value today.
+        let is_real = |d: &&efd_proto::DeviceId| {
+            !(matches!(
+                d.kind,
                 efd_proto::SourceKind::AudioFile | efd_proto::SourceKind::IqFile,
-            ) && dev.id.is_empty()
-            {
-                continue;
-            }
-            let chip = make_chip(device_short_label(dev.kind));
-            chip.set_tooltip_text(Some(&format!(
-                "{:?} — {}\n(click to select this device)",
-                dev.kind, dev.id
-            )));
-            let state = if Some(dev.kind) == active_kind {
-                ChipState::Active
-            } else {
-                ChipState::Inactive
-            };
-            paint_chip(&chip, state);
+            ) && d.id.is_empty())
+        };
+        *self.cached_audio_devices.borrow_mut() =
+            list.audio_devices.iter().filter(is_real).cloned().collect();
+        *self.cached_iq_devices.borrow_mut() =
+            list.iq_devices.iter().filter(is_real).cloned().collect();
 
-            // Clickable: send `ClientMsg::SelectDevice` on release. The
-            // server's upstream handler records the choice and triggers
-            // a graceful respawn so the pipeline reopens the new device.
-            let gesture = GestureClick::new();
-            let tx = self.ws_tx.clone();
-            let d = dev.clone();
-            gesture.connect_released(move |_, _, _, _| {
-                let _ = tx.send(ClientMsg::SelectDevice(d.clone()));
-            });
-            chip.add_controller(gesture);
-
-            self.disp1_left_box.append(&chip);
-            self.device_chips
-                .borrow_mut()
-                .push((dev.clone(), chip));
-        }
-
-        // Reflect the authoritative `list.active` in the disp2-left pill
-        // (e.g. `FDM IQ` or `POR AUD`) so the UI says what the server is
-        // actually running, not the last `Capabilities.source` value.
+        // Update the selected-device label under whichever chip
+        // matches the active device's class. The other class's label
+        // stays at whatever it was (client-side memory of the last
+        // selection for that class).
         if let Some(active) = list.active.as_ref() {
+            let short = selected_label_for(active);
+            match active.kind.class() {
+                efd_proto::SourceClass::Audio => self.selected_aud_label.set_text(&short),
+                efd_proto::SourceClass::Iq => self.selected_iq_label.set_text(&short),
+            }
+            // Also paint the disp2-left pill (e.g. `FDM IQ`).
             let class_tag = match active.kind.class() {
                 efd_proto::SourceClass::Iq => "IQ",
                 efd_proto::SourceClass::Audio => "AUD",
@@ -1617,14 +1619,26 @@ where
 /// device as a clickable row. Clicking a row sends
 /// `ClientMsg::SelectDevice(id)` and closes the dialog. The server
 /// records the choice, triggers a respawn, and reopens with the new
-/// backend.
+/// backend. Thin wrapper over `open_device_picker_anchor`.
 fn open_device_picker(
     anchor: &Button,
     devices: &[DeviceId],
     ws_tx: mpsc::UnboundedSender<ClientMsg>,
 ) {
+    open_device_picker_anchor(anchor.upcast_ref(), "Pick device", devices, ws_tx);
+}
+
+/// Generic picker — same dialog as above but parented to any `Widget`
+/// (so the AUD / IQ source-class chips in disp0-left can open
+/// class-filtered pickers from a `Label`, not just a `Button`).
+fn open_device_picker_anchor(
+    anchor: &Widget,
+    title: &str,
+    devices: &[DeviceId],
+    ws_tx: mpsc::UnboundedSender<ClientMsg>,
+) {
     let dlg = Window::new();
-    dlg.set_title(Some("Pick device"));
+    dlg.set_title(Some(title));
     if let Some(root) = anchor.root().and_downcast::<Window>() {
         dlg.set_transient_for(Some(&root));
     }
@@ -1707,6 +1721,19 @@ fn make_chip(label: &str) -> Label {
     let l = Label::new(Some(label));
     l.add_css_class("monospace");
     l
+}
+
+/// Text for the disp1-left selected-device label. Combines the
+/// three-letter kind short form with the id when the kind alone
+/// isn't enough to disambiguate (e.g. multiple `PortableRadio`
+/// entries on different cards). Empty-id fallback is just the short
+/// form.
+fn selected_label_for(dev: &DeviceId) -> String {
+    if dev.id.is_empty() {
+        device_short_label(dev.kind).to_string()
+    } else {
+        format!("{} {}", device_short_label(dev.kind), dev.id)
+    }
 }
 
 /// Three-letter short label for a `SourceKind`, shown on the
