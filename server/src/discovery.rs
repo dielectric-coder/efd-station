@@ -103,33 +103,19 @@ fn enumerate_iq_usb() -> Vec<DeviceId> {
     out
 }
 
-/// Enumerate ALSA capture devices. Combines the FDM-DUO-specific
-/// discovery (which also covers the radio's USB audio passthrough
-/// when used in AUD mode) with `/proc/asound/cards` for standalone
-/// USB audio dongles.
+/// Enumerate ALSA capture devices as generic audio inputs. Every
+/// capture-capable card in `/proc/asound/cards` becomes a
+/// `SourceKind::PortableRadio` entry with id `"hw:N,0"`, regardless
+/// of what hardware backs it. The FDM-DUO's USB audio port shows up
+/// here too — logically it's just another USB audio card, distinct
+/// from the IQ side which is enumerated under `SourceKind::FdmDuo`
+/// in `enumerate_iq_usb`. Keeping the two sides of the radio as
+/// separate `DeviceId`s removes the ambiguity that the single
+/// `SourceKind::FdmDuo` used to carry in both lists.
 fn enumerate_audio_in() -> Vec<DeviceId> {
     let mut out: Vec<DeviceId> = Vec::new();
 
-    // FDM-DUO USB audio — same helper the live pipeline uses, so
-    // "available for AUD mode" matches reality.
-    if let Some(fdm) = efd_audio::discover_alsa_devices() {
-        if let Some(cap) = fdm.capture {
-            out.push(DeviceId {
-                kind: SourceKind::FdmDuo,
-                id: cap,
-            });
-        }
-    }
-
-    // Other capture PCMs — read /proc/asound/cards and expose each as
-    // a PortableRadio-class device. The user picks one via DeviceId.id
-    // = "hw:N,0" in `SelectDevice`. Skip cards we've already surfaced
-    // as the FDM-DUO entry above.
     if let Ok(cards) = std::fs::read_to_string("/proc/asound/cards") {
-        let seen_hw: std::collections::HashSet<String> = out
-            .iter()
-            .map(|d| d.id.clone())
-            .collect();
         for line in cards.lines() {
             // Lines look like ` 0 [Loopback       ]: Loopback - Loopback ...`
             // We parse the leading card index.
@@ -138,13 +124,9 @@ fn enumerate_audio_in() -> Vec<DeviceId> {
             let Ok(card_idx) = trimmed[..idx_end].parse::<u32>() else {
                 continue;
             };
-            let hw = format!("hw:{card_idx},0");
-            if seen_hw.contains(&hw) {
-                continue;
-            }
             out.push(DeviceId {
                 kind: SourceKind::PortableRadio,
-                id: hw,
+                id: format!("hw:{card_idx},0"),
             });
         }
     } else {
