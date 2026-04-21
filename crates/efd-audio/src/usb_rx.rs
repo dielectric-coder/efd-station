@@ -96,12 +96,31 @@ fn run_usb_rx(
 
         // Downmix stereo interleaved S16_LE to mono f32.
         mono.clear();
+        let mut peak_i16: i16 = 0;
         for frame in buf[..frame_size * channels as usize].chunks_exact(channels as usize) {
             let sum = frame.iter().map(|&s| s as f32).sum::<f32>();
+            for &s in frame {
+                if s.abs() > peak_i16.abs() {
+                    peak_i16 = s;
+                }
+            }
             // Divide by 32767 (not 32768) so encode/decode round-trip is
             // exact: f32 1.0 ↔ s16 32767, f32 -1.0 ↔ s16 -32767. The
             // corresponding encoder (usb_tx.rs) also uses 32767.
             mono.push(sum / (channels as f32 * 32767.0));
+        }
+
+        let peak_f32 = mono.iter().copied().map(f32::abs).fold(0.0f32, f32::max);
+        static BLOCK_COUNT: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let n = BLOCK_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n < 5 || n % 250 == 0 {
+            info!(
+                block = n,
+                peak_s16 = peak_i16,
+                peak_f32 = peak_f32,
+                "USB RX ALSA read"
+            );
         }
 
         let block = PcmBlock { samples: mono.clone() };
