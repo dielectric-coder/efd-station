@@ -43,6 +43,13 @@ fn run_usb_rx(
     use alsa::pcm::{Access, Format, HwParams};
     use alsa::{Direction, PCM};
 
+    // Before opening, force the FDM-DUO's C-Media capture mixer to
+    // Line-at-full-gain. PipeWire/WirePlumber can reset it to the
+    // default (Mic) during any gap when nobody has the device open,
+    // which we hit on every AUD↔IQ transition that triggers a
+    // process respawn. No-op on non-FDM-DUO cards.
+    crate::discover::ensure_fdmduo_capture_state(&config.device);
+
     let pcm = PCM::new(&config.device, Direction::Capture, false)?;
 
     // The FDM-DUO USB audio is stereo S16_LE or S24_3LE natively.

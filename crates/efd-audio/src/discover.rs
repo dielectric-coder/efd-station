@@ -203,3 +203,69 @@ fn resolve_pcm_devices(card: u32) -> FdmDuoAlsa {
 fn read_sysfs(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
 }
+
+/// Force the FDM-DUO's USB audio capture into a known-good state:
+/// `PCM Capture Source = Line`, `Line Capture Switch = on`,
+/// `Line Capture Volume = max`, `Mic Capture Switch = off`. The
+/// Elad FDM-DUO routes its demodulated audio to the Line input of
+/// the on-board C-Media USB audio chip, but `amixer`'s default
+/// after a fresh hotplug (or after WirePlumber normalises the card
+/// during an AUD↔IQ gap when our server has released the device)
+/// is `Mic` — which reads thermal noise from a disconnected input
+/// and sounds silent. Re-applying these every time we open the
+/// capture makes the level stable across transitions.
+///
+/// No-op if `alsa_device` isn't parseable as `hw:N,…`/`plughw:N,…`
+/// or if card N isn't the FDM-DUO (matched by name in
+/// `/proc/asound/cards`). Failures from `amixer` are swallowed —
+/// if the control is missing the device is probably a HAT or
+/// generic dongle, and we don't want to block its open on a
+/// cosmetic setting.
+pub fn ensure_fdmduo_capture_state(alsa_device: &str) {
+    let Some(card_idx) = extract_card_index(alsa_device) else {
+        return;
+    };
+    if !is_fdmduo_card(card_idx) {
+        return;
+    }
+    let card_arg = card_idx.to_string();
+    for (ctl, value) in [
+        ("PCM Capture Source", "Line"),
+        ("Line Capture Switch", "on"),
+        ("Line Capture Volume", "38,38"),
+        ("Mic Capture Switch", "off"),
+    ] {
+        let _ = std::process::Command::new("amixer")
+            .args(["-c", &card_arg, "sset", ctl, value])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    debug!(card = card_idx, "FDM-DUO capture state forced to Line");
+}
+
+fn extract_card_index(alsa_device: &str) -> Option<u32> {
+    let tail = alsa_device
+        .strip_prefix("plughw:")
+        .or_else(|| alsa_device.strip_prefix("hw:"))?;
+    tail.split(',').next()?.parse().ok()
+}
+
+fn is_fdmduo_card(card_idx: u32) -> bool {
+    let Ok(cards) = std::fs::read_to_string("/proc/asound/cards") else {
+        return false;
+    };
+    for line in cards.lines() {
+        let trimmed = line.trim_start();
+        let Some(idx_end) = trimmed.find(' ') else { continue };
+        let Ok(idx) = trimmed[..idx_end].parse::<u32>() else { continue };
+        if idx == card_idx {
+            // Accept both the short name in brackets (e.g. `FDMDUO`)
+            // and the longer device description after the colon.
+            return line.contains("FDM-DUO")
+                || line.contains("FDMDUO")
+                || line.contains("fdm-duo");
+        }
+    }
+    false
+}
