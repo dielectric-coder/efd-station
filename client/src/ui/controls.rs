@@ -5,12 +5,12 @@ use std::time::Instant;
 
 use efd_proto::{
     Capabilities, ClientMsg, DeviceId, DeviceList, DrmStatus, Mode, Ptt, RadioState, RecKind,
-    RecordingStatus, SourceClass, StartRecording, StateSnapshot,
+    RecordingStatus, StartRecording, StateSnapshot,
 };
 use gtk4::prelude::*;
 use gtk4::{
-    Adjustment, Align, Box as GtkBox, Button, DropDown, Entry, GestureClick, Label, LevelBar,
-    Orientation, Scale, StringList, ToggleButton, Widget, Window,
+    Adjustment, Align, Box as GtkBox, Button, DropDown, Entry, Label, LevelBar, Orientation, Scale,
+    StringList, ToggleButton, Widget, Window,
 };
 use tokio::sync::mpsc;
 
@@ -42,14 +42,10 @@ pub struct DisplayBar {
     iq_chip: Label,
     /// Selected-device labels (`disp1-left`) — one under each class
     /// chip. Show the short form of the currently-picked device for
-    /// that class ("FDM" / "hw:0,0" / "—"). Updated from
+    /// that class ("FDM" / "AUD0" / "—"). Updated from
     /// `ServerMsg::DeviceList.active` per class.
     selected_aud_label: Label,
     selected_iq_label: Label,
-    /// Cached device lists, by class, from the latest server push.
-    /// Read when the AUD / IQ chips open their pickers.
-    cached_audio_devices: Rc<RefCell<Vec<efd_proto::DeviceId>>>,
-    cached_iq_devices: Rc<RefCell<Vec<efd_proto::DeviceId>>>,
     /// Active-source pill (`disp2-left`, e.g. `FDM IQ` green). Shows
     /// `<device> <class>` for the current live source.
     active_source_pill: Label,
@@ -113,7 +109,7 @@ struct StatusLineCache {
 }
 
 impl DisplayBar {
-    pub fn new(ws_tx: mpsc::UnboundedSender<ClientMsg>) -> Self {
+    pub fn new() -> Self {
         // Outer vertical container holds three rows. Each row has left /
         // center / right slots so cross-row alignment matches the
         // drawio wireframe (docs/client-sdr-UI.drawio).
@@ -131,52 +127,15 @@ impl DisplayBar {
         let (row2, disp2_left, disp2_center, disp2_right) = make_lcr_row();
         container.append(&row2);
 
-        // --- disp0-left: source-class chips (AUD + IQ) — clickable ---
-        // Clicking a chip opens a device picker filtered to that class
-        // (AUD → audio_devices, IQ → iq_devices). The server records
-        // the pick via `ClientMsg::SelectDevice` and respawns with the
-        // new backend. See `cached_audio_devices` / `cached_iq_devices`.
+        // --- disp0-left: source-class indicator chips (AUD + IQ) ---
+        // Non-interactive: one stays `.chip-active`, the other
+        // `.chip-inactive`, painted by `set_device_list` from the
+        // server's `DeviceList.active.kind.class()`. Picker dialogs
+        // live on the AUDdev / IQdev buttons in the control bar.
         let aud_chip = make_chip("AUD");
         let iq_chip = make_chip("IQ");
         paint_chip(&aud_chip, ChipState::Active);
         paint_chip(&iq_chip, ChipState::Inactive);
-
-        let cached_audio_devices: Rc<RefCell<Vec<efd_proto::DeviceId>>> =
-            Rc::new(RefCell::new(Vec::new()));
-        let cached_iq_devices: Rc<RefCell<Vec<efd_proto::DeviceId>>> =
-            Rc::new(RefCell::new(Vec::new()));
-
-        {
-            let tx = ws_tx.clone();
-            let cache = cached_audio_devices.clone();
-            let gesture = GestureClick::new();
-            let chip = aud_chip.clone();
-            gesture.connect_released(move |_, _, _, _| {
-                open_device_picker_anchor(
-                    chip.upcast_ref(),
-                    "Pick AUD device",
-                    &cache.borrow(),
-                    tx.clone(),
-                );
-            });
-            aud_chip.add_controller(gesture);
-        }
-        {
-            let tx = ws_tx.clone();
-            let cache = cached_iq_devices.clone();
-            let gesture = GestureClick::new();
-            let chip = iq_chip.clone();
-            gesture.connect_released(move |_, _, _, _| {
-                open_device_picker_anchor(
-                    chip.upcast_ref(),
-                    "Pick IQ device",
-                    &cache.borrow(),
-                    tx.clone(),
-                );
-            });
-            iq_chip.add_controller(gesture);
-        }
-
         disp0_left.append(&aud_chip);
         disp0_left.append(&iq_chip);
 
@@ -286,8 +245,6 @@ impl DisplayBar {
             iq_chip,
             selected_aud_label,
             selected_iq_label,
-            cached_audio_devices,
-            cached_iq_devices,
             active_source_pill,
             passthrough_pill,
             smeter,
@@ -359,23 +316,15 @@ impl DisplayBar {
         self.set_selected_source(is_iq);
     }
 
-    /// Cache the server's latest `DeviceList` per class (so AUD/IQ
-    /// chip clicks can open class-filtered pickers) and update the
-    /// disp1-left selected-device labels to reflect `list.active`.
+    /// Update disp0-left AUD/IQ indicator chips and the disp1-left
+    /// selected-device labels from `list.active`. Devices are cached
+    /// on the ControlBar side (where the AUDdev / IQdev pickers live),
+    /// so this method is display-only.
     pub fn set_device_list(&self, list: &efd_proto::DeviceList) {
-        // Cache devices by class, dropping synthetic empty-id file
-        // placeholders the server inserts for future AudioFile/IqFile
-        // replay paths — they have no picker value today.
-        let is_real = |d: &&efd_proto::DeviceId| {
-            !(matches!(
-                d.kind,
-                efd_proto::SourceKind::AudioFile | efd_proto::SourceKind::IqFile,
-            ) && d.id.is_empty())
-        };
-        *self.cached_audio_devices.borrow_mut() =
-            list.audio_devices.iter().filter(is_real).cloned().collect();
-        *self.cached_iq_devices.borrow_mut() =
-            list.iq_devices.iter().filter(is_real).cloned().collect();
+        if let Some(active) = list.active.as_ref() {
+            let is_iq = matches!(active.kind.class(), efd_proto::SourceClass::Iq);
+            self.set_selected_source(is_iq);
+        }
 
         // Update the selected-device label under whichever chip
         // matches the active device's class. The index is the
@@ -663,14 +612,16 @@ const MODES: &[(&str, Mode)] = &[
 #[derive(Clone)]
 pub struct ControlBar {
     container: GtkBox,
-    /// Sole source selector. Untoggled = AUD (radio USB audio), toggled
-    /// = IQ (software demod). Auto-forced and hidden when only one
-    /// source is available.
-    audio_btn: ToggleButton,
     ptt_btn: ToggleButton,
-    /// Cache of the latest server-pushed device list, read by the DEV
-    /// button's picker dialog. Written by `set_device_list`.
-    cached_devices: Rc<RefCell<Vec<DeviceId>>>,
+    /// AUDdev / IQdev picker buttons in ctrl0-left. Each opens a
+    /// class-filtered device picker; visibility is gated on the
+    /// server's advertised capabilities (has_usb_audio / has_iq).
+    aud_dev_btn: Button,
+    iq_dev_btn: Button,
+    /// Cache of the latest server-pushed device list, split by class
+    /// for the AUDdev / IQdev pickers. Written by `set_device_list`.
+    cached_audio_devices: Rc<RefCell<Vec<DeviceId>>>,
+    cached_iq_devices: Rc<RefCell<Vec<DeviceId>>>,
     /// ctrl0-center yellow chip tiles per drawio (agc / f / bw / rit
     /// / IF). Buttons are kept only for the two tiles that get
     /// visibility-gated on hardware CAT (agc + f); bw/rit/IF labels
@@ -978,84 +929,54 @@ impl ControlBar {
             });
         }
 
-        // --- Source toggle (sole mode selector) ---
-        // Untoggled = AUD (radio USB audio); toggled = IQ (software demod).
-        let audio_btn = ToggleButton::with_label("SRC");
-        audio_btn.set_valign(Align::Center);
-        audio_btn.set_tooltip_text(Some(
-            "Audio source — untoggled: radio USB audio (AUD); toggled: software demod (IQ)",
-        ));
-        {
-            let tx = ws_tx.clone();
-            let lr = last_radio.clone();
-            let sp = sdr_params.clone();
-            let md = mode_dropdown.clone();
-            let am = active_modes.clone();
-            let db = display_bar.clone();
-            let lbl = freq_tile_label.clone();
-            audio_btn.connect_toggled(move |btn| {
-                let is_iq = btn.is_active();
-                db.set_selected_source(is_iq);
-                if is_iq {
-                    let (freq_hz, mode) = {
-                        let params = sp.borrow();
-                        (params.freq_hz, params.mode())
-                    };
-                    let _ = tx.send(ClientMsg::CatCommand(cat_commands::set_freq(freq_hz)));
-                    if let Some(cmd) = cat_commands::set_mode(mode) {
-                        let _ = tx.send(ClientMsg::CatCommand(cmd));
-                    }
-                    let _ = tx.send(ClientMsg::SetDemodMode(Some(mode)));
-                    let _ = tx.send(ClientMsg::SelectSource(SourceClass::Iq));
+        // --- AUDdev / IQdev: class-filtered device pickers ---
+        // Each button opens a modal listing only devices of its class.
+        // Clicking a row sends `SelectSource(class)` + `SelectDevice`
+        // so the server both flips live-pipeline routing and records
+        // the pick for the post-respawn state.
+        let cached_audio_devices: Rc<RefCell<Vec<DeviceId>>> = Rc::new(RefCell::new(Vec::new()));
+        let cached_iq_devices: Rc<RefCell<Vec<DeviceId>>> = Rc::new(RefCell::new(Vec::new()));
 
-                    lbl.set_markup(&format!(
-                        "<i>f</i> {}<sup>Hz</sup>",
-                        format_freq_spaced(freq_hz)
-                    ));
-                    if let Some(idx) = am.borrow().iter().position(|&(_, m)| m == mode) {
-                        md.set_selected(idx as u32);
-                    }
-                    if mode == Mode::DRM {
-                        db.prime_drm_placeholders();
-                    } else {
-                        db.clear_extras();
-                    }
-                } else {
-                    db.clear_extras();
-                    {
-                        let mut params = sp.borrow_mut();
-                        if let Some(ref state) = *lr.borrow() {
-                            params.freq_hz = state.freq_hz;
-                            params.set_mode(state.mode);
-                        }
-                        sdr_params::save(&params);
-                    }
-                    let _ = tx.send(ClientMsg::SetDemodMode(None));
-                    let _ = tx.send(ClientMsg::SelectSource(SourceClass::Audio));
-                }
-            });
-        }
-        ctrl0_left.append(&audio_btn);
-
-        // DEV button: opens a dialog listing every DeviceList entry so
-        // the user can pick any specific audio or IQ device (not just
-        // its class). Click on a row → `ClientMsg::SelectDevice` →
-        // server respawns with the chosen backend.
-        let cached_devices: Rc<RefCell<Vec<DeviceId>>> = Rc::new(RefCell::new(Vec::new()));
-        let dev_btn = Button::with_label("DEV");
-        dev_btn.set_valign(Align::Center);
-        dev_btn.set_tooltip_text(Some(
-            "Pick a specific audio or IQ device from the ones discovered on the server",
+        let aud_dev_btn = Button::with_label("AUDdev");
+        aud_dev_btn.set_valign(Align::Center);
+        aud_dev_btn.set_tooltip_text(Some(
+            "Pick an audio input device (FDM-DUO USB audio / HAT / USB dongle)",
         ));
-        dev_btn.add_css_class("chrome-btn");
+        aud_dev_btn.add_css_class("chrome-btn");
         {
             let ws = ws_tx.clone();
-            let cache = cached_devices.clone();
-            dev_btn.connect_clicked(move |btn| {
-                open_device_picker(btn, &cache.borrow(), ws.clone());
+            let cache = cached_audio_devices.clone();
+            aud_dev_btn.connect_clicked(move |btn| {
+                open_device_picker_anchor(
+                    btn.upcast_ref(),
+                    "Pick AUD device",
+                    &cache.borrow(),
+                    ws.clone(),
+                );
             });
         }
-        ctrl0_left.append(&dev_btn);
+
+        let iq_dev_btn = Button::with_label("IQdev");
+        iq_dev_btn.set_valign(Align::Center);
+        iq_dev_btn.set_tooltip_text(Some(
+            "Pick an IQ source device (FDM-DUO / HackRF / RSPdx / RTL-SDR)",
+        ));
+        iq_dev_btn.add_css_class("chrome-btn");
+        {
+            let ws = ws_tx.clone();
+            let cache = cached_iq_devices.clone();
+            iq_dev_btn.connect_clicked(move |btn| {
+                open_device_picker_anchor(
+                    btn.upcast_ref(),
+                    "Pick IQ device",
+                    &cache.borrow(),
+                    ws.clone(),
+                );
+            });
+        }
+
+        ctrl0_left.append(&aud_dev_btn);
+        ctrl0_left.append(&iq_dev_btn);
 
         // No unconditional `SelectSource` on init — server seeds its own default.
 
@@ -1296,9 +1217,11 @@ impl ControlBar {
 
         Self {
             container,
-            audio_btn,
             ptt_btn,
-            cached_devices,
+            aud_dev_btn,
+            iq_dev_btn,
+            cached_audio_devices,
+            cached_iq_devices,
             agc_tile_btn,
             freq_tile_btn,
             freq_tile_label,
@@ -1389,16 +1312,21 @@ impl ControlBar {
         &self.container
     }
 
-    /// Cache the server's latest `DeviceList` so the DEV button's
-    /// picker dialog can read it. Called from the WS dispatch on every
-    /// `ServerMsg::DeviceList`.
+    /// Cache the server's latest `DeviceList`, split by class so the
+    /// AUDdev / IQdev pickers each read their own list. Called from
+    /// the WS dispatch on every `ServerMsg::DeviceList`. Synthetic
+    /// empty-id file placeholders are filtered out.
     pub fn set_device_list(&self, list: &DeviceList) {
-        let mut cache = self.cached_devices.borrow_mut();
-        cache.clear();
-        // IQ entries sort first for the same reason the display-bar
-        // chips do — keeps the picker stable in layout order.
-        cache.extend(list.iq_devices.iter().cloned());
-        cache.extend(list.audio_devices.iter().cloned());
+        let is_real = |d: &&DeviceId| {
+            !(matches!(
+                d.kind,
+                efd_proto::SourceKind::AudioFile | efd_proto::SourceKind::IqFile,
+            ) && d.id.is_empty())
+        };
+        *self.cached_audio_devices.borrow_mut() =
+            list.audio_devices.iter().filter(is_real).cloned().collect();
+        *self.cached_iq_devices.borrow_mut() =
+            list.iq_devices.iter().filter(is_real).cloned().collect();
     }
 
     /// Sync control bar from RadioState — stashes the latest for
@@ -1466,32 +1394,16 @@ impl ControlBar {
             self.suppress_flip_notify.set(false);
         }
 
-        // Source selection — the sole mode choice. Button visible only
-        // when both sources are available so the user can pick; hidden
-        // + auto-forced otherwise. Construction default is AUD, so the
-        // both-available case needs no forcing here.
-        match (caps.has_usb_audio, caps.has_iq) {
-            (true, true) => self.audio_btn.set_visible(true),
-            (true, false) => {
-                self.audio_btn.set_visible(false);
-                if self.audio_btn.is_active() {
-                    self.audio_btn.set_active(false); // force AUD
-                }
-            }
-            (false, true) => {
-                self.audio_btn.set_visible(false);
-                if !self.audio_btn.is_active() {
-                    self.audio_btn.set_active(true); // force IQ
-                }
-            }
-            (false, false) => self.audio_btn.set_visible(false),
-        }
+        // AUDdev / IQdev pickers — each visible only when its class
+        // actually has devices to pick.
+        self.aud_dev_btn.set_visible(caps.has_usb_audio);
+        self.iq_dev_btn.set_visible(caps.has_iq);
 
-        // Demod-mode dropdown is greyed out only in the AUD+no-CAT
-        // case (portable radio): no radio to command, no backend demod
-        // to configure. Active in every other combo.
-        let is_aud = !self.audio_btn.is_active();
-        let dropdown_sensitive = !(is_aud && !caps.has_hardware_cat);
+        // Demod-mode dropdown is greyed out in AUD-only configs with
+        // no hardware CAT (portable radio): no radio to command, no
+        // backend demod to configure.
+        let is_aud_only = caps.has_usb_audio && !caps.has_iq;
+        let dropdown_sensitive = !(is_aud_only && !caps.has_hardware_cat);
         self.mode_dropdown.set_sensitive(dropdown_sensitive);
 
         // Initial AGC-threshold sync, deferred from construction so we only
@@ -1538,16 +1450,14 @@ impl ControlBar {
         self.suppress_mode_notify.set(false);
     }
 
-    /// Save SDR params if currently using the IQ source (call on app quit).
+    /// Snapshot the last-known SDR params to disk on app quit.
     pub fn save_on_quit(&self) {
-        if self.audio_btn.is_active() {
-            let mut params = self.sdr_params.borrow_mut();
-            if let Some(ref state) = *self.last_radio.borrow() {
-                params.freq_hz = state.freq_hz;
-                params.set_mode(state.mode);
-            }
-            sdr_params::save(&params);
+        let mut params = self.sdr_params.borrow_mut();
+        if let Some(ref state) = *self.last_radio.borrow() {
+            params.freq_hz = state.freq_hz;
+            params.set_mode(state.mode);
         }
+        sdr_params::save(&params);
     }
 }
 
@@ -1633,20 +1543,7 @@ where
     dlg.present();
 }
 
-/// Open the DEV-button picker: a modal dialog listing every discovered
-/// device as a clickable row. Clicking a row sends
-/// `ClientMsg::SelectDevice(id)` and closes the dialog. The server
-/// records the choice, triggers a respawn, and reopens with the new
-/// backend. Thin wrapper over `open_device_picker_anchor`.
-fn open_device_picker(
-    anchor: &Button,
-    devices: &[DeviceId],
-    ws_tx: mpsc::UnboundedSender<ClientMsg>,
-) {
-    open_device_picker_anchor(anchor.upcast_ref(), "Pick device", devices, ws_tx);
-}
-
-/// Generic picker — same dialog as above but parented to any `Widget`
+/// Picker dialog — parented to any `Widget`
 /// (so the AUD / IQ source-class chips in disp0-left can open
 /// class-filtered pickers from a `Label`, not just a `Button`).
 fn open_device_picker_anchor(
@@ -1693,6 +1590,10 @@ fn open_device_picker_anchor(
             let d_clone = dev.clone();
             let dlg_clone = dlg.clone();
             btn.connect_clicked(move |_| {
+                // Flip live routing for the current session, then
+                // record the pick (which triggers a server respawn
+                // so the new pipeline opens the right backend).
+                let _ = ws.send(ClientMsg::SelectSource(d_clone.kind.class()));
                 let _ = ws.send(ClientMsg::SelectDevice(d_clone.clone()));
                 dlg_clone.close();
             });

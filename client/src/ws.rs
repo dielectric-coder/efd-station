@@ -43,7 +43,7 @@ async fn run_ws(
     let mut backoff_secs: u64 = 2;
 
     loop {
-        tracing::info!(url = %url, "WS connecting...");
+        eprintln!("[ws] connecting to {url}...");
 
         let ws = match tokio_tungstenite::connect_async(url).await {
             Ok((ws, _)) => {
@@ -51,14 +51,14 @@ async fn run_ws(
                 ws
             }
             Err(e) => {
-                tracing::warn!("WS connect failed: {e}, retrying in {backoff_secs}s");
+                eprintln!("[ws] connect failed: {e}, retrying in {backoff_secs}s");
                 tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
                 backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
                 continue;
             }
         };
 
-        tracing::info!("WS connected");
+        eprintln!("[ws] connected");
 
         let (mut sink, mut stream) = ws.split();
 
@@ -79,13 +79,15 @@ async fn run_ws(
                     let msg: ServerMsg = match efd_proto::decode_msg(&data) {
                         Ok(m) => m,
                         Err(efd_proto::WireError::VersionMismatch { got, want }) => {
-                            tracing::error!(
-                                got, want,
-                                "server wire-format mismatch — disconnecting"
+                            eprintln!(
+                                "[ws] wire-format mismatch got={got} want={want} — disconnecting"
                             );
                             break;
                         }
-                        Err(_) => continue,
+                        Err(e) => {
+                            eprintln!("[ws] decode error: {e:?}");
+                            continue;
+                        }
                     };
 
                     // Bounded queue: drop oldest if full
@@ -116,6 +118,6 @@ async fn run_ws(
         // failure branch there takes care of backing off. Sleeping
         // here was adding a multi-second UI freeze to every device
         // pick.
-        tracing::info!("WS disconnected, reconnecting...");
+        eprintln!("[ws] disconnected, reconnecting...");
     }
 }

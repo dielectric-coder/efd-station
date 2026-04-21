@@ -403,7 +403,18 @@ impl Pipeline {
             });
 
         // --- Audio source mux → Opus encoder → broadcast<AudioChunk> ---
-        let (audio_source_tx, audio_source_rx) = watch::channel(AudioRouting::RadioUsb);
+        // Initial routing honours the persisted `active_device`'s class:
+        // if the user last picked an IQ device, start in SoftwareDemod;
+        // if they picked an audio device (or there's no saved pick),
+        // start in RadioUsb. Keeps the post-respawn pipeline aligned
+        // with the picker choice without requiring a follow-up
+        // `SelectSource` from the client.
+        let initial_routing = initial_snapshot
+            .active_device
+            .as_ref()
+            .map(|d| AudioRouting::from(d.kind.class()))
+            .unwrap_or(AudioRouting::RadioUsb);
+        let (audio_source_tx, audio_source_rx) = watch::channel(initial_routing);
         {
             let atx = audio_tx.clone();
             let ptx = pcm_tx.clone();

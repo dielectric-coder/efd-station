@@ -232,7 +232,7 @@ fn build_ui(app: &Application, url: &str) {
     main_box.set_margin_top(4);
     main_box.set_margin_bottom(4);
 
-    let display_bar = ui::controls::DisplayBar::new(ws_tx.clone());
+    let display_bar = ui::controls::DisplayBar::new();
     main_box.append(display_bar.widget());
 
     let (spectrum, display_range) =
