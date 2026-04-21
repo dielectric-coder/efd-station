@@ -40,6 +40,11 @@ pub struct RadioState {
     /// Parsed bandwidth in Hz, if `filter_bw` could be interpreted as
     /// a numeric width. `None` for labels the server could not parse.
     pub filter_bw_hz: Option<f64>,
+    /// Raw `P2` filter index from the radio's `RF<P1><P2P2>;` answer.
+    /// Lets the client preselect the BW dropdown without having to
+    /// back-parse `filter_bw`. `None` when the RF poll failed or the
+    /// current source has no radio behind it.
+    pub filter_idx: Option<u8>,
     pub att: bool,
     pub lp: bool,
     pub agc: AgcMode,

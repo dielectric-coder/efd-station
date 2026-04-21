@@ -182,15 +182,19 @@ fn poll_radio_state(
         return Err(CatError::Cancelled);
     }
 
-    let filter_bw = if let Some(mode_ch) = parse::mode_char(parsed.mode) {
-        let cmd = format!("RF{mode_ch};");
-        match port.command(&cmd) {
-            Ok(rf_resp) => parse::parse_rf_response(&rf_resp, parsed.mode).unwrap_or_default(),
-            Err(_) => String::new(),
-        }
-    } else {
-        String::new()
-    };
+    let (filter_bw, filter_idx) =
+        if let Some(mode_ch) = efd_proto::kenwood_mode_char(parsed.mode) {
+            let cmd = format!("RF{mode_ch};");
+            match port.command(&cmd) {
+                Ok(rf_resp) => match parse::parse_rf_response(&rf_resp, parsed.mode) {
+                    Some((idx, label)) => (label, Some(idx)),
+                    None => (String::new(), None),
+                },
+                Err(_) => (String::new(), None),
+            }
+        } else {
+            (String::new(), None)
+        };
 
     if cancel.is_cancelled() {
         return Err(CatError::Cancelled);
@@ -284,6 +288,7 @@ fn poll_radio_state(
         // before publishing to WS. Leave None here; enriching in-place
         // is a phase-2+ concern.
         filter_bw_hz: None,
+        filter_idx,
         att,
         lp,
         agc,

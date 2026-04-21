@@ -447,6 +447,7 @@ mod tests {
             mode,
             filter_bw: String::new(),
             filter_bw_hz: None,
+            filter_idx: None,
             att: false,
             lp: false,
             agc: AgcMode::Slow,

@@ -1,4 +1,4 @@
-use efd_proto::{AgcMode, CatCommand};
+use efd_proto::{AgcMode, CatCommand, Mode};
 
 /// Build a CAT command to set the VFO A frequency.
 pub fn set_freq(hz: u64) -> CatCommand {
@@ -29,6 +29,19 @@ pub fn set_mode(mode: efd_proto::Mode) -> Option<CatCommand> {
     };
     Some(CatCommand {
         raw: format!("MD{digit};"),
+    })
+}
+
+/// Build a CAT command to set the reception filter for a given mode.
+///
+/// Wire form per manual §6.3.2 p.57: `RF<P1><P2P2>;`, where `P1` is
+/// the Kenwood mode digit (from [`efd_proto::kenwood_mode_char`]) and
+/// `P2P2` is the 2-digit filter index. Returns `None` when the mode
+/// has no Kenwood digit (e.g. `Mode::Unknown`).
+pub fn set_filter(mode: Mode, index: u8) -> Option<CatCommand> {
+    let p1 = efd_proto::kenwood_mode_char(mode)?;
+    Some(CatCommand {
+        raw: format!("RF{p1}{index:02};"),
     })
 }
 
@@ -95,6 +108,17 @@ mod tests {
     #[test]
     fn agc_mode_off_is_single_gc1() {
         assert_eq!(raws(set_agc_mode(AgcMode::Off)), vec!["GC1;"]);
+    }
+
+    #[test]
+    fn set_filter_format() {
+        assert_eq!(set_filter(Mode::USB, 8).unwrap().raw, "RF208;");
+        assert_eq!(set_filter(Mode::CW, 13).unwrap().raw, "RF313;");
+        assert_eq!(set_filter(Mode::AM, 0).unwrap().raw, "RF500;");
+        assert_eq!(set_filter(Mode::FM, 1).unwrap().raw, "RF401;");
+        // Software-only modes park at AM (P1 = '5').
+        assert_eq!(set_filter(Mode::SAM, 3).unwrap().raw, "RF503;");
+        assert!(set_filter(Mode::Unknown, 0).is_none());
     }
 
     #[test]

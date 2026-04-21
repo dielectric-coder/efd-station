@@ -962,6 +962,7 @@ impl Pipeline {
                     mode: efd_proto::Mode::DRM,
                     filter_bw: "10.0k".into(),
                     filter_bw_hz: Some(10_000.0),
+                    filter_idx: None,
                     att: false,
                     lp: false,
                     agc: efd_proto::AgcMode::Off,

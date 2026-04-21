@@ -24,7 +24,11 @@ use crate::upstream::{CatCommand, Ptt, StartRecording, TxAudio};
 /// Version 3 — rework phase 3a. Adds `ClientMsg::SetNb(bool)` for
 /// the pre-IF noise blanker (distinct from the audio-domain DNB)
 /// and the matching `StateSnapshot.nb_on` field.
-pub const PROTO_VERSION: u8 = 3;
+///
+/// Version 4 — adds `RadioState.filter_idx: Option<u8>` so the
+/// client's BW editor can preselect the dropdown without back-
+/// parsing `filter_bw`.
+pub const PROTO_VERSION: u8 = 4;
 
 /// Envelope for all server → client WebSocket messages.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Encode, Decode)]

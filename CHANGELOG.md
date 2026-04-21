@@ -4,6 +4,28 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Added (server 0.11.0 / client 0.9.0 — BW editor dialog)
+- Clicking the `bw` chip tile opens a modal dialog with a dropdown
+  of the filter options for the current mode (manual §6.3.2 p.57),
+  preselected to the radio's current index. OK commits via
+  `RF<P1><P2P2>;`; Cancel discards.
+- New `efd_proto::filters` module — canonical filter tables +
+  `kenwood_mode_char` + `filter_label(mode, idx)`. Used by both
+  the server parser and the client dropdown. `efd-cat`'s private
+  filter constants removed.
+- `RadioState` gains `filter_idx: Option<u8>` — the raw P2 index
+  from the radio's `RF;` answer. Lets the client preselect the
+  dropdown without back-parsing the display string.
+- Wire format bumps to `PROTO_VERSION = 4`.
+- Tile-sensitivity policy tightened: AGC + BW writes are enabled
+  only in `ControlTarget::Radio` (AUD + FDM-DUO). In IQ modes the
+  demod owns those settings, and silently altering the radio's
+  hidden state would surprise the user on return to AUD. Freq tile
+  remains enabled in DemodMirrorFreq so mirroring still works.
+- Software-only modes (SAM family, DSB, DRM) reuse the AM filter
+  list — matches how the FDM-DUO parks the hardware in AM while
+  the software demod picks the sideband.
+
 ### Fixed (server 0.10.12 / client 0.8.6 — GS P2 is 3 digits, not 2)
 - The manual's §6.3.2 GS table shows only two P2 cells, but the
   radio's own reply to `GS0;` is `GS0001;` — a 4-byte payload

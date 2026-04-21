@@ -631,6 +631,7 @@ pub struct ControlBar {
     agc_tile_label: Label,
     freq_tile_btn: Button,
     freq_tile_label: Label,
+    bw_tile_btn: Button,
     bw_tile_label: Label,
     rit_tile_label: Label,
     if_tile_label: Label,
@@ -903,18 +904,29 @@ impl ControlBar {
             });
         }
 
-        // bw / rit / IF tiles → local label edit only (no CAT command yet).
+        // bw tile → dropdown of filter options for the current mode.
+        // The sensitive state is controlled by `apply_capabilities`
+        // (Radio target only); this handler just opens the dialog and
+        // emits the RF CAT on commit.
         {
-            let lbl = bw_tile_label.clone();
+            let ws = ws_tx.clone();
+            let last = last_radio.clone();
             bw_tile_btn.connect_clicked(move |btn| {
-                let lbl = lbl.clone();
-                open_tile_entry(btn, "Filter bandwidth (Hz)", "", move |txt| {
-                    if let Ok(v) = txt.trim().parse::<u32>() {
-                        lbl.set_markup(&format!("<i>bw</i> {v}<sup>Hz</sup>"));
+                // Read the latest polled state at click time — mode
+                // may have changed since the dialog was last opened.
+                let (mode, current_idx) = match &*last.borrow() {
+                    Some(state) => (state.mode, state.filter_idx),
+                    None => (Mode::USB, None),
+                };
+                let ws = ws.clone();
+                open_bw_dialog(btn, mode, current_idx, move |idx| {
+                    if let Some(cmd) = cat_commands::set_filter(mode, idx) {
+                        let _ = ws.send(ClientMsg::CatCommand(cmd));
                     }
                 });
             });
         }
+        // rit / IF tiles → local label edit only (no CAT command yet).
         {
             let lbl = rit_tile_label.clone();
             rit_tile_btn.connect_clicked(move |btn| {
@@ -1249,6 +1261,7 @@ impl ControlBar {
             agc_tile_label,
             freq_tile_btn,
             freq_tile_label,
+            bw_tile_btn,
             bw_tile_label,
             rit_tile_label,
             if_tile_label,
@@ -1396,10 +1409,18 @@ impl ControlBar {
         // AGC + frequency tiles only make sense with hardware CAT.
         // bw/rit/IF tiles remain visible (read-only today) so the drawio
         // layout is stable regardless of CAT availability.
+        // AGC + BW writes only take effect on the radio when
+        // `ControlTarget::Radio` is active (AUD + FDM-DUO). In
+        // IQ modes the demod owns those settings, and we don't
+        // want the user's click to silently alter the radio's
+        // hidden state. Freq is less strict — mirroring in
+        // DemodMirrorFreq is the whole point.
+        let cat_to_radio = caps.control_target == ControlTarget::Radio;
         self.agc_tile_btn.set_visible(caps.has_hardware_cat);
-        self.agc_tile_btn.set_sensitive(cat_live);
+        self.agc_tile_btn.set_sensitive(cat_to_radio);
         self.freq_tile_btn.set_visible(caps.has_hardware_cat);
         self.freq_tile_btn.set_sensitive(cat_live);
+        self.bw_tile_btn.set_sensitive(cat_to_radio);
         // AUD / IQ availability indicators in the display bar.
         self.display_bar
             .set_source_availability(caps.has_usb_audio, caps.has_iq);
@@ -1717,6 +1738,90 @@ fn open_agc_dialog<F>(
                 _ => AgcMode::Slow,
             };
             cb(v, mode);
+            d.close();
+        });
+    }
+
+    dlg.present();
+}
+
+/// BW editor dialog — dropdown of filter options for the given mode.
+/// Preselects `current_idx` when it exists in the mode's table; falls
+/// back to the first entry otherwise. Commits the chosen index on OK;
+/// Cancel discards. Empty filter lists (e.g. `Mode::Unknown`) render
+/// an inert dialog with no dropdown — caller should gate visibility
+/// via the tile's `sensitive` state instead of relying on this.
+fn open_bw_dialog<F>(
+    anchor: &Button,
+    mode: Mode,
+    current_idx: Option<u8>,
+    on_commit: F,
+) where
+    F: Fn(u8) + 'static,
+{
+    let dlg = Window::new();
+    dlg.set_title(Some(&format!("Filter — {:?}", mode)));
+    if let Some(root) = anchor.root().and_downcast::<Window>() {
+        dlg.set_transient_for(Some(&root));
+    }
+    dlg.set_modal(true);
+    dlg.set_default_size(280, -1);
+    dlg.set_resizable(false);
+
+    let vbox = GtkBox::new(Orientation::Vertical, 10);
+    vbox.set_margin_start(12);
+    vbox.set_margin_end(12);
+    vbox.set_margin_top(12);
+    vbox.set_margin_bottom(12);
+
+    let options: Vec<efd_proto::FilterOption> =
+        efd_proto::filters_for_mode(mode).to_vec();
+
+    if options.is_empty() {
+        let empty = Label::new(Some("No filters defined for this mode."));
+        empty.set_halign(Align::Start);
+        vbox.append(&empty);
+    }
+
+    let labels: Vec<&str> = options.iter().map(|o| o.label).collect();
+    let list = StringList::new(&labels);
+    let dropdown = DropDown::new(Some(list), gtk4::Expression::NONE);
+    let preselect = current_idx
+        .and_then(|i| options.iter().position(|o| o.index == i))
+        .unwrap_or(0);
+    if !options.is_empty() {
+        dropdown.set_selected(preselect as u32);
+        dropdown.set_hexpand(true);
+        vbox.append(&dropdown);
+    }
+
+    let hbox = GtkBox::new(Orientation::Horizontal, 8);
+    hbox.set_halign(Align::End);
+    hbox.set_margin_top(4);
+    let cancel = Button::with_label("Cancel");
+    let ok = Button::with_label("OK");
+    ok.set_sensitive(!options.is_empty());
+    hbox.append(&cancel);
+    hbox.append(&ok);
+    vbox.append(&hbox);
+
+    dlg.set_child(Some(&vbox));
+
+    let cb = Rc::new(on_commit);
+    {
+        let d = dlg.clone();
+        cancel.connect_clicked(move |_| d.close());
+    }
+    {
+        let d = dlg.clone();
+        let dd = dropdown.clone();
+        let opts = options;
+        let cb = cb.clone();
+        ok.connect_clicked(move |_| {
+            let pos = dd.selected() as usize;
+            if let Some(opt) = opts.get(pos) {
+                cb(opt.index);
+            }
             d.close();
         });
     }

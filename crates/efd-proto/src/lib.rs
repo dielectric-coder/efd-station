@@ -1,4 +1,5 @@
 pub mod downstream;
+pub mod filters;
 pub mod grid;
 pub mod radio;
 pub mod upstream;
@@ -8,6 +9,7 @@ pub use downstream::{
     AudioChunk, Capabilities, ControlTarget, DecodedText, DeviceList, DrmStatus, ErrorMsg, FftBins,
     RadioState, RecordingStatus, StateSnapshot,
 };
+pub use filters::{filter_label, filters_for_mode, kenwood_mode_char, FilterOption};
 pub use grid::GridCell;
 pub use radio::{AgcMode, DecoderKind, DeviceId, Mode, RecKind, SourceClass, SourceKind, Vfo};
 pub use upstream::{CatCommand, Ptt, StartRecording, TxAudio};
@@ -35,6 +37,7 @@ mod tests {
             mode: Mode::USB,
             filter_bw: "2400".to_string(),
             filter_bw_hz: Some(2400.0),
+            filter_idx: Some(8),
             att: false,
             lp: true,
             agc: AgcMode::Slow,

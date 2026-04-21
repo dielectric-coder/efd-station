@@ -13,28 +13,6 @@ pub fn kenwood_mode(digit: u8) -> Mode {
     }
 }
 
-/// Convert our Mode to the Kenwood RF-command mode character.
-///
-/// Software-only modes (SAM, SAMU, SAML, DSB) have no FDM-DUO hardware
-/// equivalent; the radio stays in AM while the software demod does the
-/// work, mirroring the DRM convention.
-pub fn mode_char(mode: Mode) -> Option<char> {
-    match mode {
-        Mode::LSB => Some('1'),
-        Mode::USB => Some('2'),
-        Mode::CW => Some('3'),
-        Mode::FM => Some('4'),
-        Mode::AM
-        | Mode::DRM
-        | Mode::SAM
-        | Mode::SAMU
-        | Mode::SAML
-        | Mode::DSB => Some('5'),
-        Mode::CWR => Some('7'),
-        Mode::Unknown => None,
-    }
-}
-
 /// Parsed fields from the IF; response.
 #[derive(Debug, Clone)]
 pub struct IfResponse {
@@ -253,52 +231,18 @@ pub fn gs_to_agc_mode(gc_auto: bool, gs_p2: u16) -> crate::AgcMode {
     }
 }
 
-// ---------- filter bandwidth tables (per ELAD FDM-DUO manual) ----------
-
-const FILTER_LSB_USB: &[&str] = &[
-    "1.6k", "1.7k", "1.8k", "1.9k", "2.0k", "2.1k", "2.2k", "2.3k",
-    "2.4k", "2.5k", "2.6k", "2.7k", "2.8k", "2.9k", "3.0k", "3.1k",
-    "4.0k", "5.0k", "6.0k", "D300", "D600", "D1k",
-];
-
-const FILTER_CW: &[Option<&str>] = &[
-    None, None, None, None, None, None, None,
-    Some("100&4"), Some("100&3"), Some("100&2"), Some("100&1"),
-    Some("100"), Some("300"), Some("500"),
-    Some("1.0k"), Some("1.5k"), Some("2.6k"),
-];
-
-const FILTER_AM: &[&str] = &[
-    "2.5k", "3.0k", "3.5k", "4.0k", "4.5k", "5.0k", "5.5k", "6.0k",
-];
-
-const FILTER_FM: &[&str] = &["Narrow", "Wide", "Data"];
-
-/// Parse an RF; response to extract the filter bandwidth string.
-///
-/// RF response format: `RF` P1 P2P2 `;`  (e.g. `RF10808;`)
-pub fn parse_rf_response(response: &str, mode: Mode) -> Option<String> {
+/// Parse an `RF;` response into `(index, label)`. Response format is
+/// `RF<P1><P2P2>;` (e.g. `RF10808;`). The lookup table lives in
+/// `efd_proto::filters` — single source of truth for both parser and
+/// client-side editor.
+pub fn parse_rf_response(response: &str, mode: Mode) -> Option<(u8, String)> {
     let s = response.trim();
     if s.len() < 6 || !s.starts_with("RF") {
         return None;
     }
-
-    let p2: usize = s[3..5].parse().ok()?;
-
-    let filter: Option<&str> = match mode {
-        Mode::LSB | Mode::USB => FILTER_LSB_USB.get(p2).copied(),
-        Mode::CW | Mode::CWR => FILTER_CW.get(p2).and_then(|o| *o),
-        // AM/DRM and the software-only AM-family modes (SAM*, DSB) all
-        // share the radio's AM filter table — hardware stays in AM, the
-        // software demod picks the sideband.
-        Mode::AM | Mode::DRM | Mode::SAM | Mode::SAMU | Mode::SAML | Mode::DSB => {
-            FILTER_AM.get(p2).copied()
-        }
-        Mode::FM => FILTER_FM.get(p2).copied(),
-        Mode::Unknown => None,
-    };
-
-    Some(filter.unwrap_or("?").to_string())
+    let p2: u8 = s[3..5].parse().ok()?;
+    let label = efd_proto::filter_label(mode, p2).unwrap_or("?");
+    Some((p2, label.to_string()))
 }
 
 #[cfg(test)]
@@ -383,21 +327,24 @@ mod tests {
     #[test]
     fn parse_rf_usb_2400() {
         let resp = "RF20808;";
-        let bw = parse_rf_response(resp, Mode::USB).unwrap();
+        let (idx, bw) = parse_rf_response(resp, Mode::USB).unwrap();
+        assert_eq!(idx, 8);
         assert_eq!(bw, "2.4k");
     }
 
     #[test]
     fn parse_rf_cw_500() {
         let resp = "RF31300;";
-        let bw = parse_rf_response(resp, Mode::CW).unwrap();
+        let (idx, bw) = parse_rf_response(resp, Mode::CW).unwrap();
+        assert_eq!(idx, 13);
         assert_eq!(bw, "500");
     }
 
     #[test]
     fn parse_rf_am() {
         let resp = "RF50300;";
-        let bw = parse_rf_response(resp, Mode::AM).unwrap();
+        let (idx, bw) = parse_rf_response(resp, Mode::AM).unwrap();
+        assert_eq!(idx, 3);
         assert_eq!(bw, "4.0k");
     }
 
