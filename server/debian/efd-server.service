@@ -7,7 +7,14 @@ Wants=network.target
 Type=simple
 ExecStart=/usr/bin/efd-server
 Restart=always
-RestartSec=2
+# Short restart delay so client-initiated SelectDevice respawns feel
+# snappy; process is designed to come up in <100 ms once systemd
+# re-execs it.
+RestartSec=500ms
+# Bound the drain: `SHUTDOWN_TIMEOUT` in main.rs is 1 s, plus headroom
+# for tokio + process exit. Don't sit 90 s (systemd default) on a
+# stuck hardware task.
+TimeoutStopSec=3
 Environment=RUST_LOG=info
 
 # Run as dedicated user

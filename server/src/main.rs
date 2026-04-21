@@ -20,9 +20,12 @@ use ws::handler::{ws_upgrade, AppState};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Hard cap on how long we wait for pipeline tasks to drain after the
-/// HTTP server returns. Some tasks ride on `spawn_blocking` and can be
-/// stuck in a syscall; we don't want to deadlock systemd's stop on them.
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+/// HTTP server returns. Actual task cancellations complete in <100ms
+/// when the cancel token fires — this timeout is just a safety net
+/// for tasks blocked in a syscall. Shorter value means faster
+/// SelectDevice respawn turnaround (the respawn is dominated by this
+/// wait today).
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[tokio::main]
 async fn main() {
