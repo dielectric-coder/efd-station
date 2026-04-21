@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use efd_proto::{
     Capabilities, ClientMsg, DeviceId, DeviceList, DrmStatus, Mode, Ptt, RadioState, RecKind,
-    RecordingStatus, StartRecording, StateSnapshot,
+    RecordingStatus, SourceClass, StartRecording, StateSnapshot,
 };
 use gtk4::prelude::*;
 use gtk4::{
@@ -950,6 +950,7 @@ impl ControlBar {
                 open_device_picker_anchor(
                     btn.upcast_ref(),
                     "Pick AUD device",
+                    SourceClass::Audio,
                     &cache.borrow(),
                     ws.clone(),
                 );
@@ -969,6 +970,7 @@ impl ControlBar {
                 open_device_picker_anchor(
                     btn.upcast_ref(),
                     "Pick IQ device",
+                    SourceClass::Iq,
                     &cache.borrow(),
                     ws.clone(),
                 );
@@ -1543,12 +1545,16 @@ where
     dlg.present();
 }
 
-/// Picker dialog — parented to any `Widget`
-/// (so the AUD / IQ source-class chips in disp0-left can open
-/// class-filtered pickers from a `Label`, not just a `Button`).
+/// Picker dialog — parented to any `Widget`. `class` is the
+/// source-class intent of the picker (AUD / IQ); the row-click
+/// sends `SelectSource(class)` explicitly rather than deriving it
+/// from `DeviceId.kind.class()`. This matters because FDM-DUO's
+/// kind is `FdmDuo` in both lists, but its class depends on which
+/// list it came from (AUD list → Audio, IQ list → Iq).
 fn open_device_picker_anchor(
     anchor: &Widget,
     title: &str,
+    class: SourceClass,
     devices: &[DeviceId],
     ws_tx: mpsc::UnboundedSender<ClientMsg>,
 ) {
@@ -1593,7 +1599,10 @@ fn open_device_picker_anchor(
                 // Flip live routing for the current session, then
                 // record the pick (which triggers a server respawn
                 // so the new pipeline opens the right backend).
-                let _ = ws.send(ClientMsg::SelectSource(d_clone.kind.class()));
+                // `class` is the picker's explicit intent (not
+                // d.kind.class()) so AUD-FDM doesn't get mistaken
+                // for IQ-FDM.
+                let _ = ws.send(ClientMsg::SelectSource(class));
                 let _ = ws.send(ClientMsg::SelectDevice(d_clone.clone()));
                 dlg_clone.close();
             });

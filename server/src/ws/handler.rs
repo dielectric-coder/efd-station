@@ -60,6 +60,7 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
     let tx_audio_tx = state.pipeline.tx_audio_tx.clone();
     let demod_mode_tx = state.pipeline.demod_mode_tx.clone();
     let audio_source_tx = state.pipeline.audio_source_tx.clone();
+    let audio_source_rx = state.pipeline.audio_source_tx.subscribe();
     let flip_spectrum_tx = state.pipeline.flip_spectrum_tx.clone();
     let capabilities = state.pipeline.capabilities.clone();
     let drm_status_rx = state.pipeline.drm_status_rx.clone();
@@ -89,6 +90,7 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
             device_list_rx,
             snapshot_rx,
             rec_status_rx,
+            audio_source_rx,
             cancel2,
         )
         .await;

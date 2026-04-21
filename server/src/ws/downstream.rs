@@ -12,6 +12,8 @@ use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
+use crate::pipeline::AudioRouting;
+
 /// Timeout for sending a single WS message. If a client can't receive
 /// within this time, disconnect it to avoid blocking broadcasts.
 const SEND_TIMEOUT: Duration = Duration::from_secs(2);
@@ -32,6 +34,7 @@ pub async fn run(
     mut device_list_rx: watch::Receiver<DeviceList>,
     mut snapshot_rx: watch::Receiver<StateSnapshot>,
     mut rec_status_rx: watch::Receiver<RecordingStatus>,
+    audio_source_rx: watch::Receiver<AudioRouting>,
     cancel: CancellationToken,
 ) {
     let mut fft_rx = fft_rx;
@@ -78,7 +81,18 @@ pub async fn run(
             _ = cancel.cancelled() => break,
             result = fft_rx.recv() => {
                 match result {
-                    Ok(bins) => Some(ServerMsg::FftBins((*bins).clone())),
+                    Ok(bins) => {
+                        // The FFT task always runs on raw IQ. In AUD
+                        // (RadioUsb) routing we don't have an audio-
+                        // domain FFT yet, so drop IQ frames rather
+                        // than showing the IQ spectrum under an AUD
+                        // label. Client sees a static/empty spectrum
+                        // until an audio FFT lands.
+                        if *audio_source_rx.borrow() == AudioRouting::RadioUsb {
+                            continue;
+                        }
+                        Some(ServerMsg::FftBins((*bins).clone()))
+                    }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         trace!(skipped = n, "WS downstream: FFT lagged");
                         continue;

@@ -403,17 +403,22 @@ impl Pipeline {
             });
 
         // --- Audio source mux → Opus encoder → broadcast<AudioChunk> ---
-        // Initial routing honours the persisted `active_device`'s class:
-        // if the user last picked an IQ device, start in SoftwareDemod;
-        // if they picked an audio device (or there's no saved pick),
-        // start in RadioUsb. Keeps the post-respawn pipeline aligned
-        // with the picker choice without requiring a follow-up
-        // `SelectSource` from the client.
-        let initial_routing = initial_snapshot
-            .active_device
-            .as_ref()
-            .map(|d| AudioRouting::from(d.kind.class()))
-            .unwrap_or(AudioRouting::RadioUsb);
+        // Initial routing reflects the user's last pick. `SourceKind`
+        // alone can't tell us which path the FDM-DUO was picked from
+        // (its kind is `FdmDuo` in both lists), so we defer to
+        // `active_audio_device` — if that returns Some, the id
+        // matched an ALSA `hw:N,D` / `plughw:N,D` audio input, and
+        // we start in `RadioUsb`. Everything else (IQ kinds, empty
+        // snapshot) falls through to the class-based default.
+        let initial_routing = if active_audio_device(&initial_snapshot).is_some() {
+            AudioRouting::RadioUsb
+        } else {
+            initial_snapshot
+                .active_device
+                .as_ref()
+                .map(|d| AudioRouting::from(d.kind.class()))
+                .unwrap_or(AudioRouting::RadioUsb)
+        };
         let (audio_source_tx, audio_source_rx) = watch::channel(initial_routing);
         {
             let atx = audio_tx.clone();
