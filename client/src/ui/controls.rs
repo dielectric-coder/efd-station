@@ -378,14 +378,32 @@ impl DisplayBar {
             list.iq_devices.iter().filter(is_real).cloned().collect();
 
         // Update the selected-device label under whichever chip
-        // matches the active device's class. The other class's label
-        // stays at whatever it was (client-side memory of the last
-        // selection for that class).
+        // matches the active device's class. The index is the
+        // device's position within its class list, so audio devices
+        // render as AUD0 / AUD1 / … consistently between the picker
+        // and the selected label. The other class's label stays at
+        // whatever it was (client-side memory of the last selection
+        // for that class).
         if let Some(active) = list.active.as_ref() {
-            let short = selected_label_for(active);
             match active.kind.class() {
-                efd_proto::SourceClass::Audio => self.selected_aud_label.set_text(&short),
-                efd_proto::SourceClass::Iq => self.selected_iq_label.set_text(&short),
+                efd_proto::SourceClass::Audio => {
+                    let idx = list
+                        .audio_devices
+                        .iter()
+                        .position(|d| d == active)
+                        .unwrap_or(0);
+                    self.selected_aud_label
+                        .set_text(&class_short_label(active, idx));
+                }
+                efd_proto::SourceClass::Iq => {
+                    let idx = list
+                        .iq_devices
+                        .iter()
+                        .position(|d| d == active)
+                        .unwrap_or(0);
+                    self.selected_iq_label
+                        .set_text(&class_short_label(active, idx));
+                }
             }
             // Also paint the disp2-left pill (e.g. `FDM IQ`).
             let class_tag = match active.kind.class() {
@@ -1656,7 +1674,7 @@ fn open_device_picker_anchor(
         empty.set_halign(Align::Start);
         vbox.append(&empty);
     } else {
-        for dev in devices {
+        for (i, dev) in devices.iter().enumerate() {
             // Skip synthetic file placeholders — those are for the future
             // AudioFile / IqFile replay path and carry no useful `id` today.
             if matches!(
@@ -1666,18 +1684,11 @@ fn open_device_picker_anchor(
             {
                 continue;
             }
-            let class_tag = match dev.kind.class() {
-                efd_proto::SourceClass::Iq => "IQ",
-                efd_proto::SourceClass::Audio => "AUD",
-            };
-            let label = if dev.id.is_empty() {
-                format!("{} · {:?}", class_tag, dev.kind)
-            } else {
-                format!("{} · {:?} — {}", class_tag, dev.kind, dev.id)
-            };
-            let btn = Button::with_label(&label);
+            let short = class_short_label(dev, i);
+            let btn = Button::with_label(&short);
             btn.set_halign(Align::Fill);
             btn.set_hexpand(true);
+            btn.set_tooltip_text(Some(&format!("{:?} — {}", dev.kind, dev.id)));
             let ws = ws_tx.clone();
             let d_clone = dev.clone();
             let dlg_clone = dlg.clone();
@@ -1723,16 +1734,14 @@ fn make_chip(label: &str) -> Label {
     l
 }
 
-/// Text for the disp1-left selected-device label. Combines the
-/// three-letter kind short form with the id when the kind alone
-/// isn't enough to disambiguate (e.g. multiple `PortableRadio`
-/// entries on different cards). Empty-id fallback is just the short
-/// form.
-fn selected_label_for(dev: &DeviceId) -> String {
-    if dev.id.is_empty() {
-        device_short_label(dev.kind).to_string()
-    } else {
-        format!("{} {}", device_short_label(dev.kind), dev.id)
+/// Compact label for a device in a class list. IQ kinds use the
+/// three-letter short form (FDM / HRF / RSP / RTL); audio kinds use
+/// `AUD{index}` where `index` is the device's position in its class
+/// list. Keeps disp1-left and the picker rows narrow.
+fn class_short_label(dev: &DeviceId, index_in_class: usize) -> String {
+    match dev.kind.class() {
+        efd_proto::SourceClass::Audio => format!("AUD{}", index_in_class),
+        efd_proto::SourceClass::Iq => device_short_label(dev.kind).to_string(),
     }
 }
 

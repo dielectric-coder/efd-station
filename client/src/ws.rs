@@ -109,8 +109,13 @@ async fn run_ws(
             }
         }
 
-        tracing::warn!("WS disconnected, reconnecting in {backoff_secs}s");
-        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-        backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
+        // No unconditional sleep here — during a server respawn
+        // (SelectDevice → graceful shutdown → systemd restart) we
+        // want to attempt reconnection immediately. If the outer
+        // `connect_async` fails because the server isn't up yet, the
+        // failure branch there takes care of backing off. Sleeping
+        // here was adding a multi-second UI freeze to every device
+        // pick.
+        tracing::info!("WS disconnected, reconnecting...");
     }
 }
