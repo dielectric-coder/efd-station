@@ -63,6 +63,7 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
     let audio_source_rx = state.pipeline.audio_source_tx.subscribe();
     let flip_spectrum_tx = state.pipeline.flip_spectrum_tx.clone();
     let capabilities = state.pipeline.capabilities.clone();
+    let control_target = capabilities.control_target;
     let drm_status_rx = state.pipeline.drm_status_rx.clone();
     // Phase-2: per-client subscriptions to the shared device list and
     // session snapshot. Downstream pushes on change; upstream mutates
@@ -108,6 +109,7 @@ async fn handle_client(socket: WebSocket, state: Arc<AppState>) {
             snapshot_tx_for_up,
             restart_requested_tx,
             rec_cmd_tx,
+            control_target,
             cancel,
         )
         .await;

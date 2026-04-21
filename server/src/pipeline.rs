@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use efd_proto::{
-    AudioChunk, Capabilities, CatCommand, DeviceList, FftBins, RadioState, RecordingStatus,
-    SourceClass, SourceKind, StateSnapshot, TxAudio,
+    AudioChunk, Capabilities, CatCommand, ControlTarget, DeviceList, FftBins, RadioState,
+    RecordingStatus, SourceClass, SourceKind, StateSnapshot, TxAudio,
 };
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
@@ -789,6 +789,13 @@ impl Pipeline {
         // resolved at startup), not just driver intent — the FDM-DUO
         // source says it supports USB audio, but if the cable isn't
         // plugged in the device won't resolve and the client must know.
+        let control_target = control_target_for(initial_routing, source_caps.kind);
+        info!(
+            ?initial_routing,
+            source = ?source_caps.kind,
+            ?control_target,
+            "control target resolved"
+        );
         let capabilities = Capabilities {
             source: source_caps.kind,
             has_iq: source_caps.has_iq,
@@ -801,6 +808,7 @@ impl Pipeline {
             // from a real capability probe against efd-dsp.
             supported_decoders: Vec::new(),
             drm_flip_spectrum: config.drm.flip_spectrum,
+            control_target,
         };
 
         Self {
@@ -995,6 +1003,10 @@ impl Pipeline {
             supported_demod_modes: vec![efd_proto::Mode::DRM],
             supported_decoders: Vec::new(),
             drm_flip_spectrum: false,
+            // File-test synthesizes a FLAC-driven DRM pipeline — no
+            // live radio or SDR to control. Greyed controls are
+            // correct; the client sees mode/BW read-only.
+            control_target: ControlTarget::None,
         };
 
         // Flip-spectrum watch exists for API parity with the live
@@ -1214,6 +1226,26 @@ fn active_audio_device(snap: &StateSnapshot) -> Option<String> {
             Some(dev.id.clone())
         }
         _ => None,
+    }
+}
+
+/// Where client CAT controls are routed for a given (source, routing)
+/// pair. Single source of truth consumed by both the client (for UI
+/// greying) and the WS upstream handler (for command dispatch).
+///
+/// - `RadioUsb + FdmDuo` → `Radio` (native CAT is live, listen to the
+///   radio). Any other audio-in config has no CAT surface, so `None`.
+/// - `SoftwareDemod + FdmDuo` → `DemodMirrorFreq`: demod owns mode / BW
+///   / filters; the radio's VFO follows the demod's center via the
+///   existing tuning forwarder.
+/// - `SoftwareDemod + any other IQ source` → `Demod`: the SDR has no
+///   hardware radio behind it, so every control lands on the demod.
+fn control_target_for(routing: AudioRouting, source: SourceKind) -> ControlTarget {
+    match (routing, source) {
+        (AudioRouting::RadioUsb, SourceKind::FdmDuo) => ControlTarget::Radio,
+        (AudioRouting::RadioUsb, _) => ControlTarget::None,
+        (AudioRouting::SoftwareDemod, SourceKind::FdmDuo) => ControlTarget::DemodMirrorFreq,
+        (AudioRouting::SoftwareDemod, _) => ControlTarget::Demod,
     }
 }
 

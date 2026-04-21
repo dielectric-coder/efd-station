@@ -1,5 +1,5 @@
 use axum::extract::ws::{Message, WebSocket};
-use efd_proto::{CatCommand, ClientMsg, DeviceList, Mode, StateSnapshot, TxAudio};
+use efd_proto::{CatCommand, ClientMsg, ControlTarget, DeviceList, Mode, StateSnapshot, TxAudio};
 use futures_util::StreamExt;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -20,6 +20,11 @@ const MAX_CAT_CMD_LEN: usize = 64;
 const MAX_TX_AUDIO_LEN: usize = 2048;
 
 /// Upstream task: read WS binary frames, deserialize ClientMsg, route to mpsc channels.
+///
+/// `control_target` is captured from the session's `Capabilities` at
+/// connect time and gates where CAT-style commands go. It is stable
+/// for the lifetime of the connection — `SelectDevice` triggers a
+/// process respawn, so the control target cannot change mid-session.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     mut stream: futures_util::stream::SplitStream<WebSocket>,
@@ -32,6 +37,7 @@ pub async fn run(
     snapshot_tx: watch::Sender<StateSnapshot>,
     restart_requested_tx: watch::Sender<bool>,
     rec_cmd_tx: mpsc::Sender<RecCmd>,
+    control_target: ControlTarget,
     cancel: CancellationToken,
 ) {
     loop {
@@ -90,10 +96,21 @@ pub async fn run(
                     warn!(cmd = %cmd.raw, reason, "invalid CAT command rejected");
                     continue;
                 }
-                trace!(cmd = %cmd.raw, "upstream: CAT command");
-                if cat_tx.send(cmd).await.is_err() {
-                    warn!("CAT channel closed");
-                    break;
+                match cat_route_for(&cmd.raw, control_target) {
+                    CatRoute::ToRadio => {
+                        trace!(cmd = %cmd.raw, ?control_target, "upstream: CAT -> radio");
+                        if cat_tx.send(cmd).await.is_err() {
+                            warn!("CAT channel closed");
+                            break;
+                        }
+                    }
+                    CatRoute::Drop => {
+                        debug!(
+                            cmd = %cmd.raw,
+                            ?control_target,
+                            "upstream: CAT dropped (control target doesn't route this command)"
+                        );
+                    }
                 }
             }
             ClientMsg::TxAudio(audio) => {
@@ -108,17 +125,31 @@ pub async fn run(
                 }
             }
             ClientMsg::Ptt(ptt) => {
-                let cmd = if ptt.on { "TX;" } else { "RX;" };
-                trace!(ptt = ptt.on, "upstream: PTT");
-                if cat_tx
-                    .send(CatCommand {
-                        raw: cmd.to_string(),
-                    })
-                    .await
-                    .is_err()
-                {
-                    warn!("CAT channel closed");
-                    break;
+                // PTT only makes sense when a hardware radio is on the
+                // far side of the CAT link (Radio or DemodMirrorFreq).
+                // In Demod/None there is no radio to key — drop.
+                match control_target {
+                    ControlTarget::Radio | ControlTarget::DemodMirrorFreq => {
+                        let cmd = if ptt.on { "TX;" } else { "RX;" };
+                        trace!(ptt = ptt.on, "upstream: PTT");
+                        if cat_tx
+                            .send(CatCommand {
+                                raw: cmd.to_string(),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            warn!("CAT channel closed");
+                            break;
+                        }
+                    }
+                    ControlTarget::Demod | ControlTarget::None => {
+                        debug!(
+                            ptt = ptt.on,
+                            ?control_target,
+                            "upstream: PTT dropped (no hardware radio on this target)"
+                        );
+                    }
                 }
             }
             ClientMsg::SetDemodMode(mode) => {
@@ -239,6 +270,46 @@ pub async fn run(
     }
 }
 
+/// Two-letter CAT prefixes that represent a frequency tune (VFO A or B).
+/// These are the only commands mirrored to the FDM-DUO in IQ mode —
+/// every other control stays on the software demod.
+const FREQ_PREFIXES: &[&str] = &["FA", "FB"];
+
+/// Decision about where a validated CAT command should go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatRoute {
+    /// Forward to the FDM-DUO native CAT serial via `cat_tx`.
+    ToRadio,
+    /// Silently drop — either no target (None) or a demod-bound
+    /// control that doesn't have a CAT wire representation on this
+    /// target (demod mode/filter/AGC are reached via typed
+    /// ClientMsg variants, not raw CAT).
+    Drop,
+}
+
+/// Pick a route for a validated CAT command based on the session's
+/// `ControlTarget`. `raw` is already length-checked and terminator-
+/// verified by `validate_cat_command`.
+fn cat_route_for(raw: &str, target: ControlTarget) -> CatRoute {
+    let prefix = &raw[..2];
+    match target {
+        ControlTarget::None => CatRoute::Drop,
+        ControlTarget::Radio => CatRoute::ToRadio,
+        ControlTarget::DemodMirrorFreq => {
+            if FREQ_PREFIXES.contains(&prefix) {
+                CatRoute::ToRadio
+            } else {
+                CatRoute::Drop
+            }
+        }
+        // Demod-only targets don't have a runtime SDR retune path
+        // wired up yet (non-FDM-DUO backends are stubs). When those
+        // drivers land, freq commands here should translate to an
+        // SDR tune channel; everything else stays dropped.
+        ControlTarget::Demod => CatRoute::Drop,
+    }
+}
+
 /// Allowlist of two-letter CAT prefixes accepted from WS clients. Keeps
 /// untrusted input on the rails — anything outside this set is rejected
 /// before it reaches the radio. Grow as the UI gains controls.
@@ -344,5 +415,46 @@ mod tests {
     fn rejects_too_short() {
         assert_eq!(validate_cat_command(";"), Err("length out of range"));
         assert_eq!(validate_cat_command("F;"), Err("length out of range"));
+    }
+
+    #[test]
+    fn route_none_drops_everything() {
+        for raw in ["FA00007100000;", "MD2;", "TH05;", "TX;"] {
+            assert_eq!(cat_route_for(raw, ControlTarget::None), CatRoute::Drop);
+        }
+    }
+
+    #[test]
+    fn route_radio_forwards_everything() {
+        for raw in ["FA00007100000;", "MD2;", "TH05;", "IF;"] {
+            assert_eq!(cat_route_for(raw, ControlTarget::Radio), CatRoute::ToRadio);
+        }
+    }
+
+    #[test]
+    fn route_demod_mirror_freq_only_freq_goes_to_radio() {
+        assert_eq!(
+            cat_route_for("FA00007100000;", ControlTarget::DemodMirrorFreq),
+            CatRoute::ToRadio
+        );
+        assert_eq!(
+            cat_route_for("FB00007100000;", ControlTarget::DemodMirrorFreq),
+            CatRoute::ToRadio
+        );
+        assert_eq!(
+            cat_route_for("MD2;", ControlTarget::DemodMirrorFreq),
+            CatRoute::Drop
+        );
+        assert_eq!(
+            cat_route_for("TH05;", ControlTarget::DemodMirrorFreq),
+            CatRoute::Drop
+        );
+    }
+
+    #[test]
+    fn route_demod_drops_everything() {
+        for raw in ["FA00007100000;", "MD2;", "TH05;"] {
+            assert_eq!(cat_route_for(raw, ControlTarget::Demod), CatRoute::Drop);
+        }
     }
 }

@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use efd_proto::{
-    Capabilities, ClientMsg, DeviceId, DeviceList, DrmStatus, Mode, Ptt, RadioState, RecKind,
-    RecordingStatus, SourceClass, StartRecording, StateSnapshot,
+    Capabilities, ClientMsg, ControlTarget, DeviceId, DeviceList, DrmStatus, Mode, Ptt, RadioState,
+    RecKind, RecordingStatus, SourceClass, StartRecording, StateSnapshot,
 };
 use gtk4::prelude::*;
 use gtk4::{
@@ -1371,12 +1371,22 @@ impl ControlBar {
 
     /// Gate UI controls by server-advertised source capabilities.
     pub fn apply_capabilities(&self, caps: &Capabilities) {
+        // `control_target == None` means the active source has no CAT
+        // surface and no software demod behind it (portable radio, USB
+        // dongle). Grey every interactive CAT-plane control. Spectrum,
+        // waterfall, display labels, and the device pickers stay live
+        // so the user can switch sources.
+        let cat_live = caps.control_target != ControlTarget::None;
+
         self.ptt_btn.set_visible(caps.has_tx);
+        self.ptt_btn.set_sensitive(cat_live);
         // AGC + frequency tiles only make sense with hardware CAT.
         // bw/rit/IF tiles remain visible (read-only today) so the drawio
         // layout is stable regardless of CAT availability.
         self.agc_tile_btn.set_visible(caps.has_hardware_cat);
+        self.agc_tile_btn.set_sensitive(cat_live);
         self.freq_tile_btn.set_visible(caps.has_hardware_cat);
+        self.freq_tile_btn.set_sensitive(cat_live);
         // AUD / IQ availability indicators in the display bar.
         self.display_bar
             .set_source_availability(caps.has_usb_audio, caps.has_iq);
@@ -1409,20 +1419,22 @@ impl ControlBar {
         }
 
         // AUDdev / IQdev pickers — each visible only when its class
-        // actually has devices to pick.
+        // actually has devices to pick. These stay sensitive regardless
+        // of control_target so the user can switch sources.
         self.aud_dev_btn.set_visible(caps.has_usb_audio);
         self.iq_dev_btn.set_visible(caps.has_iq);
 
-        // Demod-mode dropdown is greyed out in AUD-only configs with
-        // no hardware CAT (portable radio): no radio to command, no
-        // backend demod to configure.
-        let is_aud_only = caps.has_usb_audio && !caps.has_iq;
-        let dropdown_sensitive = !(is_aud_only && !caps.has_hardware_cat);
-        self.mode_dropdown.set_sensitive(dropdown_sensitive);
+        // Mode selection is greyed whenever there's no CAT target —
+        // `control_target` is the single source of truth (covers both
+        // the "AUD + portable radio" case and the file-test path).
+        self.mode_dropdown.set_sensitive(cat_live);
+        for (_, btn) in &self.mode_btns {
+            btn.set_sensitive(cat_live);
+        }
 
         // Initial AGC-threshold sync, deferred from construction so we only
         // emit it to sources that can accept the CAT command.
-        if caps.has_hardware_cat {
+        if caps.has_hardware_cat && caps.control_target == ControlTarget::Radio {
             let threshold = self.sdr_params.borrow().agc_threshold;
             let _ = self
                 .ws_tx

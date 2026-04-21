@@ -4,6 +4,27 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Added (server 0.10.8 — ControlTarget routing)
+- New `efd_proto::ControlTarget` enum on `Capabilities`
+  (`None | Radio | Demod | DemodMirrorFreq`) — computed server-side
+  from (AudioRouting × SourceKind) and used as the single source of
+  truth for both client-side greying and server-side CAT routing.
+- Server (`ws::upstream`) now routes each `CatCommand` through
+  `cat_route_for`: `None` drops everything, `Radio` forwards all
+  (today's behavior), `DemodMirrorFreq` forwards only `FA`/`FB`
+  (freq) to the radio so the existing tuning forwarder propagates
+  the new center to the demod, and `Demod` drops all (the runtime
+  SDR retune channel lands when non-FDM-DUO IQ drivers do).
+- `ClientMsg::Ptt` is now gated to `Radio`/`DemodMirrorFreq`; in
+  `Demod`/`None` PTT is dropped with a debug log.
+- Client (`ControlBar::apply_capabilities`) greys PTT, freq tile,
+  AGC tile, mode dropdown, and the per-mode toggle buttons when
+  `control_target == None`. The initial AGC-threshold sync-on-
+  connect is restricted to `Radio` (was `has_hardware_cat`) so IQ
+  + FDM-DUO sessions don't push a TH command that the server would
+  drop.
+- 4 new routing tests in `ws::upstream::tests`.
+
 ### Added (server 0.9.1 — phase 3c: DNR / DNF / APF filters go live)
 - **`DNR`** (`efd_dsp::audio_dsp`) — 2-pole IIR lowpass at 2.5 kHz,
   Butterworth Q. Voice sits at 300–2800 Hz; HF hiss lives above.

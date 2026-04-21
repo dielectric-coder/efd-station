@@ -70,6 +70,28 @@ pub struct ErrorMsg {
     pub message: String,
 }
 
+/// Where client CAT-style controls are routed.
+///
+/// Computed server-side from the active source + audio routing so the
+/// client never has to replicate the decision. Client greys CAT widgets
+/// when `None`; server routes `CatCommand`s accordingly.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, Encode, Decode)]
+pub enum ControlTarget {
+    /// No CAT surface. Audio-only source with no hardware CAT (USB
+    /// dongle, portable radio). Client greys all CAT controls.
+    None,
+    /// Native hardware CAT (FDM-DUO serial). All controls go to the
+    /// radio. Used in AUD + FDM-DUO.
+    Radio,
+    /// Software demod. All controls go to the demod. Used in IQ with
+    /// non-FDM-DUO sources (HackRF, RSPdx, RTL).
+    Demod,
+    /// Software demod with frequency mirrored to the radio. Mode / BW /
+    /// filters / AGC go to the demod only; frequency changes move both
+    /// radio and demod. Used in IQ + FDM-DUO.
+    DemodMirrorFreq,
+}
+
 /// What the active source supports. Sent on WS connect and any time the
 /// active source changes. Clients gate UI based on these flags.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Encode, Decode)]
@@ -90,6 +112,9 @@ pub struct Capabilities {
     /// the next DRM bridge spawn. Client uses this to sync its Flip
     /// toggle on connect.
     pub drm_flip_spectrum: bool,
+    /// Where client CAT controls are routed. Single source of truth for
+    /// both client-side greying and server-side routing.
+    pub control_target: ControlTarget,
 }
 
 /// Live DRM decoder status parsed from DREAM's TUI output.

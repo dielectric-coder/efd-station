@@ -5,8 +5,8 @@ pub mod upstream;
 pub mod wire;
 
 pub use downstream::{
-    AudioChunk, Capabilities, DecodedText, DeviceList, DrmStatus, ErrorMsg, FftBins, RadioState,
-    RecordingStatus, StateSnapshot,
+    AudioChunk, Capabilities, ControlTarget, DecodedText, DeviceList, DrmStatus, ErrorMsg, FftBins,
+    RadioState, RecordingStatus, StateSnapshot,
 };
 pub use grid::GridCell;
 pub use radio::{AgcMode, DecoderKind, DeviceId, Mode, RecKind, SourceClass, SourceKind, Vfo};
@@ -153,6 +153,7 @@ mod tests {
             supported_demod_modes: vec![Mode::USB, Mode::LSB, Mode::CW, Mode::AM, Mode::SAM, Mode::FM],
             supported_decoders: vec![DecoderKind::Cw, DecoderKind::Rtty, DecoderKind::Psk],
             drm_flip_spectrum: false,
+            control_target: ControlTarget::DemodMirrorFreq,
         };
         assert_eq!(orig, round_trip(&orig));
     }
