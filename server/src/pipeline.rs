@@ -1183,31 +1183,11 @@ async fn encode_audio_mux(
                 }
                 dsp_scratch.clear();
                 dsp_scratch.extend_from_slice(&block.samples);
-
-                let pre_peak = dsp_scratch.iter().copied().map(f32::abs).fold(0.0f32, f32::max);
-
                 // Audio → IF demod → DSP → Audio Out.
                 // IF filter is applied only to already-audio sources;
                 // IQ → audio demod has its own filters upstream.
                 audio_if.process(&mut dsp_scratch);
-                let post_if_peak = dsp_scratch.iter().copied().map(f32::abs).fold(0.0f32, f32::max);
-
                 dsp.process(&mut dsp_scratch);
-                let post_dsp_peak = dsp_scratch.iter().copied().map(f32::abs).fold(0.0f32, f32::max);
-
-                static MUX_BLOCK: std::sync::atomic::AtomicU64 =
-                    std::sync::atomic::AtomicU64::new(0);
-                let n = MUX_BLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if n < 5 || n % 250 == 0 {
-                    info!(
-                        block = n,
-                        mode = ?current_mode,
-                        dsp_flags = ?dsp.flags(),
-                        pre_peak, post_if_peak, post_dsp_peak,
-                        "mux USB RX path"
-                    );
-                }
-
                 let _ = pcm_tx.send(Arc::new(dsp_scratch.clone()));
                 encode_samples(&dsp_scratch, &mut frame_buf, &mut encoder, &mut seq, &tx);
             }
