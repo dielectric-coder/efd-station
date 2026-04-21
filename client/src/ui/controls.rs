@@ -4,13 +4,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use efd_proto::{
-    Capabilities, ClientMsg, DrmStatus, Mode, Ptt, RadioState, RecKind, RecordingStatus,
-    SourceClass, StartRecording, StateSnapshot,
+    Capabilities, ClientMsg, DeviceId, DeviceList, DrmStatus, Mode, Ptt, RadioState, RecKind,
+    RecordingStatus, SourceClass, StartRecording, StateSnapshot,
 };
 use gtk4::prelude::*;
 use gtk4::{
-    Adjustment, Align, Box as GtkBox, Button, DropDown, Entry, Label, LevelBar, Orientation,
-    Scale, StringList, ToggleButton,
+    Adjustment, Align, Box as GtkBox, Button, DropDown, Entry, GestureClick, Label, LevelBar,
+    Orientation, Scale, StringList, ToggleButton, Window,
 };
 use tokio::sync::mpsc;
 
@@ -77,6 +77,10 @@ pub struct DisplayBar {
     decoded_text_label: Label,
     decoded_lines: Rc<RefCell<std::collections::VecDeque<String>>>,
     prev: RefCell<Option<CachedState>>,
+    /// Sender used by clickable `disp1-left` device chips to emit
+    /// `ClientMsg::SelectDevice`. Each chip captures a clone in its
+    /// `GestureClick` handler — no chip currently sends anything else.
+    ws_tx: mpsc::UnboundedSender<ClientMsg>,
 }
 
 /// Rolling log cap for the decoded-text view. 6 fits nicely in the
@@ -110,7 +114,7 @@ struct StatusLineCache {
 }
 
 impl DisplayBar {
-    pub fn new() -> Self {
+    pub fn new(ws_tx: mpsc::UnboundedSender<ClientMsg>) -> Self {
         // Outer vertical container holds three rows. Each row has left /
         // center / right slots so cross-row alignment matches the
         // drawio wireframe (docs/client-sdr-UI.drawio).
@@ -249,6 +253,7 @@ impl DisplayBar {
             decoded_text_label,
             decoded_lines,
             prev: RefCell::new(None),
+            ws_tx,
         }
     }
 
@@ -349,17 +354,47 @@ impl DisplayBar {
                 continue;
             }
             let chip = make_chip(device_short_label(dev.kind));
-            chip.set_tooltip_text(Some(&format!("{:?} — {}", dev.kind, dev.id)));
+            chip.set_tooltip_text(Some(&format!(
+                "{:?} — {}\n(click to select this device)",
+                dev.kind, dev.id
+            )));
             let state = if Some(dev.kind) == active_kind {
                 ChipState::Active
             } else {
                 ChipState::Inactive
             };
             paint_chip(&chip, state);
+
+            // Clickable: send `ClientMsg::SelectDevice` on release. The
+            // server's upstream handler records the choice and triggers
+            // a graceful respawn so the pipeline reopens the new device.
+            let gesture = GestureClick::new();
+            let tx = self.ws_tx.clone();
+            let d = dev.clone();
+            gesture.connect_released(move |_, _, _, _| {
+                let _ = tx.send(ClientMsg::SelectDevice(d.clone()));
+            });
+            chip.add_controller(gesture);
+
             self.disp1_left_box.append(&chip);
             self.device_chips
                 .borrow_mut()
                 .push((dev.clone(), chip));
+        }
+
+        // Reflect the authoritative `list.active` in the disp2-left pill
+        // (e.g. `FDM IQ` or `POR AUD`) so the UI says what the server is
+        // actually running, not the last `Capabilities.source` value.
+        if let Some(active) = list.active.as_ref() {
+            let class_tag = match active.kind.class() {
+                efd_proto::SourceClass::Iq => "IQ",
+                efd_proto::SourceClass::Audio => "AUD",
+            };
+            self.active_source_pill.set_text(&format!(
+                "{} {}",
+                device_short_label(active.kind),
+                class_tag
+            ));
         }
     }
 
@@ -417,7 +452,7 @@ impl DisplayBar {
             if on {
                 format!("<b>{label}</b>")
             } else {
-                format!("<span alpha='45%'>{label} off</span>")
+                format!("<span alpha='45%'>{label}<sub>off</sub></span>")
             }
         };
 
@@ -445,25 +480,24 @@ impl DisplayBar {
     /// the tuning line in sync with the user's typed value while
     /// we wait for the CAT poll to confirm.
     pub fn set_freq_immediate(&self, hz: u64) {
-        let mut prev = self.prev.borrow_mut();
-        // Apply the freq into the cached state so the next `update`
-        // doesn't clobber it with a stale value.
-        let composed = match prev.as_mut() {
-            Some(s) => {
-                s.freq_hz = hz;
-                s.clone()
-            }
-            None => CachedState {
-                freq_hz: hz,
-                mode: "USB".into(),
-                vfo: "VFO A".into(),
-                filter_bw: String::new(),
-                s_reading: 0,
-                tx: false,
-            },
-        };
-        *prev = Some(composed);
-        // Re-render tuning_line with current cached fields.
+        {
+            let mut prev = self.prev.borrow_mut();
+            let composed = match prev.as_mut() {
+                Some(s) => {
+                    s.freq_hz = hz;
+                    s.clone()
+                }
+                None => CachedState {
+                    freq_hz: hz,
+                    mode: "USB".into(),
+                    vfo: "VFO A".into(),
+                    filter_bw: String::new(),
+                    s_reading: 0,
+                    tx: false,
+                },
+            };
+            *prev = Some(composed);
+        }
         self.tuning_line.set_markup(&self.current_tuning_markup());
     }
 
@@ -606,14 +640,6 @@ const MODES: &[(&str, Mode)] = &[
     ("DRM", Mode::DRM),
 ];
 
-const STEPS: &[(&str, u64)] = &[
-    ("100 Hz", 100),
-    ("1 kHz", 1_000),
-    ("5 kHz", 5_000),
-    ("10 kHz", 10_000),
-    ("25 kHz", 25_000),
-];
-
 #[derive(Clone)]
 pub struct ControlBar {
     container: GtkBox,
@@ -622,11 +648,19 @@ pub struct ControlBar {
     /// source is available.
     audio_btn: ToggleButton,
     ptt_btn: ToggleButton,
-    agc_label: Label,
-    agc_scale: Scale,
-    /// Tune controls (freq entry, step, up/down). Visible when CAT is
-    /// available.
-    sdr_box: GtkBox,
+    /// Cache of the latest server-pushed device list, read by the DEV
+    /// button's picker dialog. Written by `set_device_list`.
+    cached_devices: Rc<RefCell<Vec<DeviceId>>>,
+    /// ctrl0-center yellow chip tiles per drawio (agc / f / bw / rit
+    /// / IF). Buttons are kept only for the two tiles that get
+    /// visibility-gated on hardware CAT (agc + f); bw/rit/IF labels
+    /// stay because `sync_from_radio` updates their markup.
+    agc_tile_btn: Button,
+    freq_tile_btn: Button,
+    freq_tile_label: Label,
+    bw_tile_label: Label,
+    rit_tile_label: Label,
+    if_tile_label: Label,
     mode_dropdown: DropDown,
     mode_list: StringList,
     /// DRM spectrum-flip toggle — visible only when current demod mode
@@ -700,6 +734,9 @@ impl ControlBar {
         // fixed minimum height so the control bar doesn't collapse as
         // sdr_box / audio_btn toggle visibility.
         const CTRL_ROW_HEIGHT: i32 = 42;
+        // Shared width for the right-column buttons (WSJT-X, REC, CONFIG)
+        // so they line up vertically regardless of label length.
+        const CTRL_RIGHT_BTN_WIDTH: i32 = 100;
         let container = GtkBox::new(Orientation::Vertical, 2);
         container.set_margin_start(8);
         container.set_margin_end(8);
@@ -717,44 +754,24 @@ impl ControlBar {
         ctrl2_row.set_size_request(-1, CTRL_ROW_HEIGHT);
         container.append(&ctrl2_row);
 
+        // Overflow row for widgets that aren't in the drawio spec
+        // (PTT, Mute, Vol, DRM flip, hidden mode dropdown). Kept here
+        // so the feature set doesn't regress — move into their final
+        // home (CONFIG dialog / keyboard shortcuts / etc.) later.
+        let overflow_row = GtkBox::new(Orientation::Horizontal, 8);
+        overflow_row.set_margin_top(4);
+        overflow_row.set_halign(Align::End);
+        container.append(&overflow_row);
+
         let last_cmd = Rc::new(Cell::new(Instant::now() - std::time::Duration::from_secs(10)));
         let last_radio: Rc<RefCell<Option<RadioState>>> = Rc::new(RefCell::new(None));
         let sdr_params = Rc::new(RefCell::new(sdr_params::load()));
 
-        // --- Tune controls box (freq entry + step + tune up/down) ---
-        // Visible whenever CAT is available; the mode dropdown lives
-        // outside this box because it's meaningful even in AUD mode
-        // (where it commands the radio via CAT rather than the backend).
-        let sdr_box = GtkBox::new(Orientation::Horizontal, 8);
-
-        let freq_entry = Entry::new();
-        freq_entry.set_width_chars(14);
-        freq_entry.set_placeholder_text(Some("Freq Hz"));
-        freq_entry.add_css_class("monospace");
-        {
-            let tx = ws_tx.clone();
-            let lc = last_cmd.clone();
-            let db = display_bar.clone();
-            let sp = sdr_params.clone();
-            freq_entry.connect_activate(move |entry| {
-                let text = entry.text();
-                if let Ok(hz) = text.replace(['.', ',', ' '], "").parse::<u64>() {
-                    lc.set(Instant::now());
-                    db.set_freq_immediate(hz);
-                    let _ = tx.send(ClientMsg::CatCommand(cat_commands::set_freq(hz)));
-                    sp.borrow_mut().freq_hz = hz;
-                }
-            });
-        }
-        sdr_box.append(&freq_entry);
-
-        // Demod-mode dropdown — lives outside `sdr_box` so it stays
-        // visible in both AUD and IQ source modes.
-        //   AUD + CAT: sends CAT to the radio ("tune to this mode")
-        //   AUD + no-CAT (portable): greyed out
-        //   IQ  + ...: sends SetDemodMode to the backend (+ CAT if any)
-        // Dropdown is populated from `active_modes`, which defaults to
-        // all MODES and is re-filtered when server `Capabilities` arrive.
+        // --- Mode dropdown model ---
+        // The visible mode selector is the ctrl1-center button row
+        // (`build_mode_buttons`); the DropDown is kept hidden so
+        // `active_modes` / `apply_capabilities` can filter MODES by
+        // server capability and existing tests can still find it.
         let active_modes: Rc<RefCell<Vec<(&'static str, Mode)>>> =
             Rc::new(RefCell::new(MODES.to_vec()));
         let suppress_mode_notify = Rc::new(Cell::new(false));
@@ -762,8 +779,9 @@ impl ControlBar {
         let mode_list = StringList::new(&MODES.iter().map(|(s, _)| *s).collect::<Vec<_>>());
         let mode_dropdown = DropDown::new(Some(mode_list.clone()), gtk4::Expression::NONE);
         mode_dropdown.set_selected(1); // default USB
-        mode_dropdown.set_valign(Align::Center);
-        // DRM spectrum-flip toggle; visible only when mode=DRM.
+        mode_dropdown.set_visible(false);
+
+        // DRM spectrum-flip toggle, lives in the overflow row, visible only in DRM.
         let flip_btn = ToggleButton::with_label("Flip");
         flip_btn.set_valign(Align::Center);
         flip_btn.set_visible(false);
@@ -799,7 +817,6 @@ impl ControlBar {
                         let _ = tx.send(ClientMsg::CatCommand(cmd));
                     }
                     sp.borrow_mut().set_mode(mode);
-                    // Repurpose the two extra rows for the new mode.
                     if mode == Mode::DRM {
                         db.prime_drm_placeholders();
                     } else {
@@ -809,9 +826,140 @@ impl ControlBar {
                 }
             });
         }
+
+        // -----------------------------------------------------------
+        // ctrl0-center — five yellow chip tiles (agc / f / bw / rit / IF).
+        // Each tile shows a live Pango-markup value and opens a modal
+        // edit dialog on click.
+        // -----------------------------------------------------------
+        const TILE_WIDTH: i32 = 100;
+        let initial_threshold = sdr_params.borrow().agc_threshold;
+        let (agc_tile_btn, agc_tile_label) = make_ctrl_tile(
+            &format!("<i>agc {}</i>", initial_threshold),
+            "AGC threshold (0–10) — click to edit",
+            TILE_WIDTH,
+        );
+        let (freq_tile_btn, freq_tile_label) = make_ctrl_tile(
+            &format!(
+                "<i>f</i> {}<sup>Hz</sup>",
+                format_freq_spaced(sdr_params.borrow().freq_hz)
+            ),
+            "Frequency (Hz) — click to edit",
+            TILE_WIDTH,
+        );
+        let (bw_tile_btn, bw_tile_label) = make_ctrl_tile(
+            "<i>bw</i> —<sup>Hz</sup>",
+            "Filter bandwidth (read-only today; CAT command TBD)",
+            TILE_WIDTH,
+        );
+        let (rit_tile_btn, rit_tile_label) = make_ctrl_tile(
+            "<i>rit</i> 0<sup>Hz</sup>",
+            "RIT offset (read-only today; CAT command TBD)",
+            TILE_WIDTH,
+        );
+        let (if_tile_btn, if_tile_label) = make_ctrl_tile(
+            "<i>IF</i> 0<sup>Hz</sup>",
+            "IF offset (read-only today; CAT command TBD)",
+            TILE_WIDTH,
+        );
+        ctrl0_center.append(&agc_tile_btn);
+        ctrl0_center.append(&freq_tile_btn);
+        ctrl0_center.append(&bw_tile_btn);
+        ctrl0_center.append(&rit_tile_btn);
+        ctrl0_center.append(&if_tile_btn);
+
+        // agc tile → edit threshold (0–10), send CAT, update label.
+        {
+            let ws = ws_tx.clone();
+            let sp = sdr_params.clone();
+            let lc = last_cmd.clone();
+            let lbl = agc_tile_label.clone();
+            agc_tile_btn.connect_clicked(move |btn| {
+                let current = sp.borrow().agc_threshold;
+                let ws = ws.clone();
+                let sp = sp.clone();
+                let lc = lc.clone();
+                let lbl = lbl.clone();
+                open_tile_entry(btn, "AGC threshold", &current.to_string(), move |txt| {
+                    if let Ok(v) = txt.trim().parse::<u8>() {
+                        let v = v.min(10);
+                        lc.set(Instant::now());
+                        sp.borrow_mut().agc_threshold = v;
+                        lbl.set_markup(&format!("<i>agc {v}</i>"));
+                        let _ = ws.send(ClientMsg::CatCommand(
+                            cat_commands::set_agc_threshold(v),
+                        ));
+                    }
+                });
+            });
+        }
+
+        // freq tile → edit frequency (Hz), send CAT, update label + display bar.
+        {
+            let ws = ws_tx.clone();
+            let sp = sdr_params.clone();
+            let lc = last_cmd.clone();
+            let db = display_bar.clone();
+            let lbl = freq_tile_label.clone();
+            freq_tile_btn.connect_clicked(move |btn| {
+                let current = sp.borrow().freq_hz;
+                let ws = ws.clone();
+                let sp = sp.clone();
+                let lc = lc.clone();
+                let db = db.clone();
+                let lbl = lbl.clone();
+                open_tile_entry(btn, "Frequency (Hz)", &current.to_string(), move |txt| {
+                    if let Ok(hz) = txt.replace(['.', ',', ' '], "").parse::<u64>() {
+                        lc.set(Instant::now());
+                        sp.borrow_mut().freq_hz = hz;
+                        db.set_freq_immediate(hz);
+                        lbl.set_markup(&format!(
+                            "<i>f</i> {}<sup>Hz</sup>",
+                            format_freq_spaced(hz)
+                        ));
+                        let _ = ws.send(ClientMsg::CatCommand(cat_commands::set_freq(hz)));
+                    }
+                });
+            });
+        }
+
+        // bw / rit / IF tiles → local label edit only (no CAT command yet).
+        {
+            let lbl = bw_tile_label.clone();
+            bw_tile_btn.connect_clicked(move |btn| {
+                let lbl = lbl.clone();
+                open_tile_entry(btn, "Filter bandwidth (Hz)", "", move |txt| {
+                    if let Ok(v) = txt.trim().parse::<u32>() {
+                        lbl.set_markup(&format!("<i>bw</i> {v}<sup>Hz</sup>"));
+                    }
+                });
+            });
+        }
+        {
+            let lbl = rit_tile_label.clone();
+            rit_tile_btn.connect_clicked(move |btn| {
+                let lbl = lbl.clone();
+                open_tile_entry(btn, "RIT offset (Hz)", "", move |txt| {
+                    if let Ok(v) = txt.trim().parse::<i32>() {
+                        lbl.set_markup(&format!("<i>rit</i> {v:+}<sup>Hz</sup>"));
+                    }
+                });
+            });
+        }
+        {
+            let lbl = if_tile_label.clone();
+            if_tile_btn.connect_clicked(move |btn| {
+                let lbl = lbl.clone();
+                open_tile_entry(btn, "IF offset (Hz)", "", move |txt| {
+                    if let Ok(v) = txt.trim().parse::<i32>() {
+                        lbl.set_markup(&format!("<i>IF</i> {v:+}<sup>Hz</sup>"));
+                    }
+                });
+            });
+        }
+
         // --- Source toggle (sole mode selector) ---
-        // Untoggled = AUD  (radio's USB audio; radio does the demod)
-        // Toggled   = IQ   (software demod runs on the backend's IQ feed)
+        // Untoggled = AUD (radio USB audio); toggled = IQ (software demod).
         let audio_btn = ToggleButton::with_label("SRC");
         audio_btn.set_valign(Align::Center);
         audio_btn.set_tooltip_text(Some(
@@ -821,15 +969,14 @@ impl ControlBar {
             let tx = ws_tx.clone();
             let lr = last_radio.clone();
             let sp = sdr_params.clone();
-            let fe = freq_entry.clone();
             let md = mode_dropdown.clone();
             let am = active_modes.clone();
             let db = display_bar.clone();
+            let lbl = freq_tile_label.clone();
             audio_btn.connect_toggled(move |btn| {
                 let is_iq = btn.is_active();
                 db.set_selected_source(is_iq);
                 if is_iq {
-                    // --- AUD → IQ ---
                     let (freq_hz, mode) = {
                         let params = sp.borrow();
                         (params.freq_hz, params.mode())
@@ -841,7 +988,10 @@ impl ControlBar {
                     let _ = tx.send(ClientMsg::SetDemodMode(Some(mode)));
                     let _ = tx.send(ClientMsg::SelectSource(SourceClass::Iq));
 
-                    fe.set_text(&format!("{}", freq_hz));
+                    lbl.set_markup(&format!(
+                        "<i>f</i> {}<sup>Hz</sup>",
+                        format_freq_spaced(freq_hz)
+                    ));
                     if let Some(idx) = am.borrow().iter().position(|&(_, m)| m == mode) {
                         md.set_selected(idx as u32);
                     }
@@ -851,7 +1001,6 @@ impl ControlBar {
                         db.clear_extras();
                     }
                 } else {
-                    // --- IQ → AUD ---
                     db.clear_extras();
                     {
                         let mut params = sp.borrow_mut();
@@ -866,105 +1015,41 @@ impl ControlBar {
                 }
             });
         }
-
         ctrl0_left.append(&audio_btn);
 
-        // --- AGC threshold slider (always visible, 0–10) ---
-        let initial_threshold = sdr_params.borrow().agc_threshold;
-        let agc_label = Label::new(Some("AGC:"));
-        agc_label.add_css_class("monospace");
-        agc_label.set_valign(Align::Center);
-        ctrl0_center.append(&agc_label);
-
-        let agc_adj = Adjustment::new(initial_threshold as f64, 0.0, 10.0, 1.0, 1.0, 0.0);
-        let agc_scale = Scale::new(Orientation::Horizontal, Some(&agc_adj));
-        agc_scale.set_width_request(140);
-        agc_scale.set_valign(Align::Center);
-        agc_scale.set_draw_value(true);
-        agc_scale.set_digits(0);
-        agc_scale.set_round_digits(0);
-        for i in 0..=10 {
-            agc_scale.add_mark(i as f64, gtk4::PositionType::Bottom, None);
-        }
+        // DEV button: opens a dialog listing every DeviceList entry so
+        // the user can pick any specific audio or IQ device (not just
+        // its class). Click on a row → `ClientMsg::SelectDevice` →
+        // server respawns with the chosen backend.
+        let cached_devices: Rc<RefCell<Vec<DeviceId>>> = Rc::new(RefCell::new(Vec::new()));
+        let dev_btn = Button::with_label("DEV");
+        dev_btn.set_valign(Align::Center);
+        dev_btn.set_tooltip_text(Some(
+            "Pick a specific audio or IQ device from the ones discovered on the server",
+        ));
+        dev_btn.add_css_class("chrome-btn");
         {
-            let tx = ws_tx.clone();
-            let sp = sdr_params.clone();
-            let lc = last_cmd.clone();
-            agc_adj.connect_value_changed(move |adj| {
-                let v = adj.value().round() as u8;
-                lc.set(Instant::now());
-                sp.borrow_mut().agc_threshold = v;
-                let _ = tx.send(ClientMsg::CatCommand(cat_commands::set_agc_threshold(v)));
+            let ws = ws_tx.clone();
+            let cache = cached_devices.clone();
+            dev_btn.connect_clicked(move |btn| {
+                open_device_picker(btn, &cache.borrow(), ws.clone());
             });
         }
-        ctrl0_center.append(&agc_scale);
+        ctrl0_left.append(&dev_btn);
 
-        // No unconditional `SelectSource` on init — the server seeds
-        // its own default (via StateSnapshot / AudioRouting) and a
-        // blind "Audio" send here caused a noisy fallback loop when
-        // USB audio wasn't available (RadioUsb → fallback to
-        // SoftwareDemod → two log lines per connect). The client's
-        // source toggle fires `SelectSource` on user click.
+        // No unconditional `SelectSource` on init — server seeds its own default.
 
-        // Step size dropdown
-        let step_list = StringList::new(&STEPS.iter().map(|(s, _)| *s).collect::<Vec<_>>());
-        let step_dropdown = DropDown::new(Some(step_list), gtk4::Expression::NONE);
-        step_dropdown.set_selected(1); // default 1 kHz
-        step_dropdown.set_valign(Align::Center);
-        sdr_box.append(&step_dropdown);
-
-        // Tune up/down
-        {
-            let tune_down = Button::with_label("\u{25BC}"); // ▼
-            tune_down.set_valign(Align::Center);
-            let fe = freq_entry.clone();
-            let sd = step_dropdown.clone();
-            let tx = ws_tx.clone();
-            let lc = last_cmd.clone();
-            let db = display_bar.clone();
-            let sp = sdr_params.clone();
-            tune_down.connect_clicked(move |_| {
-                tune_by_step(&fe, &sd, &tx, &db, &lc, &sp, false);
-            });
-            sdr_box.append(&tune_down);
-        }
-        {
-            let tune_up = Button::with_label("\u{25B2}"); // ▲
-            tune_up.set_valign(Align::Center);
-            let fe = freq_entry.clone();
-            let sd = step_dropdown.clone();
-            let tx = ws_tx.clone();
-            let lc = last_cmd.clone();
-            let db = display_bar.clone();
-            let sp = sdr_params.clone();
-            tune_up.connect_clicked(move |_| {
-                tune_by_step(&fe, &sd, &tx, &db, &lc, &sp, true);
-            });
-            sdr_box.append(&tune_up);
-        }
-
-        // Per the drawio, ctrl1-center is reserved for the IF-demod
-        // mode buttons (AM/SAM/DSB/USB/LSB/CWᵤ/CWₗ/FMₙ). The tune
-        // controls + flip toggle move to ctrl0-center alongside the
-        // other always-visible controls, since the diagram uses
-        // ctrl0 for tuning and ctrl1/ctrl2 for mode+decoder pickers.
-        ctrl0_center.append(&sdr_box);
-        ctrl0_center.append(&flip_btn);
-        // mode_dropdown kept but hidden — it still sources CSS/id for
-        // some existing tests. Mode buttons below drive the real
-        // selection.
-        mode_dropdown.set_visible(false);
-        ctrl0_center.append(&mode_dropdown);
-
-        // --- Always-visible controls: PTT, Mute, Volume ---
+        // --- Overflow row: widgets that aren't in the drawio ---
         let ptt_btn = ToggleButton::with_label("PTT");
         ptt_btn.set_valign(Align::Center);
-        let tx = ws_tx.clone();
-        ptt_btn.connect_toggled(move |btn| {
-            let on = btn.is_active();
-            let _ = tx.send(ClientMsg::Ptt(Ptt { on }));
-        });
-        ctrl0_center.append(&ptt_btn);
+        {
+            let tx = ws_tx.clone();
+            ptt_btn.connect_toggled(move |btn| {
+                let on = btn.is_active();
+                let _ = tx.send(ClientMsg::Ptt(Ptt { on }));
+            });
+        }
+        overflow_row.append(&ptt_btn);
 
         if let Some(ref player) = audio {
             let mute_btn = ToggleButton::with_label("Mute");
@@ -976,11 +1061,11 @@ impl ControlBar {
                     ap.toggle_mute();
                 }
             });
-            ctrl0_center.append(&mute_btn);
+            overflow_row.append(&mute_btn);
 
             let vol_label = Label::new(Some("Vol:"));
             vol_label.add_css_class("monospace");
-            ctrl0_center.append(&vol_label);
+            overflow_row.append(&vol_label);
 
             let vol_adj = Adjustment::new(70.0, 0.0, 100.0, 5.0, 10.0, 0.0);
             let vol_scale = Scale::new(Orientation::Horizontal, Some(&vol_adj));
@@ -991,8 +1076,11 @@ impl ControlBar {
             vol_adj.connect_value_changed(move |adj| {
                 ap.set_volume(adj.value() as f32 / 100.0);
             });
-            ctrl0_center.append(&vol_scale);
+            overflow_row.append(&vol_scale);
         }
+
+        overflow_row.append(&flip_btn);
+        overflow_row.append(&mode_dropdown);
 
         // -----------------------------------------------------------
         // DSP toggles (NB / APF / DNR / DNF) + REC + CONFIG + WSJT-X,
@@ -1064,8 +1152,12 @@ impl ControlBar {
         ctrl2_left.append(&dnf_btn);
 
         // --- REC toggle + status (ctrl1-right) ---
-        let rec_btn = ToggleButton::with_label("REC");
+        let rec_btn = ToggleButton::new();
+        let rec_label = Label::new(None);
+        rec_label.set_markup("<i>REC </i><span foreground=\"red\">\u{25CF}</span>");
+        rec_btn.set_child(Some(&rec_label));
         rec_btn.set_valign(Align::Center);
+        rec_btn.set_width_request(CTRL_RIGHT_BTN_WIDTH);
         rec_btn.add_css_class("chrome-btn");
         rec_btn.set_tooltip_text(Some(
             "Start/stop recording the audio stream to a file under ~/.local/state/efd-backend/recordings",
@@ -1103,8 +1195,12 @@ impl ControlBar {
         // `localhost:4532` (the rigctld pattern documented in the
         // README). Errors (binary missing, fork failure) are surfaced
         // via stderr; a failed launch doesn't block the button.
-        let wsjtx_btn = Button::with_label("WSJT-X");
+        let wsjtx_btn = Button::new();
+        let wsjtx_label = Label::new(None);
+        wsjtx_label.set_markup("<i>WSJT-X</i>");
+        wsjtx_btn.set_child(Some(&wsjtx_label));
         wsjtx_btn.set_valign(Align::Center);
+        wsjtx_btn.set_width_request(CTRL_RIGHT_BTN_WIDTH);
         wsjtx_btn.add_css_class("chrome-btn");
         wsjtx_btn.set_tooltip_text(Some(
             "Launch WSJT-X. Point WSJT-X at localhost:4532 once you've \
@@ -1131,8 +1227,12 @@ impl ControlBar {
         // Phase-5b placeholder: click logs a TODO. The dialog will
         // eventually expose server URL, token, recording dir,
         // start-up DSP defaults.
-        let config_btn = Button::with_label("CONFIG");
+        let config_btn = Button::new();
+        let config_label = Label::new(None);
+        config_label.set_markup("<i>CONFIG</i>");
+        config_btn.set_child(Some(&config_label));
         config_btn.set_valign(Align::Center);
+        config_btn.set_width_request(CTRL_RIGHT_BTN_WIDTH);
         config_btn.add_css_class("chrome-btn");
         config_btn.set_tooltip_text(Some(
             "Open client settings (phase-5c placeholder)",
@@ -1178,9 +1278,13 @@ impl ControlBar {
             container,
             audio_btn,
             ptt_btn,
-            agc_label,
-            agc_scale,
-            sdr_box,
+            cached_devices,
+            agc_tile_btn,
+            freq_tile_btn,
+            freq_tile_label,
+            bw_tile_label,
+            rit_tile_label,
+            if_tile_label,
             mode_dropdown,
             mode_list,
             flip_btn,
@@ -1265,17 +1369,52 @@ impl ControlBar {
         &self.container
     }
 
-    /// Sync control bar from RadioState.
+    /// Cache the server's latest `DeviceList` so the DEV button's
+    /// picker dialog can read it. Called from the WS dispatch on every
+    /// `ServerMsg::DeviceList`.
+    pub fn set_device_list(&self, list: &DeviceList) {
+        let mut cache = self.cached_devices.borrow_mut();
+        cache.clear();
+        // IQ entries sort first for the same reason the display-bar
+        // chips do — keeps the picker stable in layout order.
+        cache.extend(list.iq_devices.iter().cloned());
+        cache.extend(list.audio_devices.iter().cloned());
+    }
+
+    /// Sync control bar from RadioState — stashes the latest for
+    /// AUD↔IQ toggle, and refreshes the ctrl0-center tiles so their
+    /// Pango markup tracks whatever the radio just reported.
     pub fn sync_from_radio(&self, state: &RadioState) {
         *self.last_radio.borrow_mut() = Some(state.clone());
+
+        self.freq_tile_label.set_markup(&format!(
+            "<i>f</i> {}<sup>Hz</sup>",
+            format_freq_spaced(state.freq_hz)
+        ));
+        let bw_text = match state.filter_bw_hz {
+            Some(hz) => format_bw_hz(hz),
+            None if !state.filter_bw.is_empty() => state.filter_bw.clone(),
+            _ => "—".to_string(),
+        };
+        self.bw_tile_label
+            .set_markup(&format!("<i>bw</i> {bw_text}"));
+        let rit = if state.rit_on { state.rit_hz } else { 0 };
+        self.rit_tile_label
+            .set_markup(&format!("<i>rit</i> {rit:+}<sup>Hz</sup>"));
+        self.if_tile_label.set_markup(&format!(
+            "<i>IF</i> {:+}<sup>Hz</sup>",
+            state.if_offset_hz
+        ));
     }
 
     /// Gate UI controls by server-advertised source capabilities.
     pub fn apply_capabilities(&self, caps: &Capabilities) {
         self.ptt_btn.set_visible(caps.has_tx);
-        // AGC threshold is a CAT command, so it keys on has_hardware_cat.
-        self.agc_label.set_visible(caps.has_hardware_cat);
-        self.agc_scale.set_visible(caps.has_hardware_cat);
+        // AGC + frequency tiles only make sense with hardware CAT.
+        // bw/rit/IF tiles remain visible (read-only today) so the drawio
+        // layout is stable regardless of CAT availability.
+        self.agc_tile_btn.set_visible(caps.has_hardware_cat);
+        self.freq_tile_btn.set_visible(caps.has_hardware_cat);
         // AUD / IQ availability indicators in the display bar.
         self.display_bar
             .set_source_availability(caps.has_usb_audio, caps.has_iq);
@@ -1335,9 +1474,6 @@ impl ControlBar {
         let dropdown_sensitive = !(is_aud && !caps.has_hardware_cat);
         self.mode_dropdown.set_sensitive(dropdown_sensitive);
 
-        // Tune controls (freq entry, step, up/down) only work via CAT.
-        self.sdr_box.set_visible(caps.has_hardware_cat);
-
         // Initial AGC-threshold sync, deferred from construction so we only
         // emit it to sources that can accept the CAT command.
         if caps.has_hardware_cat {
@@ -1395,39 +1531,164 @@ impl ControlBar {
     }
 }
 
-/// Tune up/down by step. Sends command immediately — the server coalesces
-/// rapid commands so only the last frequency actually gets sent to the radio.
-fn tune_by_step(
-    freq_entry: &Entry,
-    step_dropdown: &DropDown,
-    ws_tx: &mpsc::UnboundedSender<ClientMsg>,
-    display_bar: &DisplayBar,
-    last_cmd: &Rc<Cell<Instant>>,
-    sdr_params: &Rc<RefCell<SdrParams>>,
-    up: bool,
-) {
-    let step_idx = step_dropdown.selected() as usize;
-    let step_hz = STEPS.get(step_idx).map(|&(_, hz)| hz).unwrap_or(1000);
-    let current: u64 = freq_entry
-        .text()
-        .replace(['.', ',', ' '], "")
-        .parse()
-        .unwrap_or(0);
-    let new_freq = if up {
-        current.saturating_add(step_hz)
-    } else {
-        current.saturating_sub(step_hz)
-    };
-    freq_entry.set_text(&format!("{new_freq}"));
-    display_bar.set_freq_immediate(new_freq);
-    last_cmd.set(Instant::now());
-    sdr_params.borrow_mut().freq_hz = new_freq;
-    let _ = ws_tx.send(ClientMsg::CatCommand(cat_commands::set_freq(new_freq)));
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Build a ctrl0-center yellow chip tile: a `Button` wrapping a
+/// Pango-markup `Label`. Returns both so the caller can wire click
+/// handlers on the button and update the markup on the label.
+fn make_ctrl_tile(initial_markup: &str, tooltip: &str, width: i32) -> (Button, Label) {
+    let btn = Button::new();
+    let label = Label::new(None);
+    label.set_use_markup(true);
+    label.set_markup(initial_markup);
+    btn.set_child(Some(&label));
+    btn.set_valign(Align::Center);
+    btn.set_width_request(width);
+    btn.add_css_class("chrome-btn");
+    btn.set_tooltip_text(Some(tooltip));
+    (btn, label)
+}
+
+/// Open a modal single-line-entry dialog anchored on `anchor`. The
+/// callback fires on OK or Enter; Cancel closes silently.
+fn open_tile_entry<F>(anchor: &Button, title: &str, initial: &str, on_commit: F)
+where
+    F: Fn(&str) + 'static,
+{
+    let dlg = Window::new();
+    dlg.set_title(Some(title));
+    if let Some(root) = anchor.root().and_downcast::<Window>() {
+        dlg.set_transient_for(Some(&root));
+    }
+    dlg.set_modal(true);
+    dlg.set_default_size(280, -1);
+    dlg.set_resizable(false);
+
+    let vbox = GtkBox::new(Orientation::Vertical, 8);
+    vbox.set_margin_start(12);
+    vbox.set_margin_end(12);
+    vbox.set_margin_top(12);
+    vbox.set_margin_bottom(12);
+
+    let entry = Entry::new();
+    entry.set_text(initial);
+    entry.set_hexpand(true);
+    vbox.append(&entry);
+
+    let hbox = GtkBox::new(Orientation::Horizontal, 8);
+    hbox.set_halign(Align::End);
+    let cancel = Button::with_label("Cancel");
+    let ok = Button::with_label("OK");
+    hbox.append(&cancel);
+    hbox.append(&ok);
+    vbox.append(&hbox);
+
+    dlg.set_child(Some(&vbox));
+
+    let cb = Rc::new(on_commit);
+    {
+        let d = dlg.clone();
+        cancel.connect_clicked(move |_| d.close());
+    }
+    {
+        let d = dlg.clone();
+        let e = entry.clone();
+        let cb = cb.clone();
+        ok.connect_clicked(move |_| {
+            cb(&e.text());
+            d.close();
+        });
+    }
+    {
+        let d = dlg.clone();
+        let cb = cb.clone();
+        entry.connect_activate(move |e| {
+            cb(&e.text());
+            d.close();
+        });
+    }
+
+    dlg.present();
+}
+
+/// Open the DEV-button picker: a modal dialog listing every discovered
+/// device as a clickable row. Clicking a row sends
+/// `ClientMsg::SelectDevice(id)` and closes the dialog. The server
+/// records the choice, triggers a respawn, and reopens with the new
+/// backend.
+fn open_device_picker(
+    anchor: &Button,
+    devices: &[DeviceId],
+    ws_tx: mpsc::UnboundedSender<ClientMsg>,
+) {
+    let dlg = Window::new();
+    dlg.set_title(Some("Pick device"));
+    if let Some(root) = anchor.root().and_downcast::<Window>() {
+        dlg.set_transient_for(Some(&root));
+    }
+    dlg.set_modal(true);
+    dlg.set_default_size(360, -1);
+
+    let vbox = GtkBox::new(Orientation::Vertical, 6);
+    vbox.set_margin_start(12);
+    vbox.set_margin_end(12);
+    vbox.set_margin_top(12);
+    vbox.set_margin_bottom(12);
+
+    if devices.is_empty() {
+        let empty = Label::new(Some("No devices discovered yet."));
+        empty.set_halign(Align::Start);
+        vbox.append(&empty);
+    } else {
+        for dev in devices {
+            // Skip synthetic file placeholders — those are for the future
+            // AudioFile / IqFile replay path and carry no useful `id` today.
+            if matches!(
+                dev.kind,
+                efd_proto::SourceKind::AudioFile | efd_proto::SourceKind::IqFile,
+            ) && dev.id.is_empty()
+            {
+                continue;
+            }
+            let class_tag = match dev.kind.class() {
+                efd_proto::SourceClass::Iq => "IQ",
+                efd_proto::SourceClass::Audio => "AUD",
+            };
+            let label = if dev.id.is_empty() {
+                format!("{} · {:?}", class_tag, dev.kind)
+            } else {
+                format!("{} · {:?} — {}", class_tag, dev.kind, dev.id)
+            };
+            let btn = Button::with_label(&label);
+            btn.set_halign(Align::Fill);
+            btn.set_hexpand(true);
+            let ws = ws_tx.clone();
+            let d_clone = dev.clone();
+            let dlg_clone = dlg.clone();
+            btn.connect_clicked(move |_| {
+                let _ = ws.send(ClientMsg::SelectDevice(d_clone.clone()));
+                dlg_clone.close();
+            });
+            vbox.append(&btn);
+        }
+    }
+
+    let hbox = GtkBox::new(Orientation::Horizontal, 8);
+    hbox.set_halign(Align::End);
+    hbox.set_margin_top(6);
+    let close = Button::with_label("Close");
+    {
+        let d = dlg.clone();
+        close.connect_clicked(move |_| d.close());
+    }
+    hbox.append(&close);
+    vbox.append(&hbox);
+
+    dlg.set_child(Some(&vbox));
+    dlg.present();
+}
 
 /// Visual state for a source / device chip in the display bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

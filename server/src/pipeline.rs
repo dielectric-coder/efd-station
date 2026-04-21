@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use efd_proto::{
     AudioChunk, Capabilities, CatCommand, DeviceList, FftBins, RadioState, RecordingStatus,
-    SourceClass, StateSnapshot, TxAudio,
+    SourceClass, SourceKind, StateSnapshot, TxAudio,
 };
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
@@ -347,7 +347,19 @@ impl Pipeline {
             tasks.push(("file_source", handle));
             true
         } else {
-            match efd_audio::resolve_device(&config.audio.rx_device, true) {
+            // Honour the persisted `active_device` over the config-level
+            // rx_device when the loaded snapshot picked a specific audio
+            // input (FDM-DUO USB audio or a generic capture card
+            // surfaced by `/proc/asound/cards`). Falls back to the
+            // configured value (typically "auto" → FDM-DUO discovery).
+            let snapshot_rx = active_audio_device(&initial_snapshot);
+            let rx_source = snapshot_rx
+                .clone()
+                .or_else(|| efd_audio::resolve_device(&config.audio.rx_device, true));
+            if let Some(ref d) = snapshot_rx {
+                info!(device = %d, "using saved active_device as audio RX");
+            }
+            match rx_source {
                 Some(rx_dev) if efd_audio::probe_capture(&rx_dev) => {
                     info!(device = %rx_dev, "USB RX audio capture device");
                     let usb_rx_cfg = efd_audio::UsbRxConfig {
@@ -1168,6 +1180,27 @@ async fn encode_audio_mux(
 }
 
 /// Accumulate samples into Opus frames and broadcast encoded chunks.
+/// Pull the ALSA capture-device name out of a persisted
+/// `StateSnapshot` when the user's last-selected device is an
+/// audio-side input (FDM-DUO USB audio passthrough or a generic
+/// `/proc/asound/cards` entry like a HiFiBerry HAT or USB dongle).
+/// Returns `None` for IQ-side devices, empty ids, or anything that
+/// doesn't look like an ALSA `hw:N,D` / `plughw:N,D` string — the
+/// caller then falls back to `config.audio.rx_device`.
+fn active_audio_device(snap: &StateSnapshot) -> Option<String> {
+    let dev = snap.active_device.as_ref()?;
+    if dev.id.is_empty() {
+        return None;
+    }
+    match dev.kind {
+        SourceKind::PortableRadio => Some(dev.id.clone()),
+        SourceKind::FdmDuo if dev.id.starts_with("hw:") || dev.id.starts_with("plughw:") => {
+            Some(dev.id.clone())
+        }
+        _ => None,
+    }
+}
+
 fn encode_samples(
     samples: &[f32],
     frame_buf: &mut Vec<f32>,

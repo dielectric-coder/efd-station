@@ -232,7 +232,7 @@ fn build_ui(app: &Application, url: &str) {
     main_box.set_margin_top(4);
     main_box.set_margin_bottom(4);
 
-    let display_bar = ui::controls::DisplayBar::new();
+    let display_bar = ui::controls::DisplayBar::new(ws_tx.clone());
     main_box.append(display_bar.widget());
 
     let (spectrum, display_range) =
@@ -306,6 +306,7 @@ fn build_ui(app: &Application, url: &str) {
                 }
                 ServerMsg::DeviceList(list) => {
                     display_bar2.set_device_list(&list);
+                    control_bar2.set_device_list(&list);
                 }
                 ServerMsg::DecodedText(dt) => {
                     display_bar2.push_decoded(dt.decoder, &dt.text);

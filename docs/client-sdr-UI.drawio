@@ -1,6 +1,6 @@
-<mxfile host="Electron" agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/29.5.2 Chrome/142.0.7444.265 Electron/39.6.1 Safari/537.36" version="29.5.2">
+<mxfile host="Electron" agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/29.6.1 Chrome/142.0.7444.265 Electron/39.8.0 Safari/537.36" version="29.6.1">
   <diagram name="Page-1" id="aO5olS1ZNI8KftE4baP6">
-    <mxGraphModel dx="1130" dy="718" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="850" math="0" shadow="0">
+    <mxGraphModel dx="1109" dy="739" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1100" pageHeight="850" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <object label="UI-Structure" id="1">
@@ -103,7 +103,7 @@
         <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-16" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=0;whiteSpace=wrap;html=1;" value="" vertex="1">
           <mxGeometry height="30" width="120" x="880" y="100" as="geometry" />
         </mxCell>
-        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-17" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=0;whiteSpace=wrap;html=1;" value="&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;&lt;i&gt;&lt;font style=&quot;font-size: 16px;&quot;&gt;f &lt;/font&gt;&lt;/i&gt;&amp;nbsp;&lt;font style=&quot;font-size: 16px;&quot;&gt;&lt;b&gt;14 200 000&lt;/b&gt; &lt;/font&gt;Hz demod&amp;nbsp;&lt;/font&gt;&lt;i style=&quot;font-family: &amp;quot;Hack Nerd Font Mono&amp;quot;;&quot;&gt;&lt;font style=&quot;font-size: 16px;&quot;&gt;&lt;/font&gt;&lt;/i&gt;&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;&amp;nbsp;&lt;b&gt;CW&lt;sub&gt;u&lt;/sub&gt;&lt;/b&gt;&amp;nbsp;bw&amp;nbsp;&lt;/font&gt;&lt;i style=&quot;font-family: &amp;quot;Hack Nerd Font Mono&amp;quot;;&quot;&gt;&lt;font style=&quot;font-size: 16px;&quot;&gt;&lt;/font&gt;&lt;/i&gt;&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;&amp;nbsp;&lt;b&gt;150&amp;nbsp;&lt;/b&gt;Hz RIT&amp;nbsp;&lt;/font&gt;&lt;i style=&quot;font-family: &amp;quot;Hack Nerd Font Mono&amp;quot;;&quot;&gt;&lt;font style=&quot;font-size: 16px;&quot;&gt;&lt;/font&gt;&lt;/i&gt;&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;&amp;nbsp;+&lt;b&gt;10&lt;/b&gt; Hz IF&lt;/font&gt;&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;&amp;nbsp;&lt;/font&gt;&lt;i style=&quot;font-family: &amp;quot;Hack Nerd Font Mono&amp;quot;;&quot;&gt;&lt;font style=&quot;font-size: 16px;&quot;&gt;&lt;/font&gt;&lt;/i&gt;&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;&amp;nbsp;-&lt;b&gt;15&lt;/b&gt;&amp;nbsp;Hz&lt;/font&gt;" vertex="1">
+        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-17" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=0;whiteSpace=wrap;html=1;" value="&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;&lt;i&gt;&lt;font style=&quot;font-size: 16px;&quot;&gt;f &lt;/font&gt;&lt;/i&gt;&amp;nbsp;&lt;font style=&quot;font-size: 16px;&quot;&gt;&lt;b&gt;14 200 000&lt;/b&gt; &lt;/font&gt;Hz demod&amp;nbsp;&lt;i style=&quot;&quot;&gt;&lt;font style=&quot;font-size: 16px;&quot;&gt;&lt;/font&gt;&lt;/i&gt;&amp;nbsp;&lt;b&gt;CW&lt;sub&gt;u&lt;/sub&gt;&lt;/b&gt;&amp;nbsp;bw&amp;nbsp;&lt;i style=&quot;&quot;&gt;&lt;font style=&quot;font-size: 16px;&quot;&gt;&lt;/font&gt;&lt;/i&gt;&amp;nbsp;&lt;b&gt;150&amp;nbsp;&lt;/b&gt;Hz RIT&amp;nbsp;&lt;i style=&quot;&quot;&gt;&lt;font style=&quot;font-size: 16px;&quot;&gt;&lt;/font&gt;&lt;/i&gt;&amp;nbsp;+&lt;b&gt;10&lt;/b&gt; Hz IF&amp;nbsp;&lt;i style=&quot;&quot;&gt;&lt;font style=&quot;font-size: 16px;&quot;&gt;&lt;/font&gt;&lt;/i&gt;&amp;nbsp;-&lt;b&gt;15&lt;/b&gt;&amp;nbsp;Hz&lt;/font&gt;" vertex="1">
           <mxGeometry height="30" width="660" x="210" y="100" as="geometry" />
         </mxCell>
         <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-18" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=0;whiteSpace=wrap;html=1;" value="" vertex="1">
@@ -130,10 +130,10 @@
         <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-25" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=0;whiteSpace=wrap;html=1;" value="&lt;span style=&quot;font-family: &amp;quot;Hack Nerd Font Mono&amp;quot;;&quot;&gt;QST DE WA1W QST DE WA1W QST DE WA1W 15 WPM TEST&lt;/span&gt;" vertex="1">
           <mxGeometry height="30" width="660" x="210" y="180" as="geometry" />
         </mxCell>
-        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-26" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="FDM IQ" vertex="1">
+        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-26" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontFamily=Hack Nerd Font Mono;" value="FDM IQ" vertex="1">
           <mxGeometry height="30" width="120" x="80" y="180" as="geometry" />
         </mxCell>
-        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-27" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#647687;fontColor=#ffffff;strokeColor=#314354;" value="PASSTROUGH" vertex="1">
+        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-27" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#647687;fontColor=#ffffff;strokeColor=#314354;fontFamily=Hack Nerd Font Mono;" value="PASSTROUGH" vertex="1">
           <mxGeometry height="30" width="120" x="880" y="180" as="geometry" />
         </mxCell>
         <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-28" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=0;whiteSpace=wrap;html=1;textShadow=1;shadow=0;strokeColor=none;fillColor=none;" value="&lt;font face=&quot;Hack Nerd Font Mono&quot; style=&quot;font-size: 10px;&quot;&gt;13900.0 13910.0 13920.0 13930.0 13940.0 ....&amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; &amp;nbsp; 14300.0&lt;/font&gt;" vertex="1">
@@ -160,22 +160,22 @@
         <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-35" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=0;whiteSpace=wrap;html=1;" value="" vertex="1">
           <mxGeometry height="30" width="120" x="880" y="730" as="geometry" />
         </mxCell>
-        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-36" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1ba1e2;fontColor=#ffffff;strokeColor=none;" value="&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;AUD&lt;/font&gt;" vertex="1">
+        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-36" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1ba1e2;fontColor=#ffffff;strokeColor=none;fontFamily=Hack Nerd Font Mono;" value="&lt;font&gt;AUD&lt;/font&gt;" vertex="1">
           <mxGeometry height="20" width="40" x="90" y="105" as="geometry" />
         </mxCell>
-        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-37" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1ba1e2;fontColor=#ffffff;strokeColor=none;" value="&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;IQ&lt;/font&gt;" vertex="1">
+        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-37" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1ba1e2;fontColor=#ffffff;strokeColor=none;fontFamily=Hack Nerd Font Mono;" value="&lt;font&gt;IQ&lt;/font&gt;" vertex="1">
           <mxGeometry height="20" width="40" x="140" y="105" as="geometry" />
         </mxCell>
-        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-38" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1ba1e2;fontColor=#ffffff;strokeColor=none;" value="&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;FDM&lt;/font&gt;" vertex="1">
+        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-38" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1ba1e2;fontColor=#ffffff;strokeColor=none;fontFamily=Hack Nerd Font Mono;" value="&lt;font&gt;FDM&lt;/font&gt;" vertex="1">
           <mxGeometry height="20" width="40" x="90" y="145" as="geometry" />
         </mxCell>
-        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-39" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1ba1e2;fontColor=#ffffff;strokeColor=none;" value="&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;HRF&lt;/font&gt;" vertex="1">
+        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-39" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1ba1e2;fontColor=#ffffff;strokeColor=none;fontFamily=Hack Nerd Font Mono;" value="&lt;font&gt;HRF&lt;/font&gt;" vertex="1">
           <mxGeometry height="20" width="40" x="140" y="145" as="geometry" />
         </mxCell>
-        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-40" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#60a917;fontColor=#ffffff;strokeColor=#2D7600;" value="&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;RX&lt;/font&gt;" vertex="1">
+        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-40" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#60a917;fontColor=#ffffff;strokeColor=#2D7600;fontFamily=Hack Nerd Font Mono;" value="&lt;font&gt;RX&lt;/font&gt;" vertex="1">
           <mxGeometry height="20" width="30" x="890" y="105" as="geometry" />
         </mxCell>
-        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-41" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#60a917;fontColor=#ffffff;strokeColor=#2D7600;" value="&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;-102 dBm&lt;/font&gt;" vertex="1">
+        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-41" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#60a917;fontColor=#ffffff;strokeColor=#2D7600;fontFamily=Hack Nerd Font Mono;" value="&lt;font&gt;-102 dBm&lt;/font&gt;" vertex="1">
           <mxGeometry height="20" width="60" x="930" y="105" as="geometry" />
         </mxCell>
         <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-42" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=0;whiteSpace=wrap;html=1;strokeColor=none;" value="&lt;font face=&quot;Hack Nerd Font Mono&quot; style=&quot;font-size: 14px;&quot;&gt;SNR&amp;nbsp;&lt;i style=&quot;color: rgb(0, 0, 0);&quot;&gt;&lt;font style=&quot;&quot;&gt; 21 dB&lt;/font&gt;&lt;/i&gt;&lt;/font&gt;" vertex="1">
@@ -241,32 +241,32 @@
         <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-65" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" value="&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;PSK&lt;/font&gt;" vertex="1">
           <mxGeometry height="20" width="40" x="345" y="735" as="geometry" />
         </mxCell>
-        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-66" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="SRC" vertex="1">
+        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-66" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontFamily=Hack Nerd Font Mono;fontStyle=2" value="SRC" vertex="1">
           <mxGeometry height="20" width="40" x="90" y="655" as="geometry" />
         </mxCell>
-        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-67" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="DEV" vertex="1">
+        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-67" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontFamily=Hack Nerd Font Mono;fontStyle=2" value="DEV" vertex="1">
           <mxGeometry height="20" width="40" x="150" y="655" as="geometry" />
         </mxCell>
-        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-68" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="NB" vertex="1">
+        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-68" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontFamily=Hack Nerd Font Mono;fontStyle=2" value="NB" vertex="1">
           <mxGeometry height="20" width="40" x="90" y="695" as="geometry" />
         </mxCell>
-        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-69" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="APF" vertex="1">
+        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-69" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontFamily=Hack Nerd Font Mono;fontStyle=2" value="APF" vertex="1">
           <mxGeometry height="20" width="40" x="150" y="695" as="geometry" />
         </mxCell>
-        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-70" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="DNR" vertex="1">
+        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-70" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontFamily=Hack Nerd Font Mono;fontStyle=2" value="DNR" vertex="1">
           <mxGeometry height="20" width="40" x="90" y="735" as="geometry" />
         </mxCell>
-        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-71" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="DNF" vertex="1">
+        <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-71" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontFamily=Hack Nerd Font Mono;fontStyle=2" value="DNF" vertex="1">
           <mxGeometry height="20" width="40" x="150" y="735" as="geometry" />
         </mxCell>
         <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-72" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;&lt;i&gt;f&amp;nbsp;&lt;/i&gt;14200000&lt;sup&gt;Hz&lt;/sup&gt;&lt;/font&gt;" vertex="1">
-          <mxGeometry height="20" width="100" x="317.5" y="655" as="geometry" />
+          <mxGeometry height="20" width="100" x="370" y="655" as="geometry" />
         </mxCell>
         <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-73" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;&lt;i&gt;bw 150&lt;/i&gt;&lt;sup&gt;Hz&lt;/sup&gt;&lt;/font&gt;" vertex="1">
-          <mxGeometry height="20" width="100" x="432.5" y="655" as="geometry" />
+          <mxGeometry height="20" width="100" x="480" y="655" as="geometry" />
         </mxCell>
         <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-74" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;&lt;i&gt;rit&lt;/i&gt; +10&lt;sup&gt;Hz&lt;/sup&gt;&lt;/font&gt;" vertex="1">
-          <mxGeometry height="20" width="100" x="547.5" y="655" as="geometry" />
+          <mxGeometry height="20" width="100" x="590" y="655" as="geometry" />
         </mxCell>
         <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-75" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" value="&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;FAX&lt;/font&gt;" vertex="1">
           <mxGeometry height="20" width="40" x="495" y="735" as="geometry" />
@@ -284,7 +284,7 @@
           <mxGeometry height="20" width="100" x="675" y="145" as="geometry" />
         </mxCell>
         <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-85" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;&lt;i&gt;IF&lt;/i&gt;&amp;nbsp;+30&lt;sup&gt;Hz&lt;/sup&gt;&lt;/font&gt;" vertex="1">
-          <mxGeometry height="20" width="100" x="662.5" y="655" as="geometry" />
+          <mxGeometry height="20" width="100" x="700" y="655" as="geometry" />
         </mxCell>
         <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-86" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;&lt;i&gt;WSJT-X&lt;/i&gt;&lt;/font&gt;" vertex="1">
           <mxGeometry height="20" width="100" x="890" y="655" as="geometry" />
@@ -294,6 +294,46 @@
         </mxCell>
         <mxCell id="0wKOZBQ_Xu9AqJRyZiA2-88" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="&lt;font face=&quot;Hack Nerd Font Mono&quot;&gt;&lt;i&gt;REC &lt;font style=&quot;color: rgb(255, 0, 0);&quot;&gt;&lt;/font&gt;&amp;nbsp;&lt;/i&gt;&lt;/font&gt;" vertex="1">
           <mxGeometry height="20" width="100" x="890" y="695" as="geometry" />
+        </mxCell>
+        <mxCell id="ub3g2TapDKaaLMUc1jL--18" parent="0wKOZBQ_Xu9AqJRyZiA2-10" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="&lt;i style=&quot;font-family: &amp;quot;Hack Nerd Font Mono&amp;quot;;&quot;&gt;agc 4&lt;/i&gt;&lt;sup style=&quot;font-family: &amp;quot;Hack Nerd Font Mono&amp;quot;;&quot;&gt;fast&lt;/sup&gt;" vertex="1">
+          <mxGeometry height="20" width="100" x="260" y="655" as="geometry" />
+        </mxCell>
+        <mxCell id="ub3g2TapDKaaLMUc1jL--1" parent="0" value="UI-Details" />
+        <mxCell id="ub3g2TapDKaaLMUc1jL--3" parent="ub3g2TapDKaaLMUc1jL--1" style="line;strokeWidth=2;direction=south;html=1;" value="" vertex="1">
+          <mxGeometry height="740" width="10" x="70" y="50" as="geometry" />
+        </mxCell>
+        <mxCell id="ub3g2TapDKaaLMUc1jL--4" parent="ub3g2TapDKaaLMUc1jL--1" style="line;strokeWidth=2;direction=south;html=1;" value="" vertex="1">
+          <mxGeometry height="740" width="10" x="200" y="50" as="geometry" />
+        </mxCell>
+        <mxCell id="ub3g2TapDKaaLMUc1jL--5" parent="ub3g2TapDKaaLMUc1jL--1" style="line;strokeWidth=2;direction=south;html=1;" value="" vertex="1">
+          <mxGeometry height="740" width="10" x="870" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="ub3g2TapDKaaLMUc1jL--6" parent="ub3g2TapDKaaLMUc1jL--1" style="line;strokeWidth=2;direction=south;html=1;" value="" vertex="1">
+          <mxGeometry height="740" width="10" x="1000" y="55" as="geometry" />
+        </mxCell>
+        <mxCell id="ub3g2TapDKaaLMUc1jL--8" parent="ub3g2TapDKaaLMUc1jL--1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;fontFamily=Hack Mono;" value="column&lt;div&gt;width_X0&lt;/div&gt;" vertex="1">
+          <mxGeometry height="30" width="60" x="90" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="ub3g2TapDKaaLMUc1jL--9" parent="ub3g2TapDKaaLMUc1jL--1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;fontFamily=Hack Mono;" value="column&lt;div&gt;width_X0&lt;/div&gt;" vertex="1">
+          <mxGeometry height="30" width="60" x="910" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="ub3g2TapDKaaLMUc1jL--12" parent="ub3g2TapDKaaLMUc1jL--1" style="line;strokeWidth=2;html=1;" value="" vertex="1">
+          <mxGeometry height="10" width="1030" x="30" y="90" as="geometry" />
+        </mxCell>
+        <mxCell id="ub3g2TapDKaaLMUc1jL--13" parent="ub3g2TapDKaaLMUc1jL--1" style="line;strokeWidth=2;html=1;" value="" vertex="1">
+          <mxGeometry height="10" width="1030" x="30" y="210" as="geometry" />
+        </mxCell>
+        <mxCell id="ub3g2TapDKaaLMUc1jL--14" parent="ub3g2TapDKaaLMUc1jL--1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;fontFamily=Hack Mono;" value="row height&lt;div&gt;line_3&lt;/div&gt;" vertex="1">
+          <mxGeometry height="30" width="60" y="130" as="geometry" />
+        </mxCell>
+        <mxCell id="ub3g2TapDKaaLMUc1jL--15" parent="ub3g2TapDKaaLMUc1jL--1" style="line;strokeWidth=2;html=1;" value="" vertex="1">
+          <mxGeometry height="10" width="1030" x="35" y="640" as="geometry" />
+        </mxCell>
+        <mxCell id="ub3g2TapDKaaLMUc1jL--16" parent="ub3g2TapDKaaLMUc1jL--1" style="line;strokeWidth=2;html=1;" value="" vertex="1">
+          <mxGeometry height="10" width="1030" x="35" y="760" as="geometry" />
+        </mxCell>
+        <mxCell id="ub3g2TapDKaaLMUc1jL--17" parent="ub3g2TapDKaaLMUc1jL--1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;fontFamily=Hack Mono;" value="row height&lt;div&gt;line_3&lt;/div&gt;" vertex="1">
+          <mxGeometry height="30" width="60" y="680" as="geometry" />
         </mxCell>
       </root>
     </mxGraphModel>

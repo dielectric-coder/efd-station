@@ -93,7 +93,7 @@ impl Waterfall {
         let pending: Arc<Mutex<Vec<Vec<f32>>>> = Arc::new(Mutex::new(Vec::new()));
 
         let gl_area = GLArea::new();
-        gl_area.set_size_request(-1, 300);
+        gl_area.set_size_request(-1, 200);
         gl_area.set_auto_render(false);
         gl_area.set_allowed_apis(gdk::GLAPI::GLES);
 
