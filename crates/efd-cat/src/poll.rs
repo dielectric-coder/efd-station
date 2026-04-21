@@ -6,7 +6,7 @@ use efd_proto::{AgcMode, CatCommand, RadioState};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::discover;
 use crate::error::CatError;
@@ -246,22 +246,29 @@ fn poll_radio_state(
         .ok()
         .and_then(|r| parse::parse_nb_response(&r))
         .unwrap_or(false);
-    // AGC state needs two reads on the FDM-DUO: GC; picks auto vs
-    // manual gain, GS; carries the speed (when auto) or manual gain
-    // value. We ignore the manual-gain value here — it maps to
-    // AgcMode::Off in `gs_to_agc_mode`. Kenwood's `GT;` is documented
-    // as compatibility-only on this radio and always returns "000",
-    // so it can't drive real AGC state.
+    // AGC state needs two reads on the FDM-DUO:
+    //   - `GC;` returns `GC0;` (auto/AGC) or `GC1;` (manual gain).
+    //   - `GSP1;` with P1 matching the current mode returns the
+    //     active setting. When `GC0;`, we poll `GS0;` for the AGC
+    //     speed (slow/medium/fast). When `GC1;`, we poll `GS1;` for
+    //     the manual-gain value; the value itself isn't surfaced
+    //     through `AgcMode`, but the query keeps the radio's input
+    //     state consistent with what the UI knows.
+    //
+    // Kenwood's `GT;` is a compatibility-only command on this radio
+    // per manual §6.3.3 — it echoes hardcoded data regardless of real
+    // AGC state, so we don't use it.
     let gc_auto = port
         .command("GC;")
         .ok()
         .and_then(|r| parse::parse_gc_response(&r));
+    let gs_query = if gc_auto == Some(false) { "GS1;" } else { "GS0;" };
     let gs = port
-        .command("GS;")
+        .command(gs_query)
         .ok()
         .and_then(|r| parse::parse_gs_response(&r));
     let agc = match (gc_auto, gs) {
-        (Some(auto), Some((_, p2))) => parse::gs_to_agc_mode(auto, p2),
+        (Some(true), Some((_, p2))) => parse::gs_to_agc_mode(true, p2),
         (Some(false), _) => AgcMode::Off,
         _ => AgcMode::Slow,
     };
@@ -343,7 +350,20 @@ fn run_commands(
             }
             match p.command(&cmd.raw) {
                 Ok(resp) => {
-                    debug!(cmd = %cmd.raw, response = %resp, "CAT command");
+                    // AGC-plane commands (GC/GS/TH) get promoted to
+                    // info while we're stabilising the new path — it
+                    // lets the operator see exactly what the radio
+                    // echoes back without flipping the whole crate
+                    // to debug. Revert to plain debug once it's
+                    // confirmed stable on the bench.
+                    if cmd.raw.starts_with("GC")
+                        || cmd.raw.starts_with("GS")
+                        || cmd.raw.starts_with("TH")
+                    {
+                        info!(cmd = %cmd.raw, response = %resp, "CAT agc");
+                    } else {
+                        debug!(cmd = %cmd.raw, response = %resp, "CAT command");
+                    }
                 }
                 Err(e) => {
                     warn!(cmd = %cmd.raw, "CAT command error: {e}");

@@ -4,6 +4,20 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Fixed (server 0.10.10 — GS poll needed P1)
+- Manual §6.3.2 shows `GS` Read format as `GS<P1>;` — a bare `GS;`
+  is invalid and the radio doesn't return a parseable answer. The
+  0.10.9 poll path was sending `GS;`, so `parse_gs_response` always
+  failed and the server fell through to `AgcMode::Slow` regardless
+  of reality. The tile label never matched the radio, which looked
+  like "GC/GS don't work" even if the Set commands themselves took.
+- Poll now reads `GC;` first, then `GS0;` (auto) or `GS1;` (manual)
+  depending on `GC`'s answer.
+- Temporary diagnostic: AGC-plane CAT commands (`GC`/`GS`/`TH`) are
+  logged at `info` level with their radio response, so the wire
+  exchange is visible in the journal without flipping the whole
+  crate to debug. Dropped back to debug once confirmed stable.
+
 ### Fixed (server 0.10.9 / client 0.8.5 — use native GC/GS for AGC)
 - **AGC speed never reached the radio.** The previous implementation
   emitted `GTnnn;` (Kenwood-compat), but §6.3.3 of the FDM-DUO manual
