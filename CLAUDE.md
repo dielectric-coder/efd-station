@@ -195,15 +195,23 @@ Exact port numbers and defaults TBD in config.
 
 ### efd-proto
 - Shared serde types for all WebSocket messages.
+- Also hosts `filters` — the canonical FDM-DUO filter tables + helpers
+  (`filters_for_mode`, `filter_label`, `kenwood_mode_char`). Server
+  parser (`efd-cat`) and client BW editor both read from here.
 - **Server → client (downstream)**:
   - `FftBins` — magnitude bin array + metadata (center freq, span, ref level)
   - `AudioChunk` — encoded audio (Opus wideband 48 kHz)
-  - `RadioState` — frequency, mode, BW, ATT, LP, AGC, NR, NB, S-meter, RX/TX
-  - `Capabilities` — per-source: has_iq, has_tx, has_hardware_cat, has_usb_audio, supported_demod_modes, etc.
+  - `RadioState` — frequency, mode, BW, filter_idx (raw RF P2), ATT, LP, AGC, NR, NB, S-meter, RX/TX
+  - `Capabilities` — per-source: has_iq, has_tx, has_hardware_cat, has_usb_audio, supported_demod_modes, plus `control_target: ControlTarget` (see below)
   - `DecodedText` — output from audio-domain decoders (WEFAX/RTTY/CW/PSK)
   - `Error`
+- **`ControlTarget`** — server-computed enum (`None | Radio | Demod | DemodMirrorFreq`) that is the single source of truth for where client CAT controls land. Client greys widgets on `None`; server's WS upstream routes `CatCommand`s based on it:
+  - `Radio` → all CAT to FDM-DUO serial (AUD + FDM-DUO).
+  - `DemodMirrorFreq` → only freq (FA/FB) to radio; existing tuning forwarder propagates to demod (IQ + FDM-DUO).
+  - `Demod` → drop (non-FDM-DUO IQ; SDR direct-tune plumbing TBD).
+  - `None` → drop everything (AUD + non-FDM-DUO).
 - **Client → server (upstream)**:
-  - `CatCommand` — frequency set, mode, BW, ATT, LP, AGC, NR, NB, RIT, XIT, etc.
+  - `CatCommand` — frequency set, mode, BW (RF), ATT, LP, AGC (GC/GS/TH), NR, NB, RIT, XIT, etc.
   - `TxAudio` — encoded TX audio chunk
   - `Ptt` — PTT on/off
 
@@ -391,7 +399,7 @@ For inverted-spectrum broadcasts (one bundled sample is labeled
 - [ ] Default TCP port numbers for the two rigctld-compatible responders (FDM-DUO front and demod front)
 - [ ] Exact subset of rigctld protocol commands our responder must support on day one (driven by WSJT-X/FLDIGI needs first)
 - [ ] Mapping table: rigctld command subset ↔ FDM-DUO native CAT commands (for responder port A)
-- [ ] Capability-flag schema in `efd-proto::Capabilities`
+- [x] ~~Capability-flag schema in `efd-proto::Capabilities`~~ — resolved: `control_target: ControlTarget` carries the routing policy; individual `has_*` flags stay for finer-grained UI decisions.
 
 ---
 

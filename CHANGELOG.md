@@ -4,6 +4,13 @@ All notable changes to efd-station are documented in this file.
 
 ## [Unreleased]
 
+### Chore (server 0.11.1 — drop AGC wire-level diag logs)
+- GC/GS/TH CAT exchange logs reverted from `info` to the default
+  `debug` now that the new AGC path is confirmed working end-to-end.
+  Poll-path AGC reads likewise quieted. CLAUDE.md + memory updated
+  to reflect the ControlTarget routing contract and the FDM-DUO CAT
+  quirks (GT compat-only, GS P2 = 3 digits).
+
 ### Added (server 0.11.0 / client 0.9.0 — BW editor dialog)
 - Clicking the `bw` chip tile opens a modal dialog with a dropdown
   of the filter options for the current mode (manual §6.3.2 p.57),

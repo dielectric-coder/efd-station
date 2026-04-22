@@ -6,7 +6,7 @@ use efd_proto::{AgcMode, CatCommand, RadioState};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use crate::discover;
 use crate::error::CatError;
@@ -262,17 +262,15 @@ fn poll_radio_state(
     // Kenwood's `GT;` is a compatibility-only command on this radio
     // per manual §6.3.3 — it echoes hardcoded data regardless of real
     // AGC state, so we don't use it.
-    // Raw reads go through explicit info! calls during diagnosis —
-    // `SerialPort::command()` only logs at debug, and we want the
-    // radio's actual reply visible in the journal so we can tell
-    // whether GC/GS writes are being honoured.
-    let gc_raw = port.command("GC;").unwrap_or_default();
-    info!(cmd = "GC;", response = %gc_raw, "CAT agc poll");
-    let gc_auto = parse::parse_gc_response(&gc_raw);
+    let gc_auto = port
+        .command("GC;")
+        .ok()
+        .and_then(|r| parse::parse_gc_response(&r));
     let gs_query = if gc_auto == Some(false) { "GS1;" } else { "GS0;" };
-    let gs_raw = port.command(gs_query).unwrap_or_default();
-    info!(cmd = %gs_query, response = %gs_raw, "CAT agc poll");
-    let gs = parse::parse_gs_response(&gs_raw);
+    let gs = port
+        .command(gs_query)
+        .ok()
+        .and_then(|r| parse::parse_gs_response(&r));
     let agc = match (gc_auto, gs) {
         (Some(true), Some((_, p2))) => parse::gs_to_agc_mode(true, p2),
         (Some(false), _) => AgcMode::Off,
@@ -357,20 +355,7 @@ fn run_commands(
             }
             match p.command(&cmd.raw) {
                 Ok(resp) => {
-                    // AGC-plane commands (GC/GS/TH) get promoted to
-                    // info while we're stabilising the new path — it
-                    // lets the operator see exactly what the radio
-                    // echoes back without flipping the whole crate
-                    // to debug. Revert to plain debug once it's
-                    // confirmed stable on the bench.
-                    if cmd.raw.starts_with("GC")
-                        || cmd.raw.starts_with("GS")
-                        || cmd.raw.starts_with("TH")
-                    {
-                        info!(cmd = %cmd.raw, response = %resp, "CAT agc");
-                    } else {
-                        debug!(cmd = %cmd.raw, response = %resp, "CAT command");
-                    }
+                    debug!(cmd = %cmd.raw, response = %resp, "CAT command");
                 }
                 Err(e) => {
                     warn!(cmd = %cmd.raw, "CAT command error: {e}");
